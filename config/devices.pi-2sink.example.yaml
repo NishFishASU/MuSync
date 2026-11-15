@@ -1,37 +1,48 @@
-# Minimal Pi demo — TWO BT600 ↔ speaker pairs + optional SPP phone sink.
-# Copy to devices.yaml and replace MACs after pairing:
-#   cp config/devices.pi-2sink.example.yaml config/devices.yaml
+# Minimal Pi demo — Qudelix (or any A2DP) on BT600 + Phone SPP TCP sink.
 #
-# Scale later by appending sink-3..sink-6 (max 6 BT). Keep ids/mac/hci unique.
-# See docs/spp-network-sink.md for Simple Protocol Player TCP setup.
+# REQUIRED before Play hits real hardware:
+#   cp config/devices.pi-2sink.example.yaml config/devices.yaml
+#   # replace REPLACE_WITH_QUDELIX_MAC below (bluetoothctl devices / pair_bt600.sh)
+#   export MUSYNC_DEVICES_CONFIG="$PWD/config/devices.yaml"
+#   export MUSYNC_BACKEND=pipewire
+#   ./scripts/run_pi.sh
+#
+# Placeholder MACs (AA:BB:… or REPLACE_…) show as MISSING in the UI and will
+# never map to bluez. Keep spp-1 enabled for Simple Protocol Player.
+# See docs/spp-network-sink.md and docs/pi-pipewire.md.
 version: 1
 max_sinks: 6
 max_spp_sinks: 4
 devices:
+  # Primary BT speaker (Qudelix 5K, etc.) — one ASUS BT600 on hci0
   - id: sink-1
-    name: Speaker A
-    mac: "AA:BB:CC:DD:EE:01"   # bluetoothctl replace with real MAC
-    hci: hci0                  # first BT600 adapter
+    name: Qudelix
+    mac: "REPLACE_WITH_QUDELIX_MAC"   # e.g. "A0:B1:C2:D3:E4:F5" from bluetoothctl
+    hci: hci0
     connected: false
     delay_ms: 0
     volume: 0.85
     mute: false
     enabled: true
-    pw_node: ""                # optional WirePlumber node id override after connect
+    pw_node: ""
+
+  # Optional second BT600 speaker — disable if you only have Qudelix
   - id: sink-2
     name: Speaker B
-    mac: "AA:BB:CC:DD:EE:02"
-    hci: hci1                  # second BT600 adapter
+    mac: "REPLACE_WITH_SPEAKER_B_MAC"
+    hci: hci1
     connected: false
     delay_ms: 40
     volume: 0.85
     mute: false
-    enabled: true
+    enabled: false
     pw_node: ""
+
+  # Simple Protocol Player on phone — ffmpeg listens on Pi :1234 (48000 mono s16le)
   - id: spp-1
     name: Phone SPP
     kind: network_spp
-    connected: true
+    connected: false
     delay_ms: 0
     volume: 0.9
     mute: false

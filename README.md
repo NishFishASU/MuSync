@@ -128,41 +128,61 @@ pip install -r requirements.txt
 ./scripts/build_web.sh   # or rsync a laptop-built web/build/
 ```
 
-### 2. Seed a 2-sink profile
+### 2. Seed Qudelix + SPP profile (required)
+
+If the UI shows **Speaker A/B** with fake `AA:BB:…` **MISSING** and no **Phone SPP**, you are still on placeholders (or an old `devices.yaml` without `network_spp`). Reset and edit:
 
 ```bash
+cd /path/to/MuSync
 cp config/devices.pi-2sink.example.yaml config/devices.yaml
+
+# Find the Qudelix MAC (after pairing):
+bluetoothctl devices
+# or: ./scripts/pair_bt600.sh hci0
+
+nano config/devices.yaml
+# sink-1 (Qudelix):  mac: "A0:B1:C2:D3:E4:F5"   # real MAC — not AA:BB / REPLACE_
+# sink-1:             enabled: true
+# spp-1:              kind: network_spp
+# spp-1:              enabled: true
+# spp-1:              listen_port: 1234
+# (optional) sink-2:  enabled: false until you have a second BT600 speaker
 ```
 
-`run_pi.sh` will also auto-seed this file if `devices.yaml` is missing.
-
-### 3. Pair two BT600 ↔ speaker pairs
-
-Plug **two** ASUS BT600 adapters (they should show up as `hci0` and `hci1`):
+Point the process at that file (default path is the same if you launch from the repo):
 
 ```bash
-./scripts/pair_bt600.sh hci0    # scan, enter speaker A MAC
-./scripts/pair_bt600.sh hci1    # speaker B
+export MUSYNC_DEVICES_CONFIG="$PWD/config/devices.yaml"
+export MUSYNC_BACKEND=pipewire
 ```
 
-Edit `config/devices.yaml` with the real MACs (and names). Keep `enabled: true` on both.
+`run_pi.sh` auto-seeds only when `devices.yaml` is **missing**; it will **warn** if placeholders remain.
 
-Confirm sinks:
+### 3. Pair BT600 ↔ Qudelix
+
+```bash
+./scripts/pair_bt600.sh hci0    # enter Qudelix MAC when prompted
+# optional second dongle:
+# ./scripts/pair_bt600.sh hci1
+```
+
+Confirm bluez sinks:
 
 ```bash
 wpctl status | sed -n '/Sinks:/,/Sources:/p'
-# look for bluez_output.AA_BB_…
+# look for bluez_output.<MAC_WITH_UNDERSCORES>
 ```
 
-### 4. Media + launch
+### 4. Media + launch (restart after editing yaml)
 
 ```bash
 cp /path/to/track.flac media/
+# stop any old MuSync/ffmpeg listen on :1234 first
 ./scripts/run_pi.sh
 # UI: http://<pi-lan-ip>:8080
 ```
 
-In the UI: select both sinks, set relative `delay_ms` until slap-back disappears, Play.
+In the UI: **Qudelix** + **Phone SPP** should both list; enable them, Play a hub-local track. On the phone open Simple Protocol Player → Pi IP:`1234`, 48000 Hz mono s16le.
 
 Graph details and manual `pactl`/`wpctl` commands: [docs/pi-pipewire.md](docs/pi-pipewire.md).
 

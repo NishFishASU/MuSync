@@ -23,9 +23,22 @@ In SPP on the phone:
 
 ## MuSync integration
 
-1. Add (or enable) a device with `kind: network_spp` in `config/devices.yaml` — mock defaults include `spp-1` on port `1234`.
+1. Seed from the Pi example (includes `spp-1` already):
+
+```bash
+cp config/devices.pi-2sink.example.yaml config/devices.yaml
+# edit Qudelix MAC; leave spp-1 enabled:
+#   kind: network_spp
+#   listen_port: 1234
+#   sample_rate: 48000
+#   channels: 1
+export MUSYNC_DEVICES_CONFIG="$PWD/config/devices.yaml"
+export MUSYNC_BACKEND=pipewire
+```
+
+   Mock cloud defaults also include `spp-1` on port `1234` when no yaml exists.
 2. Set `delay_ms` / `volume` like any other sink in the web UI.
-3. With `MUSYNC_BACKEND=pipewire`, MuSync starts:
+3. With `MUSYNC_BACKEND=pipewire`, MuSync starts (while `spp-1` is **enabled** — not only on Play):
 
 ```text
 ffmpeg -f pulse -i musync_feeder.monitor -af "adelay=…,volume=…" \
@@ -38,12 +51,15 @@ Bluez loopbacks for Qudelix / BT600 sinks are unchanged — SPP is an extra fan-
 ## Pi + Qudelix + SPP phone
 
 ```bash
-# devices.yaml: at least one bluetooth sink (Qudelix) + spp-1
+cp config/devices.pi-2sink.example.yaml config/devices.yaml
+nano config/devices.yaml   # real Qudelix MAC; spp-1 enabled: true
+export MUSYNC_DEVICES_CONFIG="$PWD/config/devices.yaml"
 export MUSYNC_BACKEND=pipewire
-./scripts/run_pi.sh   # or: PYTHONPATH=backend python3 -m musync
+# stop manual ffmpeg listen / old MuSync if any
+./scripts/run_pi.sh
 
-# UI: enable Qudelix + Phone SPP, set relative delays, Play a local track
-# Phone: open SPP → Pi IP:1234 → 48000 mono
+# UI: enable Qudelix + Phone SPP, Play a hub-local track
+# Phone: open SPP → Pi LAN/Tailscale IP:1234 → 48000 mono s16le
 ```
 
 Notes:

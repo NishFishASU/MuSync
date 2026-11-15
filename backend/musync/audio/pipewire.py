@@ -753,6 +753,24 @@ class PipeWireBackend(AudioBackend):
             tools = ", ".join(
                 f"{k}={'yes' if v else 'no'}" for k, v in self._tools.items()
             )
+            placeholders = [
+                d.id
+                for d in devices
+                if d.kind == DeviceKind.BLUETOOTH
+                and (
+                    d.mac.upper().startswith("AA:BB:CC:DD:EE:")
+                    or "REPLACE" in d.mac.upper()
+                )
+            ]
+            spp_n = sum(1 for d in devices if d.kind == DeviceKind.NETWORK_SPP)
+            hint = ""
+            if placeholders:
+                hint += (
+                    f"; PLACEHOLDER_MACS={','.join(placeholders)} "
+                    "(edit config/devices.yaml — see devices.pi-2sink.example.yaml)"
+                )
+            if spp_n == 0:
+                hint += "; NO_SPP_SINK (add kind: network_spp spp-1)"
             return Health(
                 ok=True,
                 backend="pipewire",
@@ -764,6 +782,6 @@ class PipeWireBackend(AudioBackend):
                 graph_dry_run=dry,
                 detail=(
                     f"{detail}; mapped={mapped}/{len(devices)}; "
-                    f"planned_links={links}; dry_run={dry}; tools: {tools}"
+                    f"planned_links={links}; dry_run={dry}; tools: {tools}{hint}"
                 ),
             )

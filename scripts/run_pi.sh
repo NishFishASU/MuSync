@@ -41,20 +41,37 @@ fi
 
 if [[ ! -f "$MUSYNC_DEVICES_CONFIG" ]]; then
   echo
-  echo "No devices.yaml yet — seeding a 2-sink Pi demo profile."
-  echo "Edit MACs after pairing (./scripts/pair_bt600.sh hci0)."
+  echo "No devices.yaml yet — seeding Qudelix + SPP profile from"
+  echo "  config/devices.pi-2sink.example.yaml"
+  echo "You MUST replace REPLACE_WITH_* MACs before BT sinks leave MISSING."
   cp "$ROOT/config/devices.pi-2sink.example.yaml" "$MUSYNC_DEVICES_CONFIG"
 fi
 
+# Loud warnings when still on placeholders / missing SPP (common “UI shows AA:BB MISSING”).
+if grep -Eqi 'AA:BB:CC:DD:EE:|REPLACE_WITH_' "$MUSYNC_DEVICES_CONFIG" 2>/dev/null; then
+  echo
+  echo "WARNING: $MUSYNC_DEVICES_CONFIG still has placeholder MACs."
+  echo "  UI will show MISSING and Play will not reach Qudelix/bluez."
+  echo "  Fix:"
+  echo "    bluetoothctl devices          # find Qudelix MAC"
+  echo "    nano $MUSYNC_DEVICES_CONFIG   # set mac: \"A0:..\" on sink-1 (Qudelix)"
+  echo "    # keep spp-1 kind: network_spp enabled: true"
+fi
+if ! grep -Eq 'kind:[[:space:]]*network_spp' "$MUSYNC_DEVICES_CONFIG" 2>/dev/null; then
+  echo
+  echo "WARNING: no network_spp sink in $MUSYNC_DEVICES_CONFIG — Phone SPP will not appear."
+  echo "  Re-seed or append spp-1 from config/devices.pi-2sink.example.yaml"
+fi
+
 missing=0
-for cmd in wpctl pactl bluetoothctl; do
+for cmd in wpctl pactl bluetoothctl ffmpeg; do
   if ! command -v "$cmd" >/dev/null 2>&1; then
     echo "  warn: $cmd not found"
     missing=1
   fi
 done
 if [[ "$missing" -eq 1 ]]; then
-  echo "  Install: sudo apt install -y pipewire wireplumber pulseaudio-utils bluez mpv"
+  echo "  Install: sudo apt install -y pipewire wireplumber pipewire-pulse pulseaudio-utils bluez mpv ffmpeg"
   echo "  Continuing — backend will dry-run the graph if PipeWire is down."
 fi
 
@@ -62,6 +79,8 @@ if command -v bluetoothctl >/dev/null 2>&1; then
   echo
   echo "Bluetooth adapters:"
   bluetoothctl list 2>/dev/null || echo "  (none)"
+  echo "Paired devices:"
+  bluetoothctl devices 2>/dev/null || echo "  (none)"
 fi
 
 if command -v wpctl >/dev/null 2>&1; then
@@ -71,14 +90,14 @@ if command -v wpctl >/dev/null 2>&1; then
 fi
 
 echo
-echo "First-time 2-speaker checklist:"
-echo "  1) Plug 2× BT600 (hci0, hci1) — powered hub recommended later for 4–6"
-echo "  2) ./scripts/pair_bt600.sh hci0"
-echo "  3) ./scripts/pair_bt600.sh hci1"
-echo "  4) Put real MACs into $MUSYNC_DEVICES_CONFIG"
-echo "  5) Drop a WAV/FLAC/MP3 into $MUSYNC_MEDIA_DIR"
-echo "  6) Ensure UI built: ./scripts/build_web.sh  (or rsync web/build/)"
-echo "  7) Open http://<pi-lan-ip>:${MUSYNC_PORT} — enable both sinks, set delays, Play"
+echo "Qudelix + SPP checklist:"
+echo "  1) export MUSYNC_DEVICES_CONFIG=$MUSYNC_DEVICES_CONFIG"
+echo "  2) export MUSYNC_BACKEND=pipewire"
+echo "  3) Pair: ./scripts/pair_bt600.sh hci0   # or bluetoothctl"
+echo "  4) Edit devices.yaml: Qudelix mac + spp-1 enabled (kind: network_spp, port 1234)"
+echo "  5) Media in $MUSYNC_MEDIA_DIR ; UI: ./scripts/build_web.sh if needed"
+echo "  6) Restart this script; UI → enable Qudelix + Phone SPP → Play"
+echo "  7) Phone SPP app → Pi LAN/Tailscale IP:1234, 48000 Hz mono s16le"
 echo
 
 exec python3 -m musync

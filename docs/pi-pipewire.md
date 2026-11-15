@@ -33,21 +33,30 @@ mpv --ao=pipewire --audio-device=musync_feeder
 
 Force plan-only: `MUSYNC_PW_DRY_RUN=1`.
 
-## Bring-up: 2 speakers first
+## Bring-up: Qudelix + Phone SPP first
 
-1. Install packages (see README).
-2. Build the SvelteKit UI FastAPI serves: `./scripts/build_web.sh` → `web/build/`  
-   (or copy a laptop-built `web/build/` onto the Pi — Node is not required at runtime).
-3. Stabilize BT600 HCI **before** multi-sink demos — see [bt600-realtek.md](./bt600-realtek.md)  
-   (`0b05:1d70` / RTL8761: firmware, USB2, powered hub, `reg16 -110` disconnect loops).  
-   Onboard BT → Qudelix local playback is a useful software smoke test.
-4. `cp config/devices.pi-2sink.example.yaml config/devices.yaml`
-5. `./scripts/pair_bt600.sh hci0` then `./scripts/pair_bt600.sh hci1`
-6. Write real MACs into `devices.yaml`
-7. `./scripts/run_pi.sh` (auto-builds UI if `web/build/index.html` is missing and npm exists)
-8. UI: enable both sinks, nudge `delay_ms` until slap-back disappears, Play
+Symptom of wrong config: UI shows **Speaker A/B**, `AA:BB:…` **MISSING**, no **Phone SPP** — Play never reaches SPP/Qudelix.
 
-Scale to 4 then 6 by appending sinks (unique `id` / `mac` / `hci`) — same software path.
+```bash
+cd /path/to/MuSync
+cp config/devices.pi-2sink.example.yaml config/devices.yaml
+bluetoothctl devices                    # note Qudelix MAC
+nano config/devices.yaml                # set sink-1 mac; keep spp-1 enabled
+export MUSYNC_DEVICES_CONFIG="$PWD/config/devices.yaml"
+export MUSYNC_BACKEND=pipewire
+./scripts/pair_bt600.sh hci0            # if not already paired
+./scripts/build_web.sh                  # once, or rsync laptop build
+# kill stray: pkill -f 'ffmpeg.*1234' ; pkill -f 'python3 -m musync'
+./scripts/run_pi.sh
+```
+
+1. Install packages (see README) — include `ffmpeg` + `pipewire-pulse` for SPP.
+2. Build UI: `./scripts/build_web.sh` → `web/build/` (gitignored; copy from laptop OK).
+3. Stabilize BT600 HCI — see [bt600-realtek.md](./bt600-realtek.md).
+4. Seed/edit `devices.yaml` as above (**real** Qudelix MAC, `spp-1` `kind: network_spp` `enabled: true`).
+5. UI: enable **Qudelix** + **Phone SPP**, Play hub-local; phone SPP → Pi IP:1234 / 48000 mono. Details: [spp-network-sink.md](./spp-network-sink.md).
+
+Scale to 4 then 6 by appending BT sinks (unique `id` / `mac` / `hci`) — same software path.
 
 ## Manual command cheat-sheet
 
