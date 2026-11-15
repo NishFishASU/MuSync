@@ -78,4 +78,14 @@ wpctl set-volume <ID> 0.8
 wpctl set-mute <ID> 0
 
 mpv --no-video --ao=pipewire --audio-device=musync_feeder ~/MuSync/media/track.flac
+
+# Local video — same path (audio only into feeder; UI can show a muted preview)
+mpv --no-video --ao=pipewire --audio-device=musync_feeder ~/MuSync/media/clip.mp4
 ```
+
+## Local video
+
+Drop `.mp4` / `.mkv` / `.webm` / `.mov` / `.m4v` / `.avi` under `media/` alongside audio.
+The catalog lists them as **Local** with a **Video** chip. Play/pause/seek uses the same
+transport; **mpv `--no-video`** extracts audio into `musync_feeder` so BT/SPP sinks stay in
+sync. Optional muted HTML preview is served from `GET /api/media/<rel-path>`.

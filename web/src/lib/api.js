@@ -6,6 +6,7 @@
 
 /** @typedef {'stopped' | 'playing' | 'paused'} TransportState */
 /** @typedef {'local' | 'spotify' | 'apple' | 'input'} SourceType */
+/** @typedef {'audio' | 'video'} MediaKind */
 /** @typedef {'bt_a2dp' | 'usb' | 'network'} CapturePath */
 /** @typedef {'phone' | 'pc' | 'other'} HostKind */
 
@@ -80,6 +81,7 @@
  * @property {string} [path]
  * @property {string} [locator]
  * @property {string | null} [input_id]
+ * @property {MediaKind} [media_kind]
  */
 
 /**
@@ -127,6 +129,7 @@
  * @property {boolean} available
  * @property {string | null} [note]
  * @property {number | null} [duration_ms]
+ * @property {MediaKind} [media_kind]
  */
 
 /**
@@ -139,6 +142,7 @@
  * @property {SourceType | null} [source_type]
  * @property {string | null} [input_id]
  * @property {string | null} [title]
+ * @property {MediaKind | null} [media_kind]
  */
 
 /**
@@ -527,6 +531,17 @@ export function sourceTypeLabel(type) {
 		default:
 			return type || '—';
 	}
+}
+
+/**
+ * Relative media URL for optional muted video preview (audio still via feeder).
+ * @param {string | null | undefined} sourceId catalog id like `local:clip.mp4`
+ */
+export function mediaPreviewUrl(sourceId) {
+	if (!sourceId || !sourceId.startsWith('local:')) return null;
+	const rel = sourceId.slice('local:'.length);
+	if (!rel || rel.startsWith('demo/')) return null;
+	return `/api/media/${rel.split('/').map(encodeURIComponent).join('/')}`;
 }
 
 /** @param {CapturePath | string | null | undefined} path */

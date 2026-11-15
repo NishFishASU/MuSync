@@ -10,10 +10,12 @@ from musync.config import (
     clamp_volume,
     discover_local_sources,
     load_devices,
+    media_kind_for_path,
     probe_audio_duration_ms,
+    resolve_media_file,
     save_devices,
 )
-from musync.models import Device
+from musync.models import Device, MediaKind
 
 
 def _write_silence_wav(path: Path, *, seconds: float = 1.5, rate: int = 8000) -> None:
@@ -77,10 +79,58 @@ def test_discover_local_sources(monkeypatch, tmp_path: Path) -> None:
     assert len(sources) == 1
     assert sources[0].id.endswith("track_one.wav")
     assert sources[0].available is True
+    assert sources[0].media_kind == MediaKind.AUDIO
     # Real files must not use the 180_000 demo stub.
     assert sources[0].duration_ms is not None
     assert abs(sources[0].duration_ms - 1250) <= 20
     assert sources[0].duration_ms != 180_000
+
+
+def test_discover_local_video_sources(monkeypatch, tmp_path: Path) -> None:
+    media = tmp_path / "media"
+    media.mkdir()
+    wav = media / "song.wav"
+    _write_silence_wav(wav, seconds=0.5)
+    (media / "clip.mp4").write_bytes(b"ftypisomfake")
+    (media / "nested").mkdir()
+    (media / "nested" / "movie.mkv").write_bytes(b"matroska-fake")
+    (media / "ignore.bin").write_bytes(b"nope")
+    monkeypatch.setenv("MUSYNC_MEDIA_DIR", str(media))
+    sources = discover_local_sources()
+    by_id = {s.id: s for s in sources}
+    assert "local:song.wav" in by_id
+    assert "local:clip.mp4" in by_id
+    assert "local:nested/movie.mkv" in by_id
+    assert by_id["local:song.wav"].media_kind == MediaKind.AUDIO
+    assert by_id["local:clip.mp4"].media_kind == MediaKind.VIDEO
+    assert by_id["local:nested/movie.mkv"].media_kind == MediaKind.VIDEO
+    assert by_id["local:clip.mp4"].available is True
+    assert by_id["local:clip.mp4"].note and "feeder" in by_id["local:clip.mp4"].note.lower()
+
+
+def test_media_kind_for_path() -> None:
+    assert media_kind_for_path("a.flac") == MediaKind.AUDIO
+    assert media_kind_for_path("b.MP4") == MediaKind.VIDEO
+    assert media_kind_for_path("/tmp/x.webm") == MediaKind.VIDEO
+
+
+def test_resolve_media_file(monkeypatch, tmp_path: Path) -> None:
+    media = tmp_path / "media"
+    media.mkdir()
+    target = media / "clip.mp4"
+    target.write_bytes(b"fake")
+    monkeypatch.setenv("MUSYNC_MEDIA_DIR", str(media))
+    assert resolve_media_file("clip.mp4") == target.resolve()
+    try:
+        resolve_media_file("../etc/passwd")
+        assert False, "expected ValueError"
+    except ValueError:
+        pass
+    try:
+        resolve_media_file("missing.mp4")
+        assert False, "expected FileNotFoundError"
+    except FileNotFoundError:
+        pass
 
 
 def test_probe_audio_duration_wav(tmp_path: Path) -> None:

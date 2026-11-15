@@ -8,6 +8,7 @@ from pathlib import Path
 from musync.audio.mock import MockAudioBackend
 from musync.models import (
     Device,
+    MediaKind,
     QueueItemCreate,
     QueueItemPatch,
     SourceType,
@@ -148,3 +149,20 @@ def test_transport_duration_matches_probed_file(tmp_path, monkeypatch) -> None:
     transport = backend.set_active_queue_item(local.id)
     assert abs(transport.duration_ms - 500) <= 20
     assert transport.duration_ms != 180_000
+
+
+def test_local_video_plays_into_queue(tmp_path, monkeypatch) -> None:
+    media = tmp_path / "media"
+    media.mkdir(parents=True, exist_ok=True)
+    (media / "demo_clip.mp4").write_bytes(b"fake-mp4")
+    backend = _backend(tmp_path, monkeypatch)
+    video = next(s for s in backend.list_sources() if s.media_kind == MediaKind.VIDEO)
+    assert video.available is True
+    transport = backend.set_active_source(video.id)
+    assert transport.media_kind == MediaKind.VIDEO
+    assert transport.source_type == SourceType.LOCAL
+    playing = backend.set_transport(TransportPut(state=TransportState.PLAYING))
+    assert playing.state == TransportState.PLAYING
+    assert playing.media_kind == MediaKind.VIDEO
+    # Sink graph identity unchanged (mock devices still listed).
+    assert len(backend.list_devices()) >= 1
