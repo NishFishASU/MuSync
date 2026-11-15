@@ -18,17 +18,30 @@ Secrets stay in environment variables / local files. Never commit client secrets
 
 ## Spotify setup (Pi)
 
+### Pi vs laptop mock
+
+| | **Pi** (`MUSYNC_BACKEND=pipewire`) | **Laptop mock** (`MUSYNC_BACKEND=mock`) |
+|--|--|--|
+| Port | **8080** (`run_pi.sh` / systemd) | **8080**, or **8081** if 8080 busy |
+| Connect redirect | **Loopback** `http://127.0.0.1:<port>/api/streaming/spotify/callback` (UI forces this) | Same loopback path |
+| UI host | `musync.local` or Pi IP OK for browsing | `127.0.0.1` |
+| Hub PCM | Needs **librespot** on PATH + Premium | Optional (`MUSYNC_STREAMING_MOCK=1` plays without librespot) |
+
+**Connect Spotify always uses loopback** (`?loopback=1`) so opening the UI via
+`http://musync.local:8080` still authorizes with `127.0.0.1` — matching the laptop mock
+and the Dashboard URI. After Spotify redirects to the Pi’s `127.0.0.1` callback, finish
+OAuth in a browser **on the Pi** (local display / VNC) or via `ssh -L 8080:127.0.0.1:8080`.
+
 ### 1. Spotify Developer app
 
 1. Create an app at [developer.spotify.com/dashboard](https://developer.spotify.com/dashboard).
-2. Add **both** laptop redirect URIs (Spotify allows multiple; must match env for the port you run):
+2. Add **both** loopback redirect URIs (Spotify allows multiple; must match the port you run):
    - `http://127.0.0.1:8080/api/streaming/spotify/callback`
    - `http://127.0.0.1:8081/api/streaming/spotify/callback`
-3. Optional Pi LAN OAuth (phone/laptop browser on the hub IP — **not** mDNS):
+3. Optional Pi LAN OAuth (phone browser on the hub IP — **not** mDNS); use Connect with
+   `?loopback=0` only if this URI is registered:
    - `http://<Pi-IP>:8080/api/streaming/spotify/callback`
 4. **Do not** register `localhost` or `musync.local` — Spotify forbids those redirect hosts.
-   Open the UI at `http://musync.local:8080` (mDNS) if you like, but Connect Spotify must use a
-   `127.0.0.1` or Pi-IP redirect URI that matches `MUSYNC_SPOTIFY_REDIRECT_URI`.
 5. Copy **Client ID** and **Client Secret**.
 
 ### 2. Env on the Pi
@@ -82,16 +95,15 @@ export MUSYNC_BACKEND=pipewire
 
 1. Open `http://musync.local:8080` (mDNS UI) or `http://<Pi-IP>:8080`
 2. Device setup → enable Qudelix + Phone SPP → Save
-3. **Streaming** → paste Client ID/Secret (+ redirect URI) → **Save to musync.env**
-   (API stores `~/musync.env`, returns masked status only — never raw secrets).
-   Short Dashboard / Google Cloud guides are on that panel.
-   Redirect URI must be `127.0.0.1` or Pi IP — **not** `musync.local` / `localhost`.
-4. **Connect Spotify** (same-origin link → Spotify authorize →
-   `/api/streaming/spotify/callback` → tokens). MuSync never asks for your
-   Spotify password. If you opened the UI via `musync.local`, set redirect + Dashboard
-   to the Pi IP (or run Connect from a `127.0.0.1` tab on the Pi).
+3. **Streaming** → paste Client ID/Secret → **Save to musync.env**
+   (redirect defaults to `http://127.0.0.1:8080/…`). Status shows **OAuth callback**,
+   **librespot** (on PATH / running), and scopes.
+4. **Connect Spotify** — authorize URL uses **loopback** `127.0.0.1` (not musync.local).
+   Complete the Spotify redirect in a browser that can open `http://127.0.0.1:8080`
+   on the Pi (local UI, VNC, or `ssh -L 8080:127.0.0.1:8080 pi@<Pi-IP>` then Connect
+   from your laptop at `http://127.0.0.1:8080`).
 5. **Queue** → search a track → **Queue & play**
-6. Confirm audio on Qudelix / SPP (`Simple Protocol Player` → Pi IP:port)
+6. Confirm **librespot** status turns running on Play; audio on Qudelix / SPP
 
 If the UI says **not configured**, credentials are missing — use the Streaming
 form or edit `~/musync.env`, then **Connect Spotify** again. Empty keys soft-fail

@@ -2761,8 +2761,34 @@
 							<code>~/musync.env</code>, never logged). Then use Queue to search.
 						</p>
 					{/if}
+					<p class="hint muted scopes-line">
+						OAuth callback (Connect = loopback):
+						<code>{streaming?.spotify?.oauth_loopback_uri || streaming?.spotify?.redirect_uri || 'http://127.0.0.1:8080/api/streaming/spotify/callback'}</code>
+					</p>
+					<p class="hint muted">
+						librespot:
+						<span
+							class="status-pill {streaming?.spotify?.librespot_running
+								? 'linked'
+								: streaming?.spotify?.librespot_available
+									? 'warn'
+									: 'missing'}"
+						>
+							{streaming?.spotify?.librespot_running
+								? `running · ${streaming.spotify.librespot_name || 'MuSync'}`
+								: streaming?.spotify?.librespot_available
+									? `on PATH · ${streaming.spotify.librespot_name || 'MuSync'} (starts on Play)`
+									: 'missing — Pi hub PCM needs librespot'}
+						</span>
+					</p>
 					{#if streaming?.spotify?.librespot_available === false}
-						<p class="hint muted">Install <code>librespot</code> on the Pi for hub PCM (Premium).</p>
+						<p class="hint muted">
+							Laptop mock can search/auth without librespot; on the Pi install
+							<code>librespot</code> for Premium Connect → <code>musync_feeder</code>.
+						</p>
+					{/if}
+					{#if streaming?.spotify?.oauth_hint}
+						<p class="hint muted">{streaming.spotify.oauth_hint}</p>
 					{/if}
 					{#if !streaming?.spotify?.configured}
 						<p class="hint muted">
