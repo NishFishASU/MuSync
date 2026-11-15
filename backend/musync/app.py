@@ -466,23 +466,35 @@ def api_spotify_authorize_url(request: Request) -> dict[str, str | bool]:
 
 @app.get("/api/streaming/spotify/callback")
 def api_spotify_callback(
+    request: Request,
     code: str | None = None,
     state: str | None = None,
     error: str | None = None,
 ) -> RedirectResponse:
-    """OAuth redirect URI — stores tokens, then returns to the SPA."""
+    """OAuth redirect URI — stores tokens, then returns to the SPA.
+
+    Always redirects to the SPA with ``spotify=connected`` or ``spotify=error`` —
+    never returns a bare 500 for token exchange / profile / missing-secret failures.
+    """
     from urllib.parse import quote
 
+    def _err(detail: str) -> RedirectResponse:
+        return RedirectResponse("/?spotify=error&detail=" + quote(detail))
+
     if error:
-        return RedirectResponse(f"/?spotify=error&detail={quote(error)}")
+        return _err(error)
     if not code or not state:
-        return RedirectResponse(
-            "/?spotify=error&detail=" + quote("Missing OAuth code/state — try Connect again")
-        )
+        return _err("Missing OAuth code/state — try Connect again")
+    # Exact URI Spotify hit (no query) — must match authorize redirect_uri.
+    callback_uri = str(request.url.replace(query="", fragment=""))
     try:
-        get_streaming_service().spotify.handle_callback(code=code, state=state)
+        get_streaming_service().spotify.handle_callback(
+            code=code, state=state, redirect_uri=callback_uri
+        )
     except ValueError as exc:
-        return RedirectResponse("/?spotify=error&detail=" + quote(str(exc)))
+        return _err(str(exc))
+    except Exception as exc:  # noqa: BLE001 — surface any leftover failure in the UI
+        return _err(f"Spotify Connect failed: {exc}")
     # Refresh queue availability now that auth is live.
     try:
         backend.list_sources()

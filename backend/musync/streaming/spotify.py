@@ -185,14 +185,28 @@ class SpotifyClient:
         }
         return f"{SPOTIFY_AUTH}/authorize?{urllib.parse.urlencode(params)}"
 
-    def handle_callback(self, *, code: str, state: str) -> dict[str, Any]:
+    def handle_callback(
+        self, *, code: str, state: str, redirect_uri: Optional[str] = None
+    ) -> dict[str, Any]:
         with self._lock:
             expected = self._oauth_state
-            redir = getattr(self, "_oauth_redirect", None) or _redirect_uri()
+            # Prefer the URI we sent to /authorize (must match token exchange).
+            # Fall back to the callback request URL, then env/default.
+            redir = (
+                getattr(self, "_oauth_redirect", None)
+                or (redirect_uri or "").strip()
+                or _redirect_uri()
+            )
             self._oauth_state = None
             self._oauth_redirect = None
         if not expected or state != expected:
             raise ValueError("Invalid OAuth state — restart Connect from the MuSync UI")
+        if not credentials_configured():
+            raise ValueError(
+                "Spotify client credentials missing — set MUSYNC_SPOTIFY_CLIENT_ID and "
+                "MUSYNC_SPOTIFY_CLIENT_SECRET in ~/musync.env "
+                "(Windows: %USERPROFILE%\\musync.env), restart, then Connect again"
+            )
         data = {
             "grant_type": "authorization_code",
             "code": code,
@@ -200,7 +214,18 @@ class SpotifyClient:
         }
         token = self._token_request(data)
         self._store_tokens(token)
-        profile = self._get_json("/me")
+        # /me can 403 when the Spotify app is in development mode and the
+        # signed-in user is not on the Dashboard allowlist — never 500.
+        try:
+            profile = self._get_json("/me")
+        except httpx.HTTPStatusError as exc:
+            self.logout()
+            raise self._profile_fetch_error(exc) from exc
+        except httpx.RequestError as exc:
+            self.logout()
+            raise ValueError(
+                f"Spotify profile request failed after login — check network and retry Connect. ({exc})"
+            ) from exc
         with self._lock:
             self._tokens["display_name"] = profile.get("display_name") or profile.get("id")
             self._save_tokens()
@@ -488,7 +513,11 @@ class SpotifyClient:
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp = path.with_suffix(".tmp")
         tmp.write_text(json.dumps(self._tokens, indent=2), encoding="utf-8")
-        tmp.chmod(0o600)
+        try:
+            tmp.chmod(0o600)
+        except OSError:
+            # Windows / some FS ignore POSIX modes — still write the file.
+            pass
         tmp.replace(path)
 
     def _store_tokens(self, token: dict[str, Any]) -> None:
@@ -521,17 +550,70 @@ class SpotifyClient:
 
     def _token_request(self, data: dict[str, str]) -> dict[str, Any]:
         if not credentials_configured():
-            raise ValueError("Spotify client credentials missing")
-        with httpx.Client(timeout=20.0) as client:
-            resp = client.post(
-                f"{SPOTIFY_AUTH}/api/token",
-                data=data,
-                auth=(_client_id(), _client_secret()),
-                headers={"Content-Type": "application/x-www-form-urlencoded"},
+            raise ValueError(
+                "Spotify client credentials missing — set MUSYNC_SPOTIFY_CLIENT_ID and "
+                "MUSYNC_SPOTIFY_CLIENT_SECRET, restart MuSync, then Connect again"
             )
-            if resp.status_code >= 400:
-                raise ValueError(f"Spotify token error: {resp.status_code} {resp.text[:200]}")
+        try:
+            with httpx.Client(timeout=20.0) as client:
+                resp = client.post(
+                    f"{SPOTIFY_AUTH}/api/token",
+                    data=data,
+                    auth=(_client_id(), _client_secret()),
+                    headers={"Content-Type": "application/x-www-form-urlencoded"},
+                )
+        except httpx.RequestError as exc:
+            raise ValueError(
+                f"Spotify token exchange network error — check connectivity and retry. ({exc})"
+            ) from exc
+        if resp.status_code >= 400:
+            raise ValueError(self._token_error_message(resp))
+        try:
             return resp.json()
+        except ValueError as exc:
+            raise ValueError("Spotify token response was not valid JSON") from exc
+
+    @staticmethod
+    def _token_error_message(resp: httpx.Response) -> str:
+        body_text = (resp.text or "")[:300]
+        err = ""
+        desc = ""
+        try:
+            body = resp.json()
+            err = str(body.get("error") or "")
+            desc = str(body.get("error_description") or "")
+        except Exception:  # noqa: BLE001
+            pass
+        combined = f"{err} {desc} {body_text}".lower()
+        if "redirect_uri" in combined:
+            return (
+                "Spotify redirect URI mismatch — Dashboard redirect must equal the API "
+                "callback (e.g. http://127.0.0.1:8081/api/streaming/spotify/callback when "
+                "MUSYNC_PORT=8081), not Vite :5173. "
+                f"Spotify said: {desc or body_text or resp.status_code}"
+            )
+        if err in {"invalid_client", "invalid_client_id"} or "invalid_client" in combined:
+            return (
+                "Spotify rejected Client ID/Secret — check MUSYNC_SPOTIFY_CLIENT_ID and "
+                "MUSYNC_SPOTIFY_CLIENT_SECRET in musync.env, then restart and Connect again"
+            )
+        if desc:
+            return f"Spotify token error ({resp.status_code}): {desc}"
+        return f"Spotify token error: {resp.status_code} {body_text}"
+
+    @classmethod
+    def _profile_fetch_error(cls, exc: httpx.HTTPStatusError) -> ValueError:
+        status = exc.response.status_code if exc.response is not None else 0
+        detail = cls._spotify_error_detail(exc)
+        if status == 403:
+            return ValueError(
+                "Spotify /me returned 403 Forbidden — this app is likely in development "
+                "mode and your account is not allowlisted. In Spotify Developer Dashboard → "
+                "your app → User Management, add the Spotify email/username you signed in "
+                "with, then Connect again. "
+                f"({detail})"
+            )
+        return ValueError(f"Spotify profile fetch failed ({status}): {detail}")
 
     def _headers(self) -> dict[str, str]:
         return {"Authorization": f"Bearer {self._access_token()}"}

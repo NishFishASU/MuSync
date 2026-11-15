@@ -178,6 +178,7 @@ export MUSYNC_STREAMING_MOCK=1
 ## Troubleshooting
 
 - **403 on play** — Spotify Free accounts cannot control Connect; need Premium.
+- **403 after Connect / Internal Server Error on callback** — Spotify app is in **development mode** and your account is not allowlisted. After the auth code exchange, MuSync calls `GET /v1/me`; Spotify returns **403 Forbidden** until you add the signed-in user under Developer Dashboard → your app → **User Management**. MuSync redirects to `/?spotify=error&detail=…` with that message (no bare 500).
 - **No Connect device** — install librespot; check `MUSYNC_LIBRESPOT_NAME` matches; ensure PipeWire/Pulse is up and `musync_feeder` exists (`./scripts/run_pi.sh` + Play once).
 - **OAuth redirect mismatch** — redirect URI in the Spotify dashboard must equal `MUSYNC_SPOTIFY_REDIRECT_URI` (API port `:8080` / `:8081`, never Vite `:5173`).
 - **Connect does nothing / credentials missing** — fill `%USERPROFILE%\musync.env` or `config/streaming.local.env`, restart the API; Connect shows a clear error when Client ID/Secret are unset.
