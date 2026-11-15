@@ -7,7 +7,7 @@ import threading
 import time
 from typing import Callable, Optional
 
-from ..config import PLACEHOLDER_SOURCES, discover_local_sources
+from ..config import DEMO_DURATION_MS, PLACEHOLDER_SOURCES, discover_local_sources
 from ..models import (
     PLAYABLE_SOURCE_TYPES,
     QueueItem,
@@ -96,7 +96,7 @@ class SourceSession:
                     path=None,
                     locator="demo/sample-tone",
                     available=True,
-                    duration_ms=180_000,
+                    duration_ms=DEMO_DURATION_MS,
                     note="Virtual demo track — drop files under media/ for real paths",
                 )
             ]
@@ -187,7 +187,7 @@ class SourceSession:
                         path=None,
                         locator="demo/sample-tone",
                         available=True,
-                        duration_ms=180_000,
+                        duration_ms=DEMO_DURATION_MS,
                         note="Virtual demo track — drop files under media/ for real paths",
                     )
                 ]
@@ -345,7 +345,19 @@ class SourceSession:
             input_id=input_id,
             available=playable,
             note=note,
-            duration_ms=duration_ms if duration_ms is not None else (180_000 if playable else None),
+            # Only virtual demo tracks invent a length; real files keep probed
+            # duration (or None when probe failed — clock still advances).
+            duration_ms=(
+                duration_ms
+                if duration_ms is not None
+                else (
+                    DEMO_DURATION_MS
+                    if playable
+                    and path is None
+                    and (source_id or "").startswith("local:demo")
+                    else None
+                )
+            ),
         )
 
     def _apply_patch(self, item: QueueItem, patch: QueueItemPatch) -> QueueItem:
@@ -533,12 +545,16 @@ class SourceSession:
             return self._transport.model_copy(deep=True)
 
     def set_active_source(self, source_id: str) -> Transport:
-        """Catalog picker: ensure a queue item for this source, then activate it."""
+        """Catalog picker: ensure a queue item for this source, then activate it.
+
+        Unavailable catalog rows (host-local upload stubs, Spotify/Apple/input)
+        still activate as stubs — Play is what rejects them. Previously
+        ``type=local`` + ``available=false`` (host:*:local) returned HTTP 400
+        while other stubs succeeded, which broke the Local catalog UX.
+        """
         with self._lock:
             self._refresh_catalog()
             src = self._source_by_id(source_id)
-            if not src.available and src.type in PLAYABLE_SOURCE_TYPES:
-                raise ValueError(f"Source not available: {source_id}")
 
             # Reuse an existing queue row for this catalog id when possible.
             existing = next((q for q in self._queue if q.source_id == source_id), None)

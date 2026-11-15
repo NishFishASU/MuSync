@@ -94,7 +94,7 @@ SPP phone sink: enable `spp-1` (`kind: network_spp`) in devices config, Play a l
 2. FastAPI defaults `MUSYNC_WEB_DIR` to `web/build` and mounts it after `/api/*`.
 3. Same origin: `/` + `/_app/…` for the SPA, `/api/…` for the hub.
 
-Pi tip: build on a laptop (or once on the Pi with Node), keep `web/build/` in the tree / rsync it, then run without Node at runtime.
+Pi tip: `web/build/` is gitignored — build on a laptop (or once on the Pi with Node) and rsync/copy the artifacts, or run `./scripts/build_web.sh` on-device. Node is not required at runtime once the SPA is built.
 
 ## Mock vs PipeWire
 

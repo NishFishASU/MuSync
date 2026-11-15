@@ -65,6 +65,10 @@
 	/** @type {Record<string, ReturnType<typeof setTimeout>>} */
 	const patchTimers = {};
 
+	/** Last server position sample — UI interpolates between 1s polls while playing. */
+	let clockAnchorMs = 0;
+	let clockAnchorAt = 0;
+
 	const selected = $derived(devices.find((d) => d.id === selectedId) ?? null);
 	const playing = $derived(transport?.state === 'playing');
 	const wifiIpLabel = $derived(wifi?.ips?.length ? wifi.ips.join(', ') : '—');
@@ -76,6 +80,31 @@
 					(transport.input_id && transport.source_type === 'local'))
 		)
 	);
+
+	/**
+	 * @param {import('$lib/api.js').Transport} t
+	 * @param {{ syncScrub?: boolean }} [opts]
+	 */
+	function applyTransport(t, opts = {}) {
+		const syncScrub = opts.syncScrub !== false;
+		transport = t;
+		clockAnchorMs = t.position_ms || 0;
+		clockAnchorAt = performance.now();
+		if (syncScrub && !scrubbing) {
+			scrubValue = displayedPositionMs();
+		}
+	}
+
+	function displayedPositionMs() {
+		const t = transport;
+		if (!t) return 0;
+		if (t.state !== 'playing') return t.position_ms || 0;
+		const elapsed = performance.now() - clockAnchorAt;
+		const next = clockAnchorMs + elapsed;
+		const duration = t.duration_ms || 0;
+		if (duration > 0) return Math.min(duration, next);
+		return next;
+	}
 	const healthLabel = $derived.by(() => {
 		if (apiError) return 'API offline';
 		if (!health) return '…';
@@ -174,13 +203,12 @@
 		]);
 		health = h;
 		devices = d;
-		transport = t;
 		sources = s;
 		queue = q;
 		inputs = i;
 		apiError = '';
 		if (!selectedId && d.length) selectedId = d[0].id;
-		if (!scrubbing) scrubValue = t.position_ms || 0;
+		applyTransport(t);
 		await refreshWifi().catch(() => {});
 	}
 
@@ -210,8 +238,7 @@
 	async function setTransport(body) {
 		try {
 			sourceError = '';
-			transport = await putTransport(body);
-			if (!scrubbing) scrubValue = transport.position_ms || 0;
+			applyTransport(await putTransport(body));
 		} catch (err) {
 			sourceError = err instanceof Error ? err.message : String(err);
 		}
@@ -221,9 +248,15 @@
 	async function chooseSource(id) {
 		try {
 			sourceError = '';
-			transport = await setActiveSource(id);
+			const t = await setActiveSource(id);
 			queue = await listQueue();
-			if (!scrubbing) scrubValue = transport.position_ms || 0;
+			applyTransport(t);
+			const active = queue.find((q) => q.id === t.queue_item_id);
+			if (active && !active.available) {
+				sourceError =
+					active.note ||
+					`${sourceTypeLabel(active.source_type)} stub selected — switch a queue row to Local to play`;
+			}
 		} catch (err) {
 			sourceError = err instanceof Error ? err.message : String(err);
 		}
@@ -233,8 +266,7 @@
 	async function chooseQueueItem(id) {
 		try {
 			sourceError = '';
-			transport = await setActiveQueueItem(id);
-			if (!scrubbing) scrubValue = transport.position_ms || 0;
+			applyTransport(await setActiveQueueItem(id));
 		} catch (err) {
 			sourceError = err instanceof Error ? err.message : String(err);
 		}
@@ -255,8 +287,7 @@
 			}
 			const updated = await patchQueueItem(id, patch);
 			queue = queue.map((q) => (q.id === id ? updated : q));
-			transport = await getTransport();
-			if (!scrubbing) scrubValue = transport.position_ms || 0;
+			applyTransport(await getTransport());
 			if (!updated.available) {
 				sourceError = updated.note || `${sourceTypeLabel(sourceType)} is a stub — sinks stay linked`;
 			}
@@ -275,7 +306,7 @@
 			sourceError = '';
 			const updated = await patchQueueItem(id, { input_id: inputId || null });
 			queue = queue.map((q) => (q.id === id ? updated : q));
-			transport = await getTransport();
+			applyTransport(await getTransport());
 			if (!updated.available) {
 				sourceError = updated.note || 'Host-bound source is a stub — sinks stay linked';
 			}
@@ -348,7 +379,7 @@
 			inputs = inputs.filter((h) => h.id !== id);
 			sources = await listSources();
 			queue = await listQueue();
-			transport = await getTransport();
+			applyTransport(await getTransport());
 		} catch (err) {
 			sourceError = err instanceof Error ? err.message : String(err);
 		}
@@ -360,7 +391,7 @@
 			sourceError = '';
 			await deleteQueueItem(id);
 			queue = queue.filter((q) => q.id !== id);
-			transport = await getTransport();
+			applyTransport(await getTransport());
 		} catch (err) {
 			sourceError = err instanceof Error ? err.message : String(err);
 		}
@@ -368,19 +399,27 @@
 
 	onMount(() => {
 		let cancelled = false;
-		let timer;
+		/** @type {ReturnType<typeof setInterval> | undefined} */
+		let pollTimer;
+		/** @type {ReturnType<typeof setInterval> | undefined} */
+		let tickTimer;
 
 		refresh()
 			.then(() => {
 				if (cancelled) return;
-				timer = setInterval(async () => {
+				// Server clock (~1 Hz); UI interpolates between samples while playing.
+				pollTimer = setInterval(async () => {
 					try {
-						transport = await getTransport();
-						if (!scrubbing) scrubValue = transport.position_ms || 0;
+						applyTransport(await getTransport());
 					} catch (err) {
 						console.error(err);
 					}
 				}, 1000);
+				tickTimer = setInterval(() => {
+					if (!scrubbing && transport?.state === 'playing') {
+						scrubValue = displayedPositionMs();
+					}
+				}, 200);
 			})
 			.catch((err) => {
 				apiError = err instanceof Error ? err.message : String(err);
@@ -389,7 +428,8 @@
 
 		return () => {
 			cancelled = true;
-			clearInterval(timer);
+			clearInterval(pollTimer);
+			clearInterval(tickTimer);
 			for (const t of Object.values(patchTimers)) clearTimeout(t);
 		};
 	});
@@ -845,12 +885,16 @@
 								type="button"
 								class="source-row"
 								class:active-source={s.id === transport?.source_id}
+								class:stub-source={!s.available}
+								title={s.available ? 'Playable hub local' : s.note || 'Stub — sink graph stays up'}
 								onclick={() => chooseSource(s.id)}
 							>
 								<span>
 									<span class="source-title">{s.title}</span>
 									<span class="source-sub">
-										{s.type}{s.id === transport?.source_id ? ' · active' : ''}{s.note ? ` · ${s.note}` : ''}
+										{s.type}{s.id === transport?.source_id ? ' · active' : ''}{s.input_id
+											? ' · host stub'
+											: ''}{s.note ? ` · ${s.note}` : ''}
 									</span>
 								</span>
 								<span class="status-pill {s.available ? 'linked' : 'missing'}">

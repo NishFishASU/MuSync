@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import wave
 from pathlib import Path
 
 import yaml
@@ -9,9 +10,19 @@ from musync.config import (
     clamp_volume,
     discover_local_sources,
     load_devices,
+    probe_audio_duration_ms,
     save_devices,
 )
 from musync.models import Device
+
+
+def _write_silence_wav(path: Path, *, seconds: float = 1.5, rate: int = 8000) -> None:
+    frames = int(rate * seconds)
+    with wave.open(str(path), "w") as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(rate)
+        wf.writeframes(b"\x00\x00" * frames)
 
 
 def test_clamp_delay_and_volume() -> None:
@@ -58,10 +69,27 @@ def test_save_and_load_devices(monkeypatch, tmp_path: Path) -> None:
 def test_discover_local_sources(monkeypatch, tmp_path: Path) -> None:
     media = tmp_path / "media"
     media.mkdir()
-    (media / "track_one.wav").write_bytes(b"RIFF")
+    wav = media / "track_one.wav"
+    _write_silence_wav(wav, seconds=1.25)
     (media / "notes.txt").write_text("ignore", encoding="utf-8")
     monkeypatch.setenv("MUSYNC_MEDIA_DIR", str(media))
     sources = discover_local_sources()
     assert len(sources) == 1
     assert sources[0].id.endswith("track_one.wav")
     assert sources[0].available is True
+    # Real files must not use the 180_000 demo stub.
+    assert sources[0].duration_ms is not None
+    assert abs(sources[0].duration_ms - 1250) <= 20
+    assert sources[0].duration_ms != 180_000
+
+
+def test_probe_audio_duration_wav(tmp_path: Path) -> None:
+    wav = tmp_path / "tone.wav"
+    _write_silence_wav(wav, seconds=2.0, rate=16000)
+    ms = probe_audio_duration_ms(wav)
+    assert ms is not None
+    assert abs(ms - 2000) <= 5
+
+
+def test_probe_missing_file_returns_none(tmp_path: Path) -> None:
+    assert probe_audio_duration_ms(tmp_path / "missing.wav") is None

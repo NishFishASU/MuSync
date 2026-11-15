@@ -400,6 +400,10 @@ input[type='range'] {
 	background: var(--accent-soft);
 }
 
+.source-row.stub-source {
+	opacity: 0.85;
+}
+
 .empty-group {
 	color: var(--ink-muted);
 	font-size: 0.85rem;

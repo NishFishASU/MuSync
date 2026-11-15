@@ -412,8 +412,18 @@ class PipeWireBackend(AudioBackend):
             except subprocess.TimeoutExpired:
                 proc.kill()
 
+    def _spp_listener_alive(self, device_id: str) -> bool:
+        proc = self._spp_procs.get(device_id)
+        return proc is not None and proc.poll() is None
+
     def _restart_spp_listener(self, device: Device) -> None:
-        """Keep TCP listen up while enabled so the phone can connect anytime."""
+        """(Re)start TCP listen for an enabled SPP sink.
+
+        Forced restart — used when listen_port / rate / delay / volume / mute
+        change. Graph ensure / Play must **not** call this when the process is
+        already healthy: killing ffmpeg drops the phone's TCP session right as
+        playback starts.
+        """
         self._stop_spp_listener(device.id)
         if device.kind != DeviceKind.NETWORK_SPP or not device.enabled:
             device.connected = False
@@ -435,34 +445,72 @@ class PipeWireBackend(AudioBackend):
 
         cmd = build_spp_ffmpeg_from_pulse(device, feeder=self._feeder, ffmpeg_bin=ff)
         try:
+            # Keep stderr so early pulse/port failures are visible in logs.
             self._spp_procs[device.id] = subprocess.Popen(
                 cmd,
                 stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
                 text=True,
             )
+            # Brief settle — ffmpeg exits immediately if pulse source/port fails.
+            time.sleep(0.15)
+            proc = self._spp_procs.get(device.id)
+            if proc is None:
+                device.connected = False
+                return
+            if proc.poll() is not None:
+                err = ""
+                try:
+                    err = (proc.stderr.read() if proc.stderr else "") or ""
+                except OSError:
+                    err = ""
+                self._spp_procs.pop(device.id, None)
+                device.connected = False
+                log.warning(
+                    "SPP listener %s exited immediately (code %s): %s — cmd=%s",
+                    device.id,
+                    proc.returncode,
+                    err.strip() or "(no stderr)",
+                    " ".join(cmd),
+                )
+                return
             device.connected = True
             log.info(
                 "SPP listening %s → %s (pid %s)",
                 device.id,
                 spp_tcp_url(device),
-                self._spp_procs[device.id].pid,
+                proc.pid,
             )
         except OSError as exc:
             log.warning("Failed to start SPP listener %s: %s", device.id, exc)
             device.connected = False
 
+    def _ensure_spp_listener(self, device: Device) -> None:
+        """Start SPP listen only if missing/dead — preserve live phone TCP sessions."""
+        if device.kind != DeviceKind.NETWORK_SPP:
+            return
+        if not device.enabled:
+            self._stop_spp_listener(device.id)
+            device.connected = False
+            return
+        if self._spp_listener_alive(device.id):
+            device.connected = True
+            return
+        # Dead or never started — (re)bind the port.
+        self._restart_spp_listener(device)
+
     def _sync_spp_listeners(self, only_device: str | None = None) -> None:
+        """Keep enabled SPP sinks listening without bouncing healthy processes.
+
+        Called from ``_ensure_graph`` (including on Play). Restarting here used
+        to drop Simple Protocol Player the moment transport started.
+        """
         for device in self._devices.values():
             if device.kind != DeviceKind.NETWORK_SPP:
                 continue
             if only_device and device.id != only_device:
                 continue
-            if device.enabled:
-                self._restart_spp_listener(device)
-            else:
-                self._stop_spp_listener(device.id)
-                device.connected = False
+            self._ensure_spp_listener(device)
 
     def _ensure_graph(self, only_device: str | None = None) -> GraphPlan:
         """Ensure feeder → delay/volume → enabled sinks.
@@ -658,8 +706,10 @@ class PipeWireBackend(AudioBackend):
         return self._session.list_sources()
 
     def set_active_source(self, source_id: str) -> Transport:
-        # Feeder swap only — sink loopbacks remain.
-        return self._session.set_active_source(source_id)
+        # Feeder swap only — sink loopbacks remain. Revive dead SPP listens.
+        transport = self._session.set_active_source(source_id)
+        self._sync_spp_listeners()
+        return transport
 
     def list_queue(self) -> list[QueueItem]:
         return self._session.list_queue()
@@ -674,7 +724,9 @@ class PipeWireBackend(AudioBackend):
         self._session.remove_queue_item(item_id)
 
     def set_active_queue_item(self, item_id: str) -> Transport:
-        return self._session.set_active_queue_item(item_id)
+        transport = self._session.set_active_queue_item(item_id)
+        self._sync_spp_listeners()
+        return transport
 
     def list_inputs(self) -> list[InputHost]:
         return self._inputs.list_hosts()

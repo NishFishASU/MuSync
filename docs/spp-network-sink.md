@@ -48,6 +48,8 @@ export MUSYNC_BACKEND=pipewire
 
 Notes:
 
-- Listener stays up while the SPP sink is **enabled** (phone can connect before Play).
-- Changing port / rate / channels / delay / volume restarts that ffmpeg process only.
-- Install `ffmpeg` on the Pi. Dry-run (`MUSYNC_PW_DRY_RUN=1`) logs the command without binding the port.
+- Listener starts when the SPP sink is **enabled** (backend boot / enable toggle) — **not** only on Play. Phone can connect before Play.
+- **Play does not restart** a healthy ffmpeg listen (restarting would drop the TCP session). Dead listeners are revived; changing port / rate / channels / delay / volume / mute still restarts that process only.
+- Format must match the device row: default **48000 Hz / 1 ch / s16le**, port **1234**, host = Pi LAN or Tailscale IP (not `0.0.0.0` in the phone app).
+- Requires PipeWire pulse compat (`pipewire-pulse`) so ffmpeg can read `musync_feeder.monitor`, plus `ffmpeg` with `--enable-libpulse`. Dry-run (`MUSYNC_PW_DRY_RUN=1`) logs the command without binding the port.
+- If the phone connects while a **manual** `ffmpeg …?listen=1` is still bound to 1234, MuSync cannot bind — stop the manual listener first.
