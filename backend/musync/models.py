@@ -471,6 +471,10 @@ class QueueSettings(BaseModel):
     turn_taking: bool = True
     turn_device_id: Optional[str] = None
     turn_order: list[str] = Field(default_factory=list)
+    # Friendly names parallel to turn_order (Queue UI — no client id→name race).
+    turn_order_labels: list[str] = Field(default_factory=list)
+    # Why eligible is empty, or a short ready summary for the Queue tab.
+    eligible_detail: str = ""
     rotation_note: str = (
         "Eligible: enabled sinks that are connected (BT) or armed (SPP/Cast). "
         "If any have a profile/user assignment, only those participate. "

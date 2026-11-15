@@ -599,6 +599,7 @@
 			setupMessage = 'Bluetooth scan started';
 			stopBtScanPoll();
 			btScanPoll = setInterval(async () => {
+				if (document.hidden) return;
 				try {
 					applyScanStatus(await startBluetoothScan());
 				} catch (err) {
@@ -1614,10 +1615,29 @@
 			if (!cancelled) scheduleAdaptivePolls();
 		};
 
+		function clearTickTimer() {
+			clearInterval(tickTimer);
+			tickTimer = undefined;
+		}
+
+		function startTickTimer() {
+			clearTickTimer();
+			if (document.hidden) return;
+			tickTimer = setInterval(() => {
+				if (document.hidden) return;
+				if (!scrubbing && transport?.state === 'playing') {
+					scrubValue = displayedPositionMs();
+				}
+			}, 200);
+		}
+
 		function onVisibility() {
 			if (cancelled) return;
 			if (document.hidden) {
+				// MDAS-70: Page Visibility — pause all SPA /api pollers + scrub tick.
 				clearAdaptivePolls();
+				clearTickTimer();
+				stopBtScanPoll();
 				return;
 			}
 			// Immediate catch-up when the tab becomes visible again.
@@ -1630,6 +1650,7 @@
 				})
 				.catch(() => {});
 			scheduleAdaptivePolls();
+			startTickTimer();
 		}
 
 		refresh()
@@ -1644,13 +1665,11 @@
 					streamMessage = `Spotify auth failed: ${params.get('detail') || 'error'}`;
 					history.replaceState({}, '', window.location.pathname);
 				}
-				scheduleAdaptivePolls();
+				if (!document.hidden) {
+					scheduleAdaptivePolls();
+					startTickTimer();
+				}
 				document.addEventListener('visibilitychange', onVisibility);
-				tickTimer = setInterval(() => {
-					if (!scrubbing && transport?.state === 'playing') {
-						scrubValue = displayedPositionMs();
-					}
-				}, 200);
 			})
 			.catch((err) => {
 				apiError = err instanceof Error ? err.message : String(err);
@@ -1661,7 +1680,7 @@
 			cancelled = true;
 			schedulePollsNow = null;
 			clearAdaptivePolls();
-			clearInterval(tickTimer);
+			clearTickTimer();
 			document.removeEventListener('visibilitychange', onVisibility);
 			stopBtScanPoll();
 			for (const t of Object.values(patchTimers)) clearTimeout(t);
@@ -3255,13 +3274,24 @@
 						Up now:
 						{devices.find((d) => d.id === queueSettings?.turn_device_id)?.name ||
 							queueSettings.turn_device_id}
-						{#if queueSettings.turn_order?.length}
+						{#if (queueSettings.turn_order_labels?.length || queueSettings.turn_order?.length)}
 							· rotate
-							{queueSettings.turn_order
-								.map((id) => devices.find((d) => d.id === id)?.name || id)
-								.join(' → ')}
+							{(queueSettings.turn_order_labels?.length
+								? queueSettings.turn_order_labels
+								: queueSettings.turn_order.map(
+										(id) => devices.find((d) => d.id === id)?.name || id
+									)
+							).join(' → ')}
 						{/if}
 						· headset Play bumps that sink to front
+					</p>
+					{#if queueSettings.eligible_detail}
+						<p class="hint muted">{queueSettings.eligible_detail}</p>
+					{/if}
+				{:else if queueSettings?.turn_taking}
+					<p class="hint muted">
+						{queueSettings.eligible_detail ||
+							'No eligible sinks — enable + connect BT or arm SPP/Cast on Outputs'}
 					</p>
 				{:else if queueSettings && !queueSettings.turn_taking}
 					<p class="hint muted">Fan-out to all enabled sinks (no solo rotation)</p>
@@ -3392,6 +3422,14 @@
 			{#if !liveHosts.length}
 				<p class="hint muted">
 					+ Device needs a live BT A2DP / USB / HDMI / AirPlay host — use Refresh inputs first.
+				</p>
+			{:else}
+				<p class="hint muted">
+					Live inputs auto-queue as “Live · …” rows (Refresh inputs claims pass-through for
+					AVRCP). Active live session:
+					{transport?.source_type === 'input' && transport?.state !== 'stopped'
+						? transport.title || 'live'
+						: 'none — Play a Live row or Refresh inputs'}
 				</p>
 			{/if}
 			<ul class="queue-list">

@@ -783,6 +783,124 @@ class SourceSession:
 
         return QueueItem.model_validate(data)
 
+    def ensure_live_sessions(
+        self,
+        *,
+        activate_idle: bool = True,
+        force_activate: bool = False,
+    ) -> tuple[list[QueueItem], Optional[str]]:
+        """Ensure a ``Live · {host}`` queue row for every live capture host.
+
+        Returns ``(touched_or_created_items, play_item_id)``.
+
+        ``play_item_id`` is set when the hub is STOPPED and a live host should
+        become the active cue so AVRCP/turn-taking have a target — caller starts
+        PLAYING (PipeWire needs ``set_transport`` for capture→feeder).
+
+        ``force_activate`` (new capture discover/bind): claim live even when a
+        stopped local/Spotify row was selected — fixes A2DP pass-through with no
+        queue target. Never steals while PLAYING or PAUSED.
+        """
+        with self._lock:
+            self._refresh_catalog()
+            touched: list[QueueItem] = []
+            live_hosts = [
+                h for h in self._inputs.list_hosts() if host_is_live(h)
+            ]
+            for host in live_hosts:
+                existing = next(
+                    (
+                        q
+                        for q in self._queue
+                        if q.source_type == SourceType.INPUT and q.input_id == host.id
+                    ),
+                    None,
+                )
+                title = f"Live · {host.name}"
+                if existing is None:
+                    item = self._resolve_create(
+                        QueueItemCreate(
+                            source_type=SourceType.INPUT,
+                            input_id=host.id,
+                            title=title,
+                        )
+                    )
+                    self._queue.append(item)
+                    touched.append(item.model_copy(deep=True))
+                else:
+                    # Keep title/locator fresh when the host renames / rebinds.
+                    locator = f"input:{host.id}:{host.capture_path.value}"
+                    updates: dict = {}
+                    if existing.title != title and (
+                        existing.title.startswith("Live ·")
+                        or existing.title in {"Live input", "Live"}
+                    ):
+                        updates["title"] = title
+                    if existing.locator != locator:
+                        updates["locator"] = locator
+                    playable = self._live_input_playable(host.id)
+                    if existing.available != playable:
+                        updates["available"] = playable
+                        updates["note"] = (
+                            None
+                            if playable
+                            else self._note_for_host_item(SourceType.INPUT, host.id)
+                        )
+                        updates["duration_ms"] = 0 if playable else existing.duration_ms
+                    if updates:
+                        updated = existing.model_copy(update=updates)
+                        for i, q in enumerate(self._queue):
+                            if q.id == existing.id:
+                                self._queue[i] = updated
+                                break
+                        touched.append(updated.model_copy(deep=True))
+                    else:
+                        touched.append(existing.model_copy(deep=True))
+
+            play_id: Optional[str] = None
+            if (
+                (activate_idle or force_activate)
+                and live_hosts
+                and self._transport.state == TransportState.STOPPED
+            ):
+                adopt = bool(force_activate)
+                if not adopt:
+                    if not self._transport.queue_item_id:
+                        adopt = True
+                    else:
+                        try:
+                            cur = self._queue_by_id(self._transport.queue_item_id)
+                            if cur.source_type == SourceType.INPUT and cur.available:
+                                play_id = cur.id
+                            elif not cur.available:
+                                adopt = True
+                        except KeyError:
+                            adopt = True
+                elif self._transport.queue_item_id:
+                    try:
+                        cur = self._queue_by_id(self._transport.queue_item_id)
+                        if cur.source_type == SourceType.INPUT and cur.available:
+                            play_id = cur.id
+                            adopt = False
+                    except KeyError:
+                        pass
+                if adopt and play_id is None:
+                    host = live_hosts[0]
+                    row = next(
+                        (
+                            q
+                            for q in self._queue
+                            if q.source_type == SourceType.INPUT
+                            and q.input_id == host.id
+                            and q.available
+                        ),
+                        None,
+                    )
+                    if row is not None:
+                        self._bind_transport_to_item(row, reset_position=True)
+                        play_id = row.id
+            return touched, play_id
+
     def refresh_live_availability(self) -> None:
         """Recompute queue/catalog availability after capture / streaming updates."""
         with self._lock:
