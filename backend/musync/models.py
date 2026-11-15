@@ -534,6 +534,9 @@ class StreamingProviderStatus(BaseModel):
     search_limit_max: Optional[int] = None
     limits: list[str] = Field(default_factory=list)
     note: str = ""
+    # YouTube: last yt-dlp/ffmpeg soft-fail reason (search can still work).
+    last_error: Optional[str] = None
+    running: Optional[bool] = None
 
 
 class AirplayStatus(BaseModel):

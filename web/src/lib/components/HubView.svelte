@@ -2839,6 +2839,11 @@
 							Not configured — paste a YouTube Data API key above (see guide). Empty key soft-fails.
 						</p>
 					{/if}
+					{#if streaming?.youtube?.last_error}
+						<p class="hint" role="status">
+							Play soft-fail: {streaming.youtube.last_error}
+						</p>
+					{/if}
 					{#if streaming?.youtube?.note}
 						<p class="hint muted">{streaming.youtube.note}</p>
 					{/if}

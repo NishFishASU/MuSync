@@ -338,6 +338,8 @@ export function spaPollRequestsPerSecond(cadence) {
  * @property {number | null} [search_limit_max]
  * @property {string[]} [limits]
  * @property {string} [note]
+ * @property {string | null} [last_error]
+ * @property {boolean | null} [running]
  */
 
 /**
