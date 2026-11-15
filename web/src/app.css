@@ -883,6 +883,10 @@ body {
 	font-size: 0.82rem;
 }
 
+.hint.stream-error {
+	color: var(--bad);
+}
+
 .hint.muted {
 	opacity: 0.8;
 	margin-top: 0.55rem;
