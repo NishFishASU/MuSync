@@ -54,10 +54,14 @@ def test_devices_patch(client: TestClient) -> None:
 def test_transport_and_sources(client: TestClient) -> None:
     sources = client.get("/api/sources")
     assert sources.status_code == 200
-    local = next(s for s in sources.json() if s["available"])
+    body = sources.json()
+    local = next(s for s in body if s["available"])
+    assert {s["type"] for s in body} >= {"local", "spotify", "apple", "input"}
 
     active = client.put("/api/sources/active", json={"id": local["id"]})
     assert active.status_code == 200
+    assert active.json()["source_type"] == "local"
+    assert active.json()["queue_item_id"]
 
     playing = client.put("/api/transport", json={"state": "playing"})
     assert playing.status_code == 200
@@ -66,6 +70,49 @@ def test_transport_and_sources(client: TestClient) -> None:
     stopped = client.put("/api/transport", json={"state": "stopped"})
     assert stopped.json()["state"] == "stopped"
     assert stopped.json()["position_ms"] == 0
+
+
+def test_queue_source_type_switch(client: TestClient) -> None:
+    queue = client.get("/api/queue")
+    assert queue.status_code == 200
+    items = queue.json()
+    assert items
+    item_id = items[0]["id"]
+
+    patched = client.patch(
+        f"/api/queue/{item_id}",
+        json={"source_type": "spotify"},
+    )
+    assert patched.status_code == 200
+    assert patched.json()["source_type"] == "spotify"
+    assert patched.json()["available"] is False
+
+    hosts = client.get("/api/inputs")
+    assert hosts.status_code == 200
+    assert len(hosts.json()) >= 1
+    host_id = hosts.json()[0]["id"]
+
+    created = client.post(
+        "/api/queue",
+        json={"source_type": "input", "input_id": host_id, "title": "USB-from-PC stub"},
+    )
+    assert created.status_code == 201
+    assert created.json()["source_type"] == "input"
+    assert created.json()["input_id"] == host_id
+
+    active = client.put("/api/queue/active", json={"id": created.json()["id"]})
+    assert active.status_code == 200
+    assert active.json()["source_type"] == "input"
+    assert active.json()["input_id"] == host_id
+
+    # Stub cannot play
+    denied = client.put("/api/transport", json={"state": "playing"})
+    assert denied.status_code == 400
+
+    # Devices still listed (sinks not torn down)
+    devices = client.get("/api/devices")
+    assert devices.status_code == 200
+    assert len(devices.json()) >= 1
 
 
 def test_index_served(client: TestClient) -> None:

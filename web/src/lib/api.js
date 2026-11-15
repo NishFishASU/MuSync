@@ -5,11 +5,17 @@
  */
 
 /** @typedef {'stopped' | 'playing' | 'paused'} TransportState */
+/** @typedef {'local' | 'spotify' | 'apple' | 'input'} SourceType */
+/** @typedef {'bt_a2dp' | 'usb' | 'network'} CapturePath */
+/** @typedef {'phone' | 'pc' | 'other'} HostKind */
+
+/** @typedef {'bluetooth' | 'network_spp'} DeviceKind */
 
 /**
  * @typedef {Object} Device
  * @property {string} id
  * @property {string} name
+ * @property {DeviceKind} [kind]
  * @property {string} [mac]
  * @property {string} [hci]
  * @property {boolean} connected
@@ -17,17 +23,53 @@
  * @property {number} volume
  * @property {boolean} mute
  * @property {boolean} enabled
+ * @property {string} [listen_host]
+ * @property {number} [listen_port]
+ * @property {number} [sample_rate]
+ * @property {number} [channels]
  */
 
 /**
  * @typedef {Object} Source
  * @property {string} id
  * @property {string} title
- * @property {string} type
+ * @property {SourceType} type
  * @property {boolean} available
  * @property {string} [note]
  * @property {number} [duration_ms]
  * @property {string} [path]
+ * @property {string} [locator]
+ * @property {string | null} [input_id]
+ */
+
+/**
+ * @typedef {Object} InputHost
+ * @property {string} id
+ * @property {string} name
+ * @property {HostKind} kind
+ * @property {CapturePath} capture_path
+ * @property {boolean} armed
+ * @property {boolean} connected
+ * @property {string | null} [endpoint]
+ * @property {boolean} offers_local
+ * @property {boolean} offers_spotify
+ * @property {boolean} offers_apple
+ * @property {boolean} offers_live_input
+ * @property {string | null} [note]
+ */
+
+/**
+ * @typedef {Object} QueueItem
+ * @property {string} id
+ * @property {string} title
+ * @property {SourceType} source_type
+ * @property {string | null} [locator]
+ * @property {string | null} [source_id]
+ * @property {string | null} [path]
+ * @property {string | null} [input_id]
+ * @property {boolean} available
+ * @property {string | null} [note]
+ * @property {number | null} [duration_ms]
  */
 
 /**
@@ -36,6 +78,9 @@
  * @property {number} position_ms
  * @property {number} duration_ms
  * @property {string | null} [source_id]
+ * @property {string | null} [queue_item_id]
+ * @property {SourceType | null} [source_type]
+ * @property {string | null} [input_id]
  * @property {string | null} [title]
  */
 
@@ -49,6 +94,7 @@
  * @property {Record<string, string>} [hci_map]
  * @property {string} [detail]
  */
+
 
 /**
  * @typedef {Object} WifiStatus
@@ -67,6 +113,10 @@
  * @property {boolean} active
  * @property {boolean} has_password
  */
+
+export const SOURCE_TYPES = /** @type {const} */ (['local', 'spotify', 'apple', 'input']);
+export const CAPTURE_PATHS = /** @type {const} */ (['bt_a2dp', 'usb', 'network']);
+export const HOST_KINDS = /** @type {const} */ (['phone', 'pc', 'other']);
 
 /**
  * @param {string} path
@@ -103,7 +153,7 @@ export function listDevices() {
 
 /**
  * @param {string} id
- * @param {Partial<Pick<Device, 'delay_ms' | 'volume' | 'mute' | 'enabled' | 'name'>>} patch
+ * @param {Partial<Pick<Device, 'delay_ms' | 'volume' | 'mute' | 'enabled' | 'name' | 'listen_host' | 'listen_port' | 'sample_rate' | 'channels'>>} patch
  * @returns {Promise<Device>}
  */
 export function patchDevice(id, patch) {
@@ -119,7 +169,7 @@ export function getTransport() {
 }
 
 /**
- * @param {{ state?: TransportState, position_ms?: number, source_id?: string }} body
+ * @param {{ state?: TransportState, position_ms?: number, source_id?: string, queue_item_id?: string }} body
  * @returns {Promise<Transport>}
  */
 export function putTransport(body) {
@@ -144,6 +194,90 @@ export function setActiveSource(id) {
 		body: JSON.stringify({ id })
 	});
 }
+
+/** @returns {Promise<QueueItem[]>} */
+export function listQueue() {
+	return api('/api/queue');
+}
+
+/**
+ * @param {{ title?: string, source_type?: SourceType, locator?: string, source_id?: string, path?: string, input_id?: string }} body
+ * @returns {Promise<QueueItem>}
+ */
+export function addQueueItem(body) {
+	return api('/api/queue', {
+		method: 'POST',
+		body: JSON.stringify(body)
+	});
+}
+
+/**
+ * @param {string} id
+ * @param {{ title?: string, source_type?: SourceType, locator?: string, source_id?: string, path?: string, input_id?: string | null }} patch
+ * @returns {Promise<QueueItem>}
+ */
+export function patchQueueItem(id, patch) {
+	return api(`/api/queue/${encodeURIComponent(id)}`, {
+		method: 'PATCH',
+		body: JSON.stringify(patch)
+	});
+}
+
+/** @returns {Promise<InputHost[]>} */
+export function listInputs() {
+	return api('/api/inputs');
+}
+
+/**
+ * @param {{ name: string, kind?: HostKind, capture_path?: CapturePath, armed?: boolean, connected?: boolean, endpoint?: string }} body
+ * @returns {Promise<InputHost>}
+ */
+export function addInput(body) {
+	return api('/api/inputs', {
+		method: 'POST',
+		body: JSON.stringify(body)
+	});
+}
+
+/**
+ * @param {string} id
+ * @param {Partial<InputHost>} patch
+ * @returns {Promise<InputHost>}
+ */
+export function patchInput(id, patch) {
+	return api(`/api/inputs/${encodeURIComponent(id)}`, {
+		method: 'PATCH',
+		body: JSON.stringify(patch)
+	});
+}
+
+/**
+ * @param {string} id
+ * @returns {Promise<null>}
+ */
+export function deleteInput(id) {
+	return api(`/api/inputs/${encodeURIComponent(id)}`, { method: 'DELETE' });
+}
+
+/**
+ * @param {string} id
+ * @returns {Promise<null>}
+ */
+export function deleteQueueItem(id) {
+	return api(`/api/queue/${encodeURIComponent(id)}`, { method: 'DELETE' });
+}
+
+/**
+ * @param {string} id
+ * @returns {Promise<Transport>}
+ */
+export function setActiveQueueItem(id) {
+	return api('/api/queue/active', {
+		method: 'PUT',
+		body: JSON.stringify({ id })
+	});
+}
+
 
 /** @returns {Promise<WifiStatus>} */
 export function getWifiStatus() {
@@ -193,4 +327,34 @@ export function fmtMs(ms) {
 	const m = Math.floor(total / 60);
 	const s = total % 60;
 	return `${m}:${String(s).padStart(2, '0')}`;
+}
+
+/** @param {SourceType | string | null | undefined} type */
+export function sourceTypeLabel(type) {
+	switch (type) {
+		case 'local':
+			return 'Local';
+		case 'spotify':
+			return 'Spotify';
+		case 'apple':
+			return 'Apple Music';
+		case 'input':
+			return 'Live input';
+		default:
+			return type || '—';
+	}
+}
+
+/** @param {CapturePath | string | null | undefined} path */
+export function capturePathLabel(path) {
+	switch (path) {
+		case 'bt_a2dp':
+			return 'BT A2DP source';
+		case 'usb':
+			return 'USB audio';
+		case 'network':
+			return 'Network / upload';
+		default:
+			return path || '—';
+	}
 }

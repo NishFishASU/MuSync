@@ -59,21 +59,31 @@ web/                # SvelteKit SPA (adapter-static)
 config/
   devices.pi-2sink.example.yaml   # start here on Pi
   devices.example.yaml            # full 6-sink template
-docs/pi-pipewire.md  docs/wifi-join.md
-backend/musync/wifi/  # nmcli on Pi; mock on laptop
+docs/pi-pipewire.md
+docs/spp-network-sink.md   # Simple Protocol Player TCP output
+docs/wifi-join.md          # phone hotspot join (nmcli)
+backend/musync/wifi/       # nmcli on Pi; mock on laptop
 scripts/build_web.sh  run_dev.sh  run_pi.sh  pair_bt600.sh
 ```
+
+SPP phone sink: enable `spp-1` (`kind: network_spp`) in devices config, Play a local track, connect Simple Protocol Player to the Pi IP on port `1234` (48000 mono). Details: [docs/spp-network-sink.md](docs/spp-network-sink.md).
 
 ## API (minimum)
 
 | Method | Path | Purpose |
 |--------|------|---------|
 | `GET` | `/api/health` | Backend, PipeWire up?, mapped sinks, graph dry-run |
-| `GET` | `/api/devices` | List sinks |
-| `PATCH` | `/api/devices/{id}` | `{ delay_ms?, volume?, mute?, enabled?, pw_node? }` |
-| `GET`/`PUT` | `/api/transport` | `{ state, position_ms, source_id? }` |
-| `GET` | `/api/sources` | Local files + disabled later stubs |
-| `PUT` | `/api/sources/active` | `{ id }` source picker |
+| `GET` | `/api/devices` | List sinks (Bluetooth + optional `network_spp`) |
+| `PATCH` | `/api/devices/{id}` | `{ delay_ms?, volume?, mute?, enabled?, listen_port?, … }` |
+| `GET`/`PUT` | `/api/transport` | `{ state, position_ms, source_id?, queue_item_id? }` |
+| `GET` | `/api/sources` | Catalog: `local` + `spotify` / `apple` / `input` stubs |
+| `PUT` | `/api/sources/active` | `{ id }` — activate catalog entry (feeder swap only) |
+| `GET`/`POST` | `/api/queue` | Song queue; each item has `source_type` + optional `input_id` |
+| `PATCH` | `/api/queue/{id}` | Switch `source_type` / bind phone-PC host without tearing down sinks |
+| `PUT` | `/api/queue/active` | `{ id }` — play this queue item (feeder swap only) |
+| `DELETE` | `/api/queue/{id}` | Remove a queue item |
+| `GET`/`POST` | `/api/inputs` | Register ≤4 phone/PC hosts (`capture_path`: `bt_a2dp`\|`usb`\|`network`) |
+| `PATCH`/`DELETE` | `/api/inputs/{id}` | Arm / change capture path / remove host |
 | `GET` | `/api/wifi` | Wi-Fi status + IPv4 (for SPP / LAN) |
 | `GET`/`POST`/`DELETE` | `/api/wifi/networks` | List / pre-save / forget SSIDs (no passwords returned) |
 | `POST` | `/api/wifi/connect` | Join SSID (`password` optional if saved) |

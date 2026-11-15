@@ -48,30 +48,35 @@ import logging
 import os
 import subprocess
 import threading
-import time
 from pathlib import Path
 from typing import Optional
 
 from ..config import (
-    PLACEHOLDER_SOURCES,
     clamp_delay_ms,
     clamp_volume,
-    discover_local_sources,
     load_devices,
     repo_root,
     save_devices,
+    validate_devices,
 )
 from ..models import (
     Device,
+    DeviceKind,
     DevicePatch,
     Health,
+    InputHost,
+    InputHostCreate,
+    InputHostPatch,
+    QueueItem,
+    QueueItemCreate,
+    QueueItemPatch,
     Source,
-    SourceType,
     Transport,
     TransportPut,
     TransportState,
 )
 from .base import AudioBackend
+from .input_registry import InputRegistry
 from .pw_tools import (
     GraphLink,
     GraphPlan,
@@ -84,6 +89,8 @@ from .pw_tools import (
     run_cmd,
     which,
 )
+from .source_session import SourceSession
+from .spp import build_spp_ffmpeg_from_pulse, spp_plan_notes, spp_tcp_url
 
 log = logging.getLogger(__name__)
 
@@ -97,36 +104,26 @@ class PipeWireBackend(AudioBackend):
 
     def __init__(self, devices: Optional[list[Device]] = None) -> None:
         self._lock = threading.RLock()
+        loaded = devices if devices is not None else load_devices()
+        validate_devices(loaded)
         self._devices: dict[str, Device] = {
-            d.id: d.model_copy(deep=True)
-            for d in (devices if devices is not None else load_devices())
+            d.id: d.model_copy(deep=True) for d in loaded
         }
-        if len(self._devices) > 6:
-            raise ValueError("MuSync supports at most 6 sinks")
         if len(self._devices) < 1:
             raise ValueError("At least one device profile is required")
 
         self._feeder = os.environ.get("MUSYNC_PW_FEEDER", DEFAULT_FEEDER).strip() or DEFAULT_FEEDER
         self._pw_node_ids: dict[str, str] = {
-            d.id: d.pw_node for d in self._devices.values() if d.pw_node
+            d.id: d.pw_node
+            for d in self._devices.values()
+            if d.pw_node and d.kind == DeviceKind.BLUETOOTH
         }
         self._pw_node_names: dict[str, str] = {}
         self._loopback_module_ids: dict[str, str] = {}
         self._last_plan: Optional[GraphPlan] = None
         self._discovered: list[PwNode] = []
-
-        self._sources = self._build_sources()
-        active = next((s for s in self._sources if s.available), None)
-        self._transport = Transport(
-            state=TransportState.STOPPED,
-            position_ms=0,
-            duration_ms=(active.duration_ms or 0) if active else 0,
-            source_id=active.id if active else None,
-            title=active.title if active else None,
-        )
-        self._play_started_wall: Optional[float] = None
-        self._play_started_pos: int = 0
         self._player_proc: Optional[subprocess.Popen[str]] = None
+        self._spp_procs: dict[str, subprocess.Popen[str]] = {}
 
         self._tools = {
             "wpctl": which("wpctl"),
@@ -136,7 +133,17 @@ class PipeWireBackend(AudioBackend):
             "mpv": which("mpv"),
             "pactl": which("pactl"),
             "bluetoothctl": which("bluetoothctl"),
+            "ffmpeg": which("ffmpeg"),
         }
+
+        # Song/source switches only stop/start the feeder player — sink graph stays.
+        self._inputs = InputRegistry(lock=self._lock)
+        self._session = SourceSession(
+            inputs=self._inputs,
+            lock=self._lock,
+            on_feeder_stop=self._stop_player_process,
+            on_feeder_start=self._start_player_process,
+        )
 
         # Refresh map / plan once at startup (no-op / dry-run without hardware).
         try:
@@ -144,45 +151,6 @@ class PipeWireBackend(AudioBackend):
             self._ensure_graph()
         except Exception as exc:  # noqa: BLE001 — never block API boot
             log.warning("Startup graph plan failed: %s", exc)
-
-    def _build_sources(self) -> list[Source]:
-        local = discover_local_sources()
-        if not local:
-            local = [
-                Source(
-                    id="local:demo/sample-tone",
-                    title="Sample Tone (demo)",
-                    type=SourceType.LOCAL,
-                    path=None,
-                    available=True,
-                    duration_ms=180_000,
-                    note="Add WAV/FLAC/MP3 under media/ for real playback on Pi",
-                )
-            ]
-        return local + list(PLACEHOLDER_SOURCES)
-
-    def _source_by_id(self, source_id: str) -> Source:
-        for src in self._sources:
-            if src.id == source_id:
-                return src
-        raise KeyError(f"Unknown source: {source_id}")
-
-    def _tick_position(self) -> None:
-        if self._transport.state != TransportState.PLAYING:
-            return
-        if self._play_started_wall is None:
-            return
-        elapsed = int((time.monotonic() - self._play_started_wall) * 1000)
-        pos = self._play_started_pos + elapsed
-        duration = self._transport.duration_ms or 0
-        if duration and pos >= duration:
-            self._transport.position_ms = duration
-            self._transport.state = TransportState.STOPPED
-            self._play_started_wall = None
-            self._play_started_pos = 0
-            self._stop_player_process()
-        else:
-            self._transport.position_ms = pos
 
     def _persist(self) -> None:
         try:
@@ -234,6 +202,9 @@ class PipeWireBackend(AudioBackend):
 
         mapped: dict[str, str] = {}
         for device in self._devices.values():
+            if device.kind == DeviceKind.NETWORK_SPP:
+                # SPP has no bluez node; connected reflects ffmpeg listen state.
+                continue
             node = match_device_node(
                 mac=device.mac,
                 hci=device.hci,
@@ -291,6 +262,26 @@ class PipeWireBackend(AudioBackend):
         for device in self._devices.values():
             if not device.enabled:
                 plan.skipped.append(f"{device.id} disabled")
+                continue
+
+            # SPP TCP network sink — long-lived ffmpeg listen (managed separately).
+            if device.kind == DeviceKind.NETWORK_SPP:
+                plan.notes.extend(spp_plan_notes(device, feeder=self._feeder))
+                if not self._tools.get("ffmpeg"):
+                    plan.notes.append(
+                        f"{device.id}: ffmpeg missing — install ffmpeg for SPP TCP listen"
+                    )
+                plan.links.append(
+                    GraphLink(
+                        device_id=device.id,
+                        source=f"{self._feeder}.monitor",
+                        target=spp_tcp_url(device),
+                        delay_ms=device.delay_ms,
+                        volume=device.volume,
+                        mute=device.mute,
+                        commands=[],  # started via _sync_spp_listeners (not one-shot)
+                    )
+                )
                 continue
 
             node_id = self._pw_node_ids.get(device.id, "")
@@ -371,6 +362,9 @@ class PipeWireBackend(AudioBackend):
             self._exec_soft([pactl, "unload-module", found])
 
     def _apply_volume(self, device: Device) -> None:
+        if device.kind == DeviceKind.NETWORK_SPP:
+            self._restart_spp_listener(device)
+            return
         node = self._pw_node_ids.get(device.id)
         wpctl = self._tools["wpctl"]
         if not node or not wpctl or self._env_dry_run():
@@ -385,6 +379,9 @@ class PipeWireBackend(AudioBackend):
         self._exec_soft([wpctl, "set-volume", node, f"{device.volume:.3f}"])
 
     def _apply_mute(self, device: Device) -> None:
+        if device.kind == DeviceKind.NETWORK_SPP:
+            self._restart_spp_listener(device)
+            return
         node = self._pw_node_ids.get(device.id)
         wpctl = self._tools["wpctl"]
         if not node or not wpctl or self._env_dry_run():
@@ -393,11 +390,79 @@ class PipeWireBackend(AudioBackend):
         self._exec_soft([wpctl, "set-mute", node, "1" if device.mute else "0"])
 
     def _apply_delay(self, device: Device) -> None:
-        """Re-wire this sink's loopback with updated latency_msec."""
+        """Re-wire this sink's loopback (BT) or restart SPP ffmpeg with adelay."""
         if not device.enabled:
+            if device.kind == DeviceKind.NETWORK_SPP:
+                self._stop_spp_listener(device.id)
             return
-        # Rebuild just this sink by running ensure_graph for all — keeps feeder shared.
+        if device.kind == DeviceKind.NETWORK_SPP:
+            self._restart_spp_listener(device)
+            return
+        # Rebuild just this sink by running ensure_graph — keeps feeder shared.
         self._ensure_graph(only_device=device.id)
+
+    def _stop_spp_listener(self, device_id: str) -> None:
+        proc = self._spp_procs.pop(device_id, None)
+        if proc is None:
+            return
+        if proc.poll() is None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=2.0)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+
+    def _restart_spp_listener(self, device: Device) -> None:
+        """Keep TCP listen up while enabled so the phone can connect anytime."""
+        self._stop_spp_listener(device.id)
+        if device.kind != DeviceKind.NETWORK_SPP or not device.enabled:
+            device.connected = False
+            return
+
+        if self._env_dry_run():
+            log.info(
+                "Dry-run SPP: %s",
+                " ".join(build_spp_ffmpeg_from_pulse(device, feeder=self._feeder)),
+            )
+            device.connected = True
+            return
+
+        ff = self._tools.get("ffmpeg")
+        if not ff:
+            log.warning("ffmpeg missing — cannot start SPP listener for %s", device.id)
+            device.connected = False
+            return
+
+        cmd = build_spp_ffmpeg_from_pulse(device, feeder=self._feeder, ffmpeg_bin=ff)
+        try:
+            self._spp_procs[device.id] = subprocess.Popen(
+                cmd,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                text=True,
+            )
+            device.connected = True
+            log.info(
+                "SPP listening %s → %s (pid %s)",
+                device.id,
+                spp_tcp_url(device),
+                self._spp_procs[device.id].pid,
+            )
+        except OSError as exc:
+            log.warning("Failed to start SPP listener %s: %s", device.id, exc)
+            device.connected = False
+
+    def _sync_spp_listeners(self, only_device: str | None = None) -> None:
+        for device in self._devices.values():
+            if device.kind != DeviceKind.NETWORK_SPP:
+                continue
+            if only_device and device.id != only_device:
+                continue
+            if device.enabled:
+                self._restart_spp_listener(device)
+            else:
+                self._stop_spp_listener(device.id)
+                device.connected = False
 
     def _ensure_graph(self, only_device: str | None = None) -> GraphPlan:
         """Ensure feeder → delay/volume → enabled sinks.
@@ -420,6 +485,8 @@ class PipeWireBackend(AudioBackend):
                 len(plan.links),
                 len(plan.skipped),
             )
+            # Still "arm" SPP in dry-run so UI shows connected when enabled.
+            self._sync_spp_listeners(only_device=only_device)
             return plan
 
         # Live path — create feeder (idempotent soft-fail if exists).
@@ -429,6 +496,9 @@ class PipeWireBackend(AudioBackend):
         for link in plan.links:
             if only_device and link.device_id != only_device:
                 continue
+            device = self._devices.get(link.device_id)
+            if device and device.kind == DeviceKind.NETWORK_SPP:
+                continue  # SPP ffmpeg is long-lived; see _sync_spp_listeners
             self._unload_loopback(link.device_id)
             for cmd in link.commands:
                 proc = self._exec_soft(cmd)
@@ -448,9 +518,13 @@ class PipeWireBackend(AudioBackend):
         for device in self._devices.values():
             if only_device and device.id != only_device:
                 continue
+            if device.kind == DeviceKind.NETWORK_SPP:
+                continue
             if not device.enabled:
                 self._unload_loopback(device.id)
 
+        # SPP TCP listeners share the feeder; independent of bluez loopbacks.
+        self._sync_spp_listeners(only_device=only_device)
         return plan
 
     def _stop_player_process(self) -> None:
@@ -466,24 +540,23 @@ class PipeWireBackend(AudioBackend):
                 proc.kill()
 
     def _start_player_process(self) -> None:
-        """Play local file into the MuSync feeder (or default PipeWire)."""
+        """Play local file into the MuSync feeder. Does not touch sink loopbacks."""
         self._stop_player_process()
-        src_id = self._transport.source_id
-        if not src_id:
-            return
-        try:
-            src = self._source_by_id(src_id)
-        except KeyError:
-            return
-        if not src.path:
-            log.info("No file path for %s — software clock only", src_id)
+        path = self._session.active_file_path()
+        transport = self._session.get_transport()
+        if not path:
+            log.info(
+                "No local file for feeder (%s / %s) — software clock only",
+                transport.source_type,
+                transport.queue_item_id or transport.source_id,
+            )
             return
 
         if self._env_dry_run():
             log.info(
                 "Dry-run playback: mpv --ao=pipewire --audio-device=%s %s",
                 self._feeder,
-                src.path,
+                path,
             )
             return
 
@@ -497,8 +570,8 @@ class PipeWireBackend(AudioBackend):
                         "--no-video",
                         "--ao=pipewire",
                         f"--audio-device={self._feeder}",
-                        f"--start={self._transport.position_ms / 1000:.3f}",
-                        src.path,
+                        f"--start={transport.position_ms / 1000:.3f}",
+                        path,
                     ],
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL,
@@ -506,7 +579,7 @@ class PipeWireBackend(AudioBackend):
                 )
             elif pw_play:
                 self._player_proc = subprocess.Popen(
-                    [pw_play, f"--target={self._feeder}", src.path],
+                    [pw_play, f"--target={self._feeder}", path],
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL,
                     text=True,
@@ -542,104 +615,79 @@ class PipeWireBackend(AudioBackend):
                 updates["volume"] = clamp_volume(updates["volume"])
             data.update(updates)
             updated = Device.model_validate(data)
+            trial = [updated if d.id == device_id else d for d in self._devices.values()]
+            validate_devices(trial)
             self._devices[device_id] = updated
-            if updated.pw_node:
+            if updated.kind == DeviceKind.BLUETOOTH and updated.pw_node:
                 self._pw_node_ids[device_id] = updated.pw_node
             self._persist()
 
-            if "volume" in updates:
-                self._apply_volume(updated)
-            if "mute" in updates:
-                self._apply_mute(updated)
-            if "delay_ms" in updates or "enabled" in updates or "pw_node" in updates:
-                self._ensure_graph(only_device=device_id)
+            spp_fields = {
+                "listen_host",
+                "listen_port",
+                "sample_rate",
+                "channels",
+                "delay_ms",
+                "volume",
+                "mute",
+                "enabled",
+            }
+            if updated.kind == DeviceKind.NETWORK_SPP and spp_fields & set(updates):
+                self._restart_spp_listener(updated)
+            else:
+                if "volume" in updates:
+                    self._apply_volume(updated)
+                if "mute" in updates:
+                    self._apply_mute(updated)
+                if "delay_ms" in updates or "enabled" in updates or "pw_node" in updates:
+                    self._ensure_graph(only_device=device_id)
 
             return updated.model_copy(deep=True)
 
     def get_transport(self) -> Transport:
-        with self._lock:
-            self._tick_position()
-            return self._transport.model_copy(deep=True)
+        return self._session.get_transport()
 
     def set_transport(self, body: TransportPut) -> Transport:
-        with self._lock:
-            self._tick_position()
-            if body.source_id is not None:
-                self._apply_source(body.source_id, reset_position=False)
-
-            if body.position_ms is not None:
-                duration = self._transport.duration_ms or 0
-                pos = max(0, body.position_ms)
-                if duration:
-                    pos = min(pos, duration)
-                self._transport.position_ms = pos
-                if self._transport.state == TransportState.PLAYING:
-                    self._play_started_wall = time.monotonic()
-                    self._play_started_pos = pos
-                    self._start_player_process()
-
-            if body.state is not None:
-                self._apply_state(body.state)
-
-            return self._transport.model_copy(deep=True)
-
-    def _apply_state(self, state: TransportState) -> None:
-        current = self._transport.state
-        if state == TransportState.PLAYING:
-            if current == TransportState.PLAYING:
-                return
+        # Ensure sink graph exists before starting playback; never tear it down
+        # when switching songs/sources (feeder swap only).
+        if body.state is TransportState.PLAYING:
             self._ensure_graph()
-            self._play_started_wall = time.monotonic()
-            self._play_started_pos = self._transport.position_ms
-            self._transport.state = TransportState.PLAYING
-            self._start_player_process()
-        elif state == TransportState.PAUSED:
-            self._tick_position()
-            self._play_started_wall = None
-            self._transport.state = TransportState.PAUSED
-            self._stop_player_process()
-        elif state == TransportState.STOPPED:
-            self._play_started_wall = None
-            self._play_started_pos = 0
-            self._transport.position_ms = 0
-            self._transport.state = TransportState.STOPPED
-            self._stop_player_process()
-
-    def _apply_source(self, source_id: str, *, reset_position: bool) -> None:
-        src = self._source_by_id(source_id)
-        if not src.available:
-            raise ValueError(f"Source not available in MVP: {source_id}")
-        self._transport.source_id = src.id
-        self._transport.title = src.title
-        self._transport.duration_ms = src.duration_ms or 0
-        if reset_position:
-            self._transport.position_ms = 0
-            self._play_started_wall = None
-            self._play_started_pos = 0
+        return self._session.set_transport(body)
 
     def list_sources(self) -> list[Source]:
-        with self._lock:
-            placeholders = [s for s in self._sources if s.type != SourceType.LOCAL]
-            local = discover_local_sources()
-            if not local:
-                local = [s for s in self._sources if s.type == SourceType.LOCAL]
-            self._sources = local + placeholders
-            return [s.model_copy(deep=True) for s in self._sources]
+        return self._session.list_sources()
 
     def set_active_source(self, source_id: str) -> Transport:
-        with self._lock:
-            was_playing = self._transport.state == TransportState.PLAYING
-            if was_playing:
-                self._stop_player_process()
-            self._apply_source(source_id, reset_position=True)
-            self._transport.state = (
-                TransportState.PLAYING if was_playing else TransportState.STOPPED
-            )
-            if was_playing:
-                self._play_started_wall = time.monotonic()
-                self._play_started_pos = 0
-                self._start_player_process()
-            return self._transport.model_copy(deep=True)
+        # Feeder swap only — sink loopbacks remain.
+        return self._session.set_active_source(source_id)
+
+    def list_queue(self) -> list[QueueItem]:
+        return self._session.list_queue()
+
+    def add_queue_item(self, body: QueueItemCreate) -> QueueItem:
+        return self._session.add_queue_item(body)
+
+    def patch_queue_item(self, item_id: str, patch: QueueItemPatch) -> QueueItem:
+        return self._session.patch_queue_item(item_id, patch)
+
+    def remove_queue_item(self, item_id: str) -> None:
+        self._session.remove_queue_item(item_id)
+
+    def set_active_queue_item(self, item_id: str) -> Transport:
+        return self._session.set_active_queue_item(item_id)
+
+    def list_inputs(self) -> list[InputHost]:
+        return self._inputs.list_hosts()
+
+    def add_input(self, body: InputHostCreate) -> InputHost:
+        return self._inputs.add_host(body)
+
+    def patch_input(self, host_id: str, patch: InputHostPatch) -> InputHost:
+        return self._inputs.patch_host(host_id, patch)
+
+    def remove_input(self, host_id: str) -> None:
+        self._inputs.remove_host(host_id)
+        self._session.clear_input_bindings(host_id)
 
     def health(self) -> Health:
         with self._lock:

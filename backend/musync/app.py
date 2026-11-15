@@ -5,18 +5,25 @@ from __future__ import annotations
 from pathlib import Path
 from urllib.parse import unquote
 
-from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import FileResponse, JSONResponse, Response
+from fastapi import FastAPI, HTTPException, Request, Response
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from . import __version__
 from .audio import AudioBackend, create_backend
 from .config import web_root
 from .models import (
+    ActiveQueuePut,
     ActiveSourcePut,
     Device,
     DevicePatch,
     Health,
+    InputHost,
+    InputHostCreate,
+    InputHostPatch,
+    QueueItem,
+    QueueItemCreate,
+    QueueItemPatch,
     Source,
     Transport,
     TransportPut,
@@ -33,7 +40,7 @@ wifi_backend: WifiBackend = create_wifi_backend()
 app = FastAPI(
     title="MuSync",
     version=__version__,
-    description="Multi-device Bluetooth audio sync hub (Phase 0 MVP)",
+    description="Multi-device Bluetooth audio sync hub — song-level source switching",
 )
 
 
@@ -90,7 +97,58 @@ def api_list_sources() -> list[Source]:
 
 @app.put("/api/sources/active", response_model=Transport)
 def api_set_active_source(body: ActiveSourcePut) -> Transport:
+    """Pick a catalog source; creates/reuses a queue item. Sinks stay up."""
     return backend.set_active_source(body.id)
+
+
+@app.get("/api/queue", response_model=list[QueueItem])
+def api_list_queue() -> list[QueueItem]:
+    return backend.list_queue()
+
+
+@app.post("/api/queue", response_model=QueueItem, status_code=201)
+def api_add_queue_item(body: QueueItemCreate) -> QueueItem:
+    return backend.add_queue_item(body)
+
+
+@app.patch("/api/queue/{item_id}", response_model=QueueItem)
+def api_patch_queue_item(item_id: str, patch: QueueItemPatch) -> QueueItem:
+    """Switch source_type on a song without tearing down the sink graph."""
+    return backend.patch_queue_item(item_id, patch)
+
+
+@app.delete("/api/queue/{item_id}", status_code=204)
+def api_delete_queue_item(item_id: str) -> Response:
+    backend.remove_queue_item(item_id)
+    return Response(status_code=204)
+
+
+@app.put("/api/queue/active", response_model=Transport)
+def api_set_active_queue_item(body: ActiveQueuePut) -> Transport:
+    """Activate a queue item (feeder swap only)."""
+    return backend.set_active_queue_item(body.id)
+
+
+@app.get("/api/inputs", response_model=list[InputHost])
+def api_list_inputs() -> list[InputHost]:
+    """Registered phone/PC hosts (≤4). Capture paths are stubs."""
+    return backend.list_inputs()
+
+
+@app.post("/api/inputs", response_model=InputHost, status_code=201)
+def api_add_input(body: InputHostCreate) -> InputHost:
+    return backend.add_input(body)
+
+
+@app.patch("/api/inputs/{host_id}", response_model=InputHost)
+def api_patch_input(host_id: str, patch: InputHostPatch) -> InputHost:
+    return backend.patch_input(host_id, patch)
+
+
+@app.delete("/api/inputs/{host_id}", status_code=204)
+def api_delete_input(host_id: str) -> Response:
+    backend.remove_input(host_id)
+    return Response(status_code=204)
 
 
 @app.get("/api/wifi", response_model=WifiStatus)

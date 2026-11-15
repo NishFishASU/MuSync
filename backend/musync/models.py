@@ -1,4 +1,4 @@
-"""Shared API / domain models for MuSync Phase 0."""
+"""Shared API / domain models for MuSync."""
 
 from __future__ import annotations
 
@@ -14,11 +14,23 @@ class TransportState(str, Enum):
     PAUSED = "paused"
 
 
+class DeviceKind(str, Enum):
+    """Output sink kinds. Bluetooth A2DP (≤6) or SPP TCP network listen."""
+
+    BLUETOOTH = "bluetooth"
+    NETWORK_SPP = "network_spp"
+
+
+MAX_BT_SINKS = 6
+MAX_SPP_SINKS = 4
+
+
 class Device(BaseModel):
-    """One Bluetooth A2DP sink (one BT600 adapter → one speaker)."""
+    """One output sink: BT A2DP speaker or SPP TCP network listen."""
 
     id: str
     name: str
+    kind: DeviceKind = DeviceKind.BLUETOOTH
     mac: str = ""
     hci: str = ""
     connected: bool = False
@@ -28,6 +40,11 @@ class Device(BaseModel):
     enabled: bool = True
     # Optional WirePlumber/PipeWire node id or node.name override after connect.
     pw_node: str = ""
+    # Simple Protocol Player TCP listen (kind=network_spp).
+    listen_host: str = "0.0.0.0"
+    listen_port: int = Field(default=1234, ge=1, le=65535)
+    sample_rate: int = Field(default=48000, ge=8000, le=192000)
+    channels: int = Field(default=1, ge=1, le=2)
 
     @field_validator("volume")
     @classmethod
@@ -43,6 +60,11 @@ class DevicePatch(BaseModel):
     name: Optional[str] = None
     pw_node: Optional[str] = None
     connected: Optional[bool] = None
+    kind: Optional[DeviceKind] = None
+    listen_host: Optional[str] = None
+    listen_port: Optional[int] = Field(default=None, ge=1, le=65535)
+    sample_rate: Optional[int] = Field(default=None, ge=8000, le=192000)
+    channels: Optional[int] = Field(default=None, ge=1, le=2)
 
     @field_validator("volume")
     @classmethod
@@ -53,20 +75,132 @@ class DevicePatch(BaseModel):
 
 
 class SourceType(str, Enum):
+    """Song-level feeder kinds. Streaming/input are stubs until later phases."""
+
     LOCAL = "local"
-    STREAM = "stream"
+    SPOTIFY = "spotify"
+    APPLE = "apple"
     INPUT = "input"
-    MOVIE = "movie"
+
+
+class CapturePath(str, Enum):
+    """How a phone/PC feeds the Pi — stubs until capture is wired on hardware."""
+
+    BT_A2DP = "bt_a2dp"  # device as A2DP source → Pi
+    USB = "usb"  # USB audio interface / UAC from PC
+    NETWORK = "network"  # AirPlay / Pulse / file upload stub
+
+
+class HostKind(str, Enum):
+    PHONE = "phone"
+    PC = "pc"
+    OTHER = "other"
+
+
+MAX_INPUT_HOSTS = 4
+
+# Source types that can actually feed PCM today.
+PLAYABLE_SOURCE_TYPES = frozenset({SourceType.LOCAL})
 
 
 class Source(BaseModel):
+    """Catalog entry: hub local file, or a per-host contribution stub."""
+
     id: str
     title: str
     type: SourceType = SourceType.LOCAL
     path: Optional[str] = None
+    locator: Optional[str] = None
     available: bool = True
     note: Optional[str] = None
     duration_ms: Optional[int] = None
+    # Which registered phone/PC this catalog row belongs to (None = hub library).
+    input_id: Optional[str] = None
+
+
+class InputHost(BaseModel):
+    """A phone or PC that can feed the hub (≤4). Capture is stubbed."""
+
+    id: str
+    name: str
+    kind: HostKind = HostKind.PHONE
+    capture_path: CapturePath = CapturePath.NETWORK
+    armed: bool = False
+    connected: bool = False
+    endpoint: Optional[str] = None
+    # What this host can contribute into the queue (stubs OK).
+    offers_local: bool = True
+    offers_spotify: bool = True
+    offers_apple: bool = True
+    offers_live_input: bool = True
+    note: Optional[str] = None
+
+
+class InputHostCreate(BaseModel):
+    name: str
+    kind: HostKind = HostKind.PHONE
+    capture_path: CapturePath = CapturePath.NETWORK
+    armed: bool = False
+    connected: bool = False
+    endpoint: Optional[str] = None
+    offers_local: bool = True
+    offers_spotify: bool = True
+    offers_apple: bool = True
+    offers_live_input: bool = True
+    note: Optional[str] = None
+
+
+class InputHostPatch(BaseModel):
+    name: Optional[str] = None
+    kind: Optional[HostKind] = None
+    capture_path: Optional[CapturePath] = None
+    armed: Optional[bool] = None
+    connected: Optional[bool] = None
+    endpoint: Optional[str] = None
+    offers_local: Optional[bool] = None
+    offers_spotify: Optional[bool] = None
+    offers_apple: Optional[bool] = None
+    offers_live_input: Optional[bool] = None
+    note: Optional[str] = None
+
+
+class QueueItem(BaseModel):
+    """One song/cue — source type + optional phone/PC host binding."""
+
+    id: str
+    title: str
+    source_type: SourceType = SourceType.LOCAL
+    locator: Optional[str] = None
+    source_id: Optional[str] = None
+    path: Optional[str] = None
+    # When set: this cue is contributed by / captured from that host.
+    input_id: Optional[str] = None
+    available: bool = True
+    note: Optional[str] = None
+    duration_ms: Optional[int] = None
+
+
+class QueueItemCreate(BaseModel):
+    """Add a queue item from a catalog source and/or explicit type + host."""
+
+    title: Optional[str] = None
+    source_type: SourceType = SourceType.LOCAL
+    locator: Optional[str] = None
+    source_id: Optional[str] = None
+    path: Optional[str] = None
+    input_id: Optional[str] = None
+    duration_ms: Optional[int] = None
+
+
+class QueueItemPatch(BaseModel):
+    """Switch source type / host / locator on a song without rebuilding sinks."""
+
+    title: Optional[str] = None
+    source_type: Optional[SourceType] = None
+    locator: Optional[str] = None
+    source_id: Optional[str] = None
+    path: Optional[str] = None
+    input_id: Optional[str] = None
 
 
 class Transport(BaseModel):
@@ -74,6 +208,9 @@ class Transport(BaseModel):
     position_ms: int = Field(default=0, ge=0)
     duration_ms: int = Field(default=0, ge=0)
     source_id: Optional[str] = None
+    queue_item_id: Optional[str] = None
+    source_type: Optional[SourceType] = None
+    input_id: Optional[str] = None
     title: Optional[str] = None
 
 
@@ -83,9 +220,14 @@ class TransportPut(BaseModel):
     state: Optional[TransportState] = None
     position_ms: Optional[int] = Field(default=None, ge=0)
     source_id: Optional[str] = None
+    queue_item_id: Optional[str] = None
 
 
 class ActiveSourcePut(BaseModel):
+    id: str
+
+
+class ActiveQueuePut(BaseModel):
     id: str
 
 
