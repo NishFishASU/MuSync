@@ -738,8 +738,16 @@
 	</div>
 </header>
 
+<nav class="jump" aria-label="Sections">
+	<a href="#transport-heading">Transport</a>
+	<a href="#wifi-heading">Wi-Fi</a>
+	<a href="#setup-heading">Devices</a>
+	<a href="#streaming-heading">Streaming</a>
+	<a href="#queue-heading">Sources</a>
+</nav>
+
 <main class="layout">
-	<section class="panel transport-panel" aria-labelledby="transport-heading">
+	<section class="panel panel-primary transport-panel" aria-labelledby="transport-heading">
 		<div class="panel-head">
 			<h2 id="transport-heading">Transport</h2>
 			<p class="now-playing">
@@ -749,15 +757,15 @@
 				{/if}
 			</p>
 		</div>
-				{#if activeIsStub}
+		{#if activeIsStub}
 			<p class="stub-banner" role="status">
-				Active song is not playable yet
+				Not playable yet
 				{#if transport?.source_type === 'input'}
-					— bind a live bluez_input / USB / upload on a Phone/PC host, then Play.
+					— arm a live input host, then Play.
 				{:else if transport?.source_type === 'spotify' || transport?.source_type === 'apple'}
-					— connect/search in Streaming, or switch the song to Local.
+					— connect/search in Streaming, or switch to Local.
 				{:else}
-					— sink graph stays up; switch the song to Local or a live input.
+					— switch to Local or a live input; sinks stay linked.
 				{/if}
 			</p>
 		{/if}
@@ -820,776 +828,784 @@
 		</div>
 	</section>
 
-	<section class="panel setup-panel" aria-labelledby="setup-heading">
-		<div class="panel-head">
-			<h2 id="setup-heading">Device setup</h2>
-			<p class="hint">Pick BT by name · set SPP type details · save — no YAML / MAC typing</p>
-		</div>
-		{#if !setupConfigOk}
-			<p class="setup-warn">Config missing or broken — started from defaults. Save below to write devices.yaml.</p>
-		{/if}
-		<div class="setup-grid">
-			<div class="setup-col">
-				<h3 class="setup-sub">Bluetooth (auto-discovered)</h3>
-				{#if discoveredBt.length === 0}
-					<p class="hint">No bluez sinks yet — pair a speaker, then Refresh.</p>
-				{:else}
-					<ul class="setup-list">
-						{#each discoveredBt as bt (bt.name + (bt.mac || ''))}
-							<li>
-								<label class="check setup-check">
-									<input
-										type="checkbox"
-										checked={setupBtNames.has(bt.name)}
-										onchange={() => toggleSetupBt(bt.name)}
-									/>
-									<span>
-										<strong>{bt.name}</strong>
-										<span class="device-sub">
-											{bt.connected ? 'connected' : bt.paired ? 'paired' : 'seen'}
-											{#if bt.pw_name}
-												· {bt.pw_name}
-											{/if}
-										</span>
-									</span>
-								</label>
-							</li>
-						{/each}
-					</ul>
-				{/if}
-			</div>
-			<div class="setup-col">
-				<h3 class="setup-sub">Stream / sink type</h3>
-				<label class="check setup-check">
-					<input type="checkbox" bind:checked={setupSppEnabled} />
-					<span>
-						<strong>Phone SPP</strong>
-						<span class="device-sub">network_spp · TCP listen for Simple Protocol Player</span>
-					</span>
-				</label>
-				{#if setupSppEnabled}
-					<div class="setup-spp-fields">
-						<label class="field">
-							<span>Listen host</span>
-							<input type="text" bind:value={setupSppHost} autocomplete="off" />
-						</label>
-						<label class="field">
-							<span>Port</span>
-							<input type="number" min="1" max="65535" bind:value={setupSppPort} />
-						</label>
-						<label class="field">
-							<span>Sample rate</span>
-							<select bind:value={setupSppRate}>
-								<option value={44100}>44100</option>
-								<option value={48000}>48000</option>
-							</select>
-						</label>
-						<label class="field">
-							<span>Channels</span>
-							<select bind:value={setupSppChannels}>
-								<option value={1}>Mono (1)</option>
-								<option value={2}>Stereo (2)</option>
-							</select>
-						</label>
-					</div>
-				{/if}
-			</div>
-		</div>
-		<div class="setup-actions">
-			<button type="button" class="btn btn-ghost" disabled={setupBusy} onclick={() => refreshDiscovery()}>
-				Refresh discovery
-			</button>
-			<button type="button" class="btn" disabled={setupBusy} onclick={() => saveDeviceSetup()}>
-				{setupBusy ? 'Saving…' : 'Save sinks'}
-			</button>
-		</div>
-		{#if setupMessage}
-			<p class="setup-msg">{setupMessage}</p>
-		{/if}
-		{#if setupDetail}
-			<p class="hint setup-detail">{setupDetail}</p>
-		{/if}
-	</section>
+	<div class="zone" id="zone-network">
+		<p class="zone-label">Network</p>
 
-	<div class="split">
-		<section class="panel devices-panel" aria-labelledby="devices-heading">
+		<section class="panel wifi-panel" aria-labelledby="wifi-heading">
 			<div class="panel-head">
-				<h2 id="devices-heading">Devices</h2>
-				<p class="hint">Configured sinks · tap a row for delay &amp; volume</p>
+				<h2 id="wifi-heading">Wi-Fi</h2>
+				<p class="hint">Hotspot join · Pi IP for phone SPP</p>
 			</div>
-			<ul class="device-list">
-				{#each devices as d (d.id)}
-					<li>
+
+			<div class="wifi-status" data-ok={wifi ? String(Boolean(wifi.connected)) : undefined}>
+				<div class="wifi-ip-block">
+					<span class="wifi-label">Pi IP</span>
+					<code class="wifi-ip">{wifiIpLabel}</code>
+				</div>
+				<p class="wifi-line muted-line">
+					{#if wifi?.connected}
+						{wifi.ssid || 'associated'}
+						{#if wifi.interface}
+							· {wifi.interface}
+						{/if}
+					{:else}
+						Not associated
+					{/if}
+				</p>
+				{#if wifi?.detail}
+					<p class="wifi-detail">{wifi.detail}</p>
+				{/if}
+			</div>
+
+			<form
+				class="wifi-form"
+				onsubmit={(e) => {
+					e.preventDefault();
+					onJoinWifi();
+				}}
+			>
+				<div class="wifi-fields">
+					<label class="field">
+						<span>SSID</span>
+						<input
+							type="text"
+							name="ssid"
+							autocomplete="off"
+							maxlength="32"
+							placeholder="Phone hotspot name"
+							bind:value={wifiSsid}
+							disabled={wifiBusy}
+						/>
+					</label>
+					<label class="field">
+						<span>Password</span>
+						<input
+							type="password"
+							name="password"
+							autocomplete="new-password"
+							maxlength="63"
+							placeholder="Blank if already saved"
+							bind:value={wifiPassword}
+							disabled={wifiBusy}
+						/>
+					</label>
+				</div>
+				<div class="wifi-actions">
+					<button type="submit" class="btn" disabled={wifiBusy || !wifiSsid.trim()}>Join</button>
+					<button
+						type="button"
+						class="btn btn-ghost"
+						disabled={wifiBusy || !wifiSsid.trim()}
+						onclick={() => onSaveWifi()}
+					>
+						Save only
+					</button>
+				</div>
+			</form>
+
+			{#if wifiMessage}
+				<p class="wifi-message" role="status">{wifiMessage}</p>
+			{/if}
+
+			{#if wifiNetworks.length}
+				<ul class="wifi-list">
+					{#each wifiNetworks as n (n.ssid)}
+						<li class="wifi-row">
+							<span>
+								<span class="device-title">{n.ssid}</span>
+								<span class="device-sub">
+									{n.active ? 'active' : 'saved'}{n.has_password ? '' : ' · no key'}
+								</span>
+							</span>
+							<span class="wifi-row-actions">
+								<button
+									type="button"
+									class="btn btn-small"
+									disabled={wifiBusy || n.active}
+									onclick={() => onJoinWifi(n.ssid)}
+								>
+									Join
+								</button>
+								<button
+									type="button"
+									class="btn btn-ghost btn-small"
+									disabled={wifiBusy}
+									onclick={() => onForgetWifi(n.ssid)}
+								>
+									Forget
+								</button>
+							</span>
+						</li>
+					{/each}
+				</ul>
+			{:else}
+				<p class="wifi-empty">No saved networks</p>
+			{/if}
+		</section>
+	</div>
+
+	<div class="zone" id="zone-outputs">
+		<p class="zone-label">Outputs</p>
+
+		<section class="panel setup-panel" aria-labelledby="setup-heading">
+			<div class="panel-head">
+				<h2 id="setup-heading">Device setup</h2>
+				<p class="hint">BT by name · Phone SPP · Save</p>
+			</div>
+			{#if !setupConfigOk}
+				<p class="setup-warn">Config missing — save below to write devices.yaml.</p>
+			{/if}
+			<div class="setup-grid">
+				<div class="setup-col">
+					<h3 class="setup-sub">Bluetooth</h3>
+					{#if discoveredBt.length === 0}
+						<p class="hint">No bluez sinks — pair, then Refresh.</p>
+					{:else}
+						<ul class="setup-list">
+							{#each discoveredBt as bt (bt.name + (bt.mac || ''))}
+								<li>
+									<label class="check setup-check">
+										<input
+											type="checkbox"
+											checked={setupBtNames.has(bt.name)}
+											onchange={() => toggleSetupBt(bt.name)}
+										/>
+										<span>
+											<strong>{bt.name}</strong>
+											<span class="device-sub">
+												{bt.connected ? 'connected' : bt.paired ? 'paired' : 'seen'}
+											</span>
+										</span>
+									</label>
+								</li>
+							{/each}
+						</ul>
+					{/if}
+				</div>
+				<div class="setup-col">
+					<h3 class="setup-sub">Phone SPP</h3>
+					<label class="check setup-check">
+						<input type="checkbox" bind:checked={setupSppEnabled} />
+						<span>
+							<strong>Enable TCP listen</strong>
+							<span class="device-sub">Simple Protocol Player → Pi IP:port</span>
+						</span>
+					</label>
+					{#if setupSppEnabled}
+						<div class="setup-spp-fields">
+							<label class="field">
+								<span>Listen host</span>
+								<input type="text" bind:value={setupSppHost} autocomplete="off" />
+							</label>
+							<label class="field">
+								<span>Port</span>
+								<input type="number" min="1" max="65535" bind:value={setupSppPort} />
+							</label>
+							<label class="field">
+								<span>Sample rate</span>
+								<select bind:value={setupSppRate}>
+									<option value={44100}>44100</option>
+									<option value={48000}>48000</option>
+								</select>
+							</label>
+							<label class="field">
+								<span>Channels</span>
+								<select bind:value={setupSppChannels}>
+									<option value={1}>Mono (1)</option>
+									<option value={2}>Stereo (2)</option>
+								</select>
+							</label>
+						</div>
+					{/if}
+				</div>
+			</div>
+			<div class="setup-actions">
+				<button type="button" class="btn btn-ghost" disabled={setupBusy} onclick={() => refreshDiscovery()}>
+					Refresh
+				</button>
+				<button type="button" class="btn" disabled={setupBusy} onclick={() => saveDeviceSetup()}>
+					{setupBusy ? 'Saving…' : 'Save sinks'}
+				</button>
+			</div>
+			{#if setupMessage}
+				<p class="setup-msg">{setupMessage}</p>
+			{/if}
+			{#if setupDetail}
+				<p class="hint setup-detail">{setupDetail}</p>
+			{/if}
+		</section>
+
+		<div class="split">
+			<section class="panel devices-panel" aria-labelledby="devices-heading">
+				<div class="panel-head">
+					<h2 id="devices-heading">Sinks</h2>
+					<p class="hint">Tap for delay &amp; volume</p>
+				</div>
+				<ul class="device-list">
+					{#each devices as d (d.id)}
+						<li>
+							<button
+								type="button"
+								class="device-row"
+								class:selected={d.id === selectedId}
+								aria-pressed={d.id === selectedId}
+								onclick={() => {
+									selectedId = d.id;
+								}}
+							>
+								<span>
+									<span class="device-title">
+										{d.name}
+										{#if d.kind === 'network_spp'}
+											<span class="type-chip">SPP</span>
+										{:else}
+											<span class="type-chip">BT</span>
+										{/if}
+									</span>
+									<span class="device-sub">
+										{#if d.kind === 'network_spp'}
+											:{d.listen_port || 1234} · {d.sample_rate || 48000}/{d.channels || 1} · {d.delay_ms} ms · {Math.round(d.volume * 100)}%
+										{:else}
+											{d.delay_ms} ms · {Math.round(d.volume * 100)}%
+										{/if}
+									</span>
+								</span>
+								<span class="status-pill {d.connected ? 'linked' : 'missing'}">
+									{d.kind === 'network_spp'
+										? d.enabled
+											? 'listen'
+											: 'off'
+										: d.connected
+											? 'linked'
+											: 'missing'}{d.enabled || d.kind === 'network_spp' ? '' : ' · off'}
+								</span>
+							</button>
+						</li>
+					{/each}
+				</ul>
+			</section>
+
+			{#if selected}
+				<section class="panel detail-panel" aria-labelledby="detail-heading">
+					<div class="panel-head">
+						<h2 id="detail-heading">Sink controls</h2>
 						<button
 							type="button"
-							class="device-row"
-							class:selected={d.id === selectedId}
-							aria-pressed={d.id === selectedId}
+							class="btn btn-ghost btn-small"
 							onclick={() => {
-								selectedId = d.id;
+								selectedId = null;
 							}}
 						>
-							<span>
-								<span class="device-title">
-									{d.name}
-									{#if d.kind === 'network_spp'}
-										<span class="type-chip">SPP</span>
-									{:else}
-										<span class="type-chip">BT</span>
-									{/if}
-								</span>
-								<span class="device-sub">
-									{#if d.kind === 'network_spp'}
-										tcp://{d.listen_host || '0.0.0.0'}:{d.listen_port || 1234} · {d.sample_rate || 48000} Hz · {d.channels || 1} ch · delay {d.delay_ms} ms · vol {Math.round(d.volume * 100)}%
-									{:else}
-										{d.name} · delay {d.delay_ms} ms · vol {Math.round(d.volume * 100)}%
-									{/if}
-								</span>
+							Close
+						</button>
+					</div>
+					<p class="detail-name">{selected.name}</p>
+					<p class="detail-meta">
+						{#if selected.kind === 'network_spp'}
+							SPP · {selected.listen_host}:{selected.listen_port} · {selected.sample_rate} Hz / {selected.channels} ch · {selected.connected ? 'listening' : 'idle'}
+						{:else}
+							BT · {selected.connected ? 'linked' : 'waiting'} · pick by name in Device setup
+						{/if}
+					</p>
+
+					<label class="field">
+						<span>Sink type</span>
+						<select
+							value={selected.kind || 'bluetooth'}
+							onchange={(e) => {
+								queueDevicePatch({
+									kind: /** @type {import('$lib/api.js').DeviceKind} */ (
+										/** @type {HTMLSelectElement} */ (e.currentTarget).value
+									)
+								});
+							}}
+						>
+							<option value="bluetooth">Bluetooth (A2DP)</option>
+							<option value="network_spp">Phone SPP (TCP)</option>
+						</select>
+					</label>
+
+					{#if selected.kind === 'network_spp'}
+						<div class="spp-inline-fields">
+							<label class="field">
+								<span>Listen host</span>
+								<input
+									type="text"
+									value={selected.listen_host || '0.0.0.0'}
+									oninput={(e) => {
+										queueDevicePatch({
+											listen_host: /** @type {HTMLInputElement} */ (e.currentTarget).value
+										});
+									}}
+								/>
+							</label>
+							<label class="field">
+								<span>Port</span>
+								<input
+									type="number"
+									min="1"
+									max="65535"
+									value={selected.listen_port || 1234}
+									oninput={(e) => {
+										queueDevicePatch({
+											listen_port: Number(/** @type {HTMLInputElement} */ (e.currentTarget).value)
+										});
+									}}
+								/>
+							</label>
+							<label class="field">
+								<span>Sample rate</span>
+								<select
+									value={selected.sample_rate || 48000}
+									onchange={(e) => {
+										queueDevicePatch({
+											sample_rate: Number(/** @type {HTMLSelectElement} */ (e.currentTarget).value)
+										});
+									}}
+								>
+									<option value="44100">44100</option>
+									<option value="48000">48000</option>
+								</select>
+							</label>
+							<label class="field">
+								<span>Channels</span>
+								<select
+									value={selected.channels || 1}
+									onchange={(e) => {
+										queueDevicePatch({
+											channels: Number(/** @type {HTMLSelectElement} */ (e.currentTarget).value)
+										});
+									}}
+								>
+									<option value="1">Mono (1)</option>
+									<option value="2">Stereo (2)</option>
+								</select>
+							</label>
+						</div>
+					{/if}
+
+					<label class="field">
+						<span>Delay <em>{selected.delay_ms} ms</em></span>
+						<input
+							type="range"
+							min="0"
+							max="500"
+							step="5"
+							value={selected.delay_ms}
+							oninput={(e) => {
+								queueDevicePatch({ delay_ms: Number(/** @type {HTMLInputElement} */ (e.currentTarget).value) });
+							}}
+						/>
+					</label>
+					<label class="field">
+						<span>Volume <em>{Math.round(selected.volume * 100)}%</em></span>
+						<input
+							type="range"
+							min="0"
+							max="100"
+							step="1"
+							value={Math.round(selected.volume * 100)}
+							oninput={(e) => {
+								const pct = Number(/** @type {HTMLInputElement} */ (e.currentTarget).value);
+								queueDevicePatch({ volume: pct / 100 });
+							}}
+						/>
+					</label>
+					<div class="toggles">
+						<label class="check">
+							<input
+								type="checkbox"
+								checked={selected.mute}
+								onchange={(e) => {
+									queueDevicePatch({ mute: /** @type {HTMLInputElement} */ (e.currentTarget).checked });
+								}}
+							/>
+							<span>Mute</span>
+						</label>
+						<label class="check">
+							<input
+								type="checkbox"
+								checked={selected.enabled}
+								onchange={(e) => {
+									queueDevicePatch({ enabled: /** @type {HTMLInputElement} */ (e.currentTarget).checked });
+								}}
+							/>
+							<span>Enabled</span>
+						</label>
+					</div>
+				</section>
+			{/if}
+		</div>
+	</div>
+
+	<div class="zone" id="zone-sources">
+		<p class="zone-label">Sources</p>
+
+		<section class="panel streaming-panel" aria-labelledby="streaming-heading">
+			<div class="panel-head">
+				<h2 id="streaming-heading">Streaming</h2>
+				<p class="hint">Spotify → feeder · Apple limited on Linux</p>
+			</div>
+			<div class="stream-status">
+				<div class="stream-card">
+					<strong>Spotify</strong>
+					<span class="status-pill {streaming?.spotify?.authenticated ? 'linked' : 'missing'}">
+						{streaming?.spotify?.authenticated
+							? streaming.spotify.display_name || 'connected'
+							: streaming?.spotify?.configured
+								? 'not connected'
+								: 'not configured'}
+					</span>
+					{#if streaming?.spotify?.authenticated}
+						<button
+							type="button"
+							class="btn btn-ghost btn-small"
+							disabled={streamBusy}
+							onclick={() => onSpotifyLogout()}
+						>
+							Disconnect
+						</button>
+					{:else if streaming?.spotify?.configured}
+						<a class="btn btn-small" href="/api/streaming/spotify/login">Connect Spotify</a>
+					{:else}
+						<span class="muted tiny">Set MUSYNC_SPOTIFY_CLIENT_ID/SECRET — docs/spotify-apple.md</span>
+					{/if}
+					{#if streaming?.spotify?.note}
+						<p class="hint muted">{streaming.spotify.note}</p>
+					{/if}
+				</div>
+				<div class="stream-card">
+					<strong>Apple Music</strong>
+					<span class="status-pill {streaming?.apple?.authenticated ? 'linked' : 'missing'}">
+						{streaming?.apple?.authenticated
+							? streaming.apple.playback_mode === 'airplay_capture'
+								? 'search + AirPlay'
+								: 'search only'
+							: 'not configured'}
+					</span>
+					{#if streaming?.apple?.note}
+						<p class="hint muted">{streaming.apple.note}</p>
+					{/if}
+				</div>
+			</div>
+			<form
+				class="stream-search"
+				onsubmit={(e) => {
+					e.preventDefault();
+					onStreamSearch();
+				}}
+			>
+				<label class="type-select">
+					<span class="sr-only">Provider</span>
+					<select bind:value={streamProvider} aria-label="Streaming provider">
+						<option value="spotify">Spotify</option>
+						<option value="apple">Apple Music</option>
+					</select>
+				</label>
+				<input
+					type="search"
+					placeholder="Search tracks"
+					bind:value={streamQuery}
+					aria-label="Search tracks"
+				/>
+				<button type="submit" class="btn btn-small" disabled={streamBusy || !streamQuery.trim()}>
+					Search
+				</button>
+			</form>
+			{#if streamMessage}
+				<p class="hint" role="status">{streamMessage}</p>
+			{/if}
+			<ul class="queue-list stream-hits">
+				{#each streamHits as hit (hit.uri)}
+					<li class="queue-row">
+						<div class="queue-main">
+							<span class="source-title">{hit.title}</span>
+							<span class="source-sub"
+								>{hit.artist}{#if hit.album}
+									· {hit.album}{/if}</span
+							>
+						</div>
+						<button
+							type="button"
+							class="btn btn-small"
+							disabled={streamBusy}
+							onclick={() => onQueueStreamHit(hit)}
+						>
+							Queue &amp; play
+						</button>
+					</li>
+				{:else}
+					<li class="empty-group">Search to pick a track</li>
+				{/each}
+			</ul>
+		</section>
+
+		<section class="panel queue-panel" aria-labelledby="queue-heading">
+			<div class="panel-head">
+				<h2 id="queue-heading">Song queue</h2>
+				<p class="hint">Per-song type · sinks stay linked</p>
+			</div>
+			<div class="stub-actions">
+				<button type="button" class="btn btn-ghost btn-small" onclick={() => addStubSong('spotify')}>
+					+ Spotify
+				</button>
+				<button type="button" class="btn btn-ghost btn-small" onclick={() => addStubSong('apple')}>
+					+ Apple
+				</button>
+				<button type="button" class="btn btn-ghost btn-small" onclick={() => addStubSong('input')}>
+					+ Live{liveHosts.length ? ` · ${liveHosts[0].name}` : ''}
+				</button>
+			</div>
+			<ul class="queue-list">
+				{#each queue as item (item.id)}
+					<li class="queue-row queue-row-host" class:active={item.id === activeQueueId}>
+						<button type="button" class="queue-main" onclick={() => chooseQueueItem(item.id)}>
+							<span class="source-title">{item.title}</span>
+							<span class="source-sub">
+								{#if item.input_id}
+									{hostName(item.input_id)}
+								{:else}
+									{item.locator || item.source_id || 'hub'}
+								{/if}
+								{#if item.id === activeQueueId}
+									· active
+								{/if}
 							</span>
-							<span class="status-pill {d.connected ? 'linked' : 'missing'}">
-								{d.kind === 'network_spp'
-									? d.enabled
-										? 'listen'
-										: 'off'
-									: d.connected
-										? 'linked'
-										: 'missing'}{d.enabled || d.kind === 'network_spp' ? '' : ' · off'}
-							</span>
+						</button>
+						<label class="type-select">
+							<span class="sr-only">Source type</span>
+							<select
+								value={item.source_type}
+								aria-label={`Source type for ${item.title}`}
+								onchange={(e) => {
+									const next = /** @type {HTMLSelectElement} */ (e.currentTarget).value;
+									switchSongSource(item.id, /** @type {import('$lib/api.js').SourceType} */ (next));
+								}}
+							>
+								{#each SOURCE_TYPES as t}
+									<option value={t}
+										>{sourceTypeLabel(t)}{t === 'local' ||
+										(t === 'input' && liveHosts.length) ||
+										(t === 'spotify' && streaming?.spotify?.authenticated) ||
+										(t === 'apple' && streaming?.apple?.authenticated)
+											? ''
+											: ' (stub)'}</option
+									>
+								{/each}
+							</select>
+						</label>
+						<label class="type-select">
+							<span class="sr-only">Phone or PC host</span>
+							<select
+								value={item.input_id || ''}
+								aria-label={`Host for ${item.title}`}
+								onchange={(e) => {
+									const next = /** @type {HTMLSelectElement} */ (e.currentTarget).value;
+									switchSongHost(item.id, next);
+								}}
+							>
+								<option value="">Hub</option>
+								{#each inputs as h}
+									<option value={h.id}>{h.name}</option>
+								{/each}
+							</select>
+						</label>
+						<span class="status-pill {item.available ? 'linked' : 'missing'}">
+							{item.available ? 'ready' : 'stub'}
+						</span>
+						<button
+							type="button"
+							class="btn btn-ghost btn-small"
+							aria-label={`Remove ${item.title}`}
+							onclick={() => removeSong(item.id)}
+						>
+							Remove
 						</button>
 					</li>
 				{/each}
 			</ul>
 		</section>
 
-		{#if selected}
-			<section class="panel detail-panel" aria-labelledby="detail-heading">
-				<div class="panel-head">
-					<h2 id="detail-heading">Sink controls</h2>
-					<button
-						type="button"
-						class="btn btn-ghost btn-small"
-						onclick={() => {
-							selectedId = null;
-						}}
-					>
-						Close
-					</button>
-				</div>
-				<p class="detail-name">{selected.name}</p>
-				<p class="detail-meta">
-					{#if selected.kind === 'network_spp'}
-						SPP TCP · {selected.listen_host}:{selected.listen_port} · {selected.sample_rate} Hz / {selected.channels} ch · {selected.connected ? 'listening' : 'idle'}
-					{:else}
-						Bluetooth · {selected.connected ? 'linked' : 'waiting for bluez'} · use Device setup to pick by name
-					{/if}
-				</p>
+		<section class="panel sources-panel" aria-labelledby="sources-heading">
+			<div class="panel-head">
+				<h2 id="sources-heading">Catalog</h2>
+				<p class="hint">Local files · live links · stubs</p>
+			</div>
+			<div class="catalog-grid">
+				{#each SOURCE_TYPES as type}
+					<div class="source-group">
+						<h3>{sourceTypeLabel(type)}</h3>
+						<ul class="source-list">
+							{#each sourcesByType[type] || [] as s (s.id)}
+								<li>
+									<button
+										type="button"
+										class="source-row"
+										class:active-source={s.id === transport?.source_id}
+										class:stub-source={!s.available}
+										title={s.available ? 'Playable' : s.note || 'Stub — sinks stay up'}
+										onclick={() => chooseSource(s.id)}
+									>
+										<span>
+											<span class="source-title">{s.title}</span>
+											{#if s.id === transport?.source_id || s.note}
+												<span class="source-sub">
+													{s.id === transport?.source_id ? 'active' : ''}{s.id === transport?.source_id &&
+													s.note
+														? ' · '
+														: ''}{s.note || ''}
+												</span>
+											{/if}
+										</span>
+										<span class="status-pill {s.available ? 'linked' : 'missing'}">
+											{s.available ? 'ready' : 'stub'}
+										</span>
+									</button>
+								</li>
+							{:else}
+								<li class="empty-group">None</li>
+							{/each}
+						</ul>
+					</div>
+				{/each}
+			</div>
+		</section>
 
-				<label class="field">
-					<span>Sink type</span>
-					<select
-						value={selected.kind || 'bluetooth'}
-						onchange={(e) => {
-							queueDevicePatch({
-								kind: /** @type {import('$lib/api.js').DeviceKind} */ (
-									/** @type {HTMLSelectElement} */ (e.currentTarget).value
-								)
-							});
-						}}
-					>
-						<option value="bluetooth">Bluetooth (A2DP)</option>
-						<option value="network_spp">Phone SPP (TCP)</option>
-					</select>
-				</label>
-
-				{#if selected.kind === 'network_spp'}
-					<label class="field">
-						<span>Listen host</span>
-						<input
-							type="text"
-							value={selected.listen_host || '0.0.0.0'}
-							oninput={(e) => {
-								queueDevicePatch({
-									listen_host: /** @type {HTMLInputElement} */ (e.currentTarget).value
-								});
-							}}
-						/>
-					</label>
-					<label class="field">
-						<span>Listen port</span>
-						<input
-							type="number"
-							min="1"
-							max="65535"
-							value={selected.listen_port || 1234}
-							oninput={(e) => {
-								queueDevicePatch({
-									listen_port: Number(/** @type {HTMLInputElement} */ (e.currentTarget).value)
-								});
-							}}
-						/>
-					</label>
-					<label class="field">
-						<span>Sample rate</span>
-						<select
-							value={selected.sample_rate || 48000}
-							onchange={(e) => {
-								queueDevicePatch({
-									sample_rate: Number(/** @type {HTMLSelectElement} */ (e.currentTarget).value)
-								});
-							}}
-						>
-							<option value="44100">44100</option>
-							<option value="48000">48000</option>
-						</select>
-					</label>
-					<label class="field">
-						<span>Channels</span>
-						<select
-							value={selected.channels || 1}
-							onchange={(e) => {
-								queueDevicePatch({
-									channels: Number(/** @type {HTMLSelectElement} */ (e.currentTarget).value)
-								});
-							}}
-						>
-							<option value="1">Mono (1)</option>
-							<option value="2">Stereo (2)</option>
-						</select>
-					</label>
+		<section class="panel inputs-panel" aria-labelledby="inputs-heading">
+			<div class="panel-head">
+				<h2 id="inputs-heading">Phone / PC hosts</h2>
+				<p class="hint">Up to 4 · {liveHosts.length} live</p>
+			</div>
+			<div class="stub-actions">
+				<button
+					type="button"
+					class="btn btn-ghost btn-small"
+					disabled={captureBusy}
+					onclick={() => refreshCaptureDiscovery()}
+				>
+					{captureBusy ? 'Scanning…' : 'Refresh inputs'}
+				</button>
+				{#if captureMessage}
+					<span class="hint">{captureMessage}</span>
 				{/if}
-
-				<label class="field">
-					<span>Delay <em>{selected.delay_ms} ms</em></span>
-					<input
-						type="range"
-						min="0"
-						max="500"
-						step="5"
-						value={selected.delay_ms}
-						oninput={(e) => {
-							queueDevicePatch({ delay_ms: Number(/** @type {HTMLInputElement} */ (e.currentTarget).value) });
-						}}
-					/>
-				</label>
-				<label class="field">
-					<span>Volume <em>{Math.round(selected.volume * 100)}%</em></span>
-					<input
-						type="range"
-						min="0"
-						max="100"
-						step="1"
-						value={Math.round(selected.volume * 100)}
-						oninput={(e) => {
-							const pct = Number(/** @type {HTMLInputElement} */ (e.currentTarget).value);
-							queueDevicePatch({ volume: pct / 100 });
-						}}
-					/>
-				</label>
-				<div class="toggles">
-					<label class="check">
-						<input
-							type="checkbox"
-							checked={selected.mute}
-							onchange={(e) => {
-								queueDevicePatch({ mute: /** @type {HTMLInputElement} */ (e.currentTarget).checked });
-							}}
-						/>
-						<span>Mute</span>
-					</label>
-					<label class="check">
-						<input
-							type="checkbox"
-							checked={selected.enabled}
-							onchange={(e) => {
-								queueDevicePatch({ enabled: /** @type {HTMLInputElement} */ (e.currentTarget).checked });
-							}}
-						/>
-						<span>Enabled in session</span>
-					</label>
-				</div>
-			</section>
-		{/if}
-	</div>
-
-	<section class="panel inputs-panel" aria-labelledby="inputs-heading">
-		<div class="panel-head">
-			<h2 id="inputs-heading">Phone / PC hosts</h2>
-			<p class="hint">
-				Up to 4 · BT A2DP source (bluez_input) → feeder · {liveHosts.length} live
-			</p>
-		</div>
-		<div class="stub-actions">
-			<button
-				type="button"
-				class="btn btn-ghost btn-small"
-				disabled={captureBusy}
-				onclick={() => refreshCaptureDiscovery()}
-			>
-				{captureBusy ? 'Scanning…' : 'Refresh live inputs'}
-			</button>
-			{#if captureMessage}
-				<span class="hint">{captureMessage}</span>
+			</div>
+			{#if discoveredCapture.length}
+				<ul class="queue-list discovery-list">
+					{#each discoveredCapture as src (src.pw_name || src.name)}
+						<li class="queue-row host-row">
+							<div class="queue-main">
+								<span class="source-title">{src.name}</span>
+								<span class="source-sub">
+									{capturePathLabel(src.capture_path || 'bt_a2dp')}
+									{#if src.pw_name || src.pw_node}
+										· {src.pw_name || src.pw_node}
+									{/if}
+								</span>
+							</div>
+							<button type="button" class="btn btn-small" onclick={() => bindCaptureSource(src)}>
+								{src.configured_id ? 'Re-bind' : 'Use'}
+							</button>
+						</li>
+					{/each}
+				</ul>
 			{/if}
-		</div>
-		{#if discoveredCapture.length}
-			<ul class="queue-list discovery-list">
-				{#each discoveredCapture as src (src.pw_name || src.name)}
+			<form
+				class="host-form"
+				onsubmit={(e) => {
+					e.preventDefault();
+					registerHost();
+				}}
+			>
+				<input
+					type="text"
+					placeholder="Name (e.g. S21 FE)"
+					bind:value={newHostName}
+					aria-label="Host name"
+					maxlength="64"
+				/>
+				<select bind:value={newHostKind} aria-label="Host kind">
+					{#each HOST_KINDS as k}
+						<option value={k}>{k}</option>
+					{/each}
+				</select>
+				<select bind:value={newHostPath} aria-label="Capture path">
+					{#each CAPTURE_PATHS as p}
+						<option value={p}>{capturePathLabel(p)}</option>
+					{/each}
+				</select>
+				<button type="submit" class="btn btn-small" disabled={inputs.length >= 4}>Register</button>
+			</form>
+			<ul class="queue-list">
+				{#each inputs as host (host.id)}
 					<li class="queue-row host-row">
 						<div class="queue-main">
-							<span class="source-title">{src.name}</span>
+							<span class="source-title">{host.name}</span>
 							<span class="source-sub">
-								{capturePathLabel(src.capture_path || 'bt_a2dp')} · {src.pw_name || src.pw_node}
-								{#if src.mac}
-									· {src.mac}
+								{capturePathLabel(host.capture_path)}
+								{#if host.endpoint}
+									· {host.endpoint}
 								{/if}
 							</span>
 						</div>
-						<button
-							type="button"
-							class="btn btn-small"
-							onclick={() => bindCaptureSource(src)}
-						>
-							{src.configured_id ? 'Re-bind' : 'Use as input'}
-						</button>
-					</li>
-				{/each}
-			</ul>
-		{/if}
-		<form
-			class="host-form"
-			onsubmit={(e) => {
-				e.preventDefault();
-				registerHost();
-			}}
-		>
-			<input
-				type="text"
-				placeholder="Name (e.g. S21 FE)"
-				bind:value={newHostName}
-				aria-label="Host name"
-				maxlength="64"
-			/>
-			<select bind:value={newHostKind} aria-label="Host kind">
-				{#each HOST_KINDS as k}
-					<option value={k}>{k}</option>
-				{/each}
-			</select>
-			<select bind:value={newHostPath} aria-label="Capture path">
-				{#each CAPTURE_PATHS as p}
-					<option value={p}>{capturePathLabel(p)}</option>
-				{/each}
-			</select>
-			<button type="submit" class="btn btn-small" disabled={inputs.length >= 4}>Register</button>
-		</form>
-		<ul class="queue-list">
-			{#each inputs as host (host.id)}
-				<li class="queue-row host-row">
-					<div class="queue-main">
-						<span class="source-title">{host.name}</span>
-						<span class="source-sub">
-							{host.kind} · {capturePathLabel(host.capture_path)}
-							{#if host.endpoint}
-								· {host.endpoint}
-							{/if}
-							{#if host.note}
-								· {host.note}
-							{/if}
-						</span>
-					</div>
-					<label class="type-select">
-						<span class="sr-only">Capture path</span>
-						<select
-							value={host.capture_path}
-							aria-label={`Capture path for ${host.name}`}
-							onchange={(e) => {
-								const next = /** @type {HTMLSelectElement} */ (e.currentTarget).value;
-								updateHost(host.id, {
-									capture_path: /** @type {import('$lib/api.js').CapturePath} */ (next)
-								});
-							}}
-						>
-							{#each CAPTURE_PATHS as p}
-								<option value={p}>{capturePathLabel(p)}</option>
-							{/each}
-						</select>
-					</label>
-					<label class="check">
-						<input
-							type="checkbox"
-							checked={host.armed}
-							onchange={(e) => {
-								updateHost(host.id, {
-									armed: /** @type {HTMLInputElement} */ (e.currentTarget).checked
-								});
-							}}
-						/>
-						<span>Armed</span>
-					</label>
-					<span class="status-pill {host.connected ? 'linked' : 'missing'}">
-						{host.connected ? 'live' : 'waiting'}
-					</span>
-					{#if host.capture_path === 'network'}
-						<label class="btn btn-ghost btn-small upload-btn">
-							Upload
-							<input
-								type="file"
-								accept="audio/*,.wav,.flac,.mp3,.ogg"
-								class="sr-only"
-								onchange={(e) => onHostUpload(host.id, e)}
-							/>
-						</label>
-					{/if}
-					<button
-						type="button"
-						class="btn btn-ghost btn-small"
-						aria-label={`Remove ${host.name}`}
-						onclick={() => removeHost(host.id)}
-					>
-						Remove
-					</button>
-				</li>
-			{:else}
-				<li class="empty-group">No phone/PC hosts yet — register one or bind a discovered source</li>
-			{/each}
-		</ul>
-		{#if captureDetail}
-			<p class="hint muted">{captureDetail}</p>
-		{/if}
-	</section>
-
-	<section class="panel streaming-panel" aria-labelledby="streaming-heading">
-		<div class="panel-head">
-			<h2 id="streaming-heading">Streaming</h2>
-			<p class="hint">Spotify → musync_feeder · Apple limited on Linux</p>
-		</div>
-		<div class="stream-status">
-			<div class="stream-card">
-				<strong>Spotify</strong>
-				<span class="status-pill {streaming?.spotify?.authenticated ? 'linked' : 'missing'}">
-					{streaming?.spotify?.authenticated
-						? streaming.spotify.display_name || 'connected'
-						: streaming?.spotify?.configured
-							? 'not connected'
-							: 'not configured'}
-				</span>
-				{#if streaming?.spotify?.authenticated}
-					<button
-						type="button"
-						class="btn btn-ghost btn-small"
-						disabled={streamBusy}
-						onclick={() => onSpotifyLogout()}
-					>
-						Disconnect
-					</button>
-				{:else if streaming?.spotify?.configured}
-					<a class="btn btn-small" href="/api/streaming/spotify/login">Connect Spotify</a>
-				{:else}
-					<span class="muted tiny">Set MUSYNC_SPOTIFY_CLIENT_ID/SECRET — docs/spotify-apple.md</span>
-				{/if}
-				{#if streaming?.spotify?.note}
-					<p class="hint muted">{streaming.spotify.note}</p>
-				{/if}
-			</div>
-			<div class="stream-card">
-				<strong>Apple Music</strong>
-				<span class="status-pill {streaming?.apple?.authenticated ? 'linked' : 'missing'}">
-					{streaming?.apple?.authenticated
-						? streaming.apple.playback_mode === 'airplay_capture'
-							? 'search + AirPlay'
-							: 'search only'
-						: 'not configured'}
-				</span>
-				{#if streaming?.apple?.note}
-					<p class="hint muted">{streaming.apple.note}</p>
-				{/if}
-			</div>
-		</div>
-		<form
-			class="stream-search"
-			onsubmit={(e) => {
-				e.preventDefault();
-				onStreamSearch();
-			}}
-		>
-			<label class="type-select">
-				<span class="sr-only">Provider</span>
-				<select
-					bind:value={streamProvider}
-					aria-label="Streaming provider"
-				>
-					<option value="spotify">Spotify</option>
-					<option value="apple">Apple Music</option>
-				</select>
-			</label>
-			<input
-				type="search"
-				placeholder="Search tracks"
-				bind:value={streamQuery}
-				aria-label="Search tracks"
-			/>
-			<button type="submit" class="btn btn-small" disabled={streamBusy || !streamQuery.trim()}>
-				Search
-			</button>
-		</form>
-		{#if streamMessage}
-			<p class="hint" role="status">{streamMessage}</p>
-		{/if}
-		<ul class="queue-list stream-hits">
-			{#each streamHits as hit (hit.uri)}
-				<li class="queue-row">
-					<div class="queue-main">
-						<span class="source-title">{hit.title}</span>
-						<span class="source-sub"
-							>{hit.artist}{#if hit.album}
-								· {hit.album}{/if}</span
-						>
-					</div>
-					<button
-						type="button"
-						class="btn btn-small"
-						disabled={streamBusy}
-						onclick={() => onQueueStreamHit(hit)}
-					>
-						Queue &amp; play
-					</button>
-				</li>
-			{:else}
-				<li class="empty-group">Search to pick a track</li>
-			{/each}
-		</ul>
-	</section>
-
-	<section class="panel queue-panel" aria-labelledby="queue-heading">
-		<div class="panel-head">
-			<h2 id="queue-heading">Song queue</h2>
-			<p class="hint">Per-song type + host · switch without tearing down sinks</p>
-		</div>
-		<div class="stub-actions">
-			<button type="button" class="btn btn-ghost btn-small" onclick={() => addStubSong('spotify')}>
-				+ Host Spotify
-			</button>
-			<button type="button" class="btn btn-ghost btn-small" onclick={() => addStubSong('apple')}>
-				+ Host Apple
-			</button>
-			<button type="button" class="btn btn-ghost btn-small" onclick={() => addStubSong('input')}>
-				+ Live input{liveHosts.length ? ` (${liveHosts[0].name})` : ''}
-			</button>
-		</div>
-		<ul class="queue-list">
-			{#each queue as item (item.id)}
-				<li class="queue-row queue-row-host" class:active={item.id === activeQueueId}>
-					<button type="button" class="queue-main" onclick={() => chooseQueueItem(item.id)}>
-						<span class="source-title">{item.title}</span>
-						<span class="source-sub">
-							{item.locator || item.source_id || item.id}
-							{#if item.input_id}
-								· {hostName(item.input_id)}
-							{/if}
-							{#if item.id === activeQueueId}
-								· active
-							{/if}
-							{#if item.note}
-								· {item.note}
-							{/if}
-						</span>
-					</button>
-					<label class="type-select">
-						<span class="sr-only">Source type</span>
-						<select
-							value={item.source_type}
-							aria-label={`Source type for ${item.title}`}
-							onchange={(e) => {
-								const next = /** @type {HTMLSelectElement} */ (e.currentTarget).value;
-								switchSongSource(item.id, /** @type {import('$lib/api.js').SourceType} */ (next));
-							}}
-						>
-							{#each SOURCE_TYPES as t}
-								<option value={t}
-									>{sourceTypeLabel(t)}{t === 'local' ||
-									(t === 'input' && liveHosts.length) ||
-									(t === 'spotify' && streaming?.spotify?.authenticated) ||
-									(t === 'apple' && streaming?.apple?.authenticated)
-										? ''
-										: ' (stub)'}</option
-								>
-							{/each}
-						</select>
-					</label>
-					<label class="type-select">
-						<span class="sr-only">Phone or PC host</span>
-						<select
-							value={item.input_id || ''}
-							aria-label={`Host for ${item.title}`}
-							onchange={(e) => {
-								const next = /** @type {HTMLSelectElement} */ (e.currentTarget).value;
-								switchSongHost(item.id, next);
-							}}
-						>
-							<option value="">Hub (no host)</option>
-							{#each inputs as h}
-								<option value={h.id}>{h.name}</option>
-							{/each}
-						</select>
-					</label>
-					<span class="status-pill {item.available ? 'linked' : 'missing'}">
-						{item.available ? 'ready' : 'stub'}
-					</span>
-					<button
-						type="button"
-						class="btn btn-ghost btn-small"
-						aria-label={`Remove ${item.title}`}
-						onclick={() => removeSong(item.id)}
-					>
-						Remove
-					</button>
-				</li>
-			{/each}
-		</ul>
-	</section>
-
-	<section class="panel sources-panel" aria-labelledby="sources-heading">
-		<div class="panel-head">
-			<h2 id="sources-heading">Source catalog</h2>
-			<p class="hint">Hub local files · live BT/USB/upload when linked · Spotify/Apple stubs</p>
-		</div>
-		{#each SOURCE_TYPES as type}
-			<div class="source-group">
-				<h3>{sourceTypeLabel(type)}</h3>
-				<ul class="source-list">
-					{#each sourcesByType[type] || [] as s (s.id)}
-						<li>
-							<button
-								type="button"
-								class="source-row"
-								class:active-source={s.id === transport?.source_id}
-								class:stub-source={!s.available}
-								title={s.available ? 'Playable hub local' : s.note || 'Stub — sink graph stays up'}
-								onclick={() => chooseSource(s.id)}
+						<label class="type-select">
+							<span class="sr-only">Capture path</span>
+							<select
+								value={host.capture_path}
+								aria-label={`Capture path for ${host.name}`}
+								onchange={(e) => {
+									const next = /** @type {HTMLSelectElement} */ (e.currentTarget).value;
+									updateHost(host.id, {
+										capture_path: /** @type {import('$lib/api.js').CapturePath} */ (next)
+									});
+								}}
 							>
-								<span>
-									<span class="source-title">{s.title}</span>
-									<span class="source-sub">
-										{s.type}{s.id === transport?.source_id ? ' · active' : ''}{s.input_id
-											? ' · host stub'
-											: ''}{s.note ? ` · ${s.note}` : ''}
-									</span>
-								</span>
-								<span class="status-pill {s.available ? 'linked' : 'missing'}">
-									{s.available ? 'ready' : 'stub'}
-								</span>
-							</button>
-						</li>
-					{:else}
-						<li class="empty-group">No {sourceTypeLabel(type).toLowerCase()} entries</li>
-					{/each}
-				</ul>
-			</div>
-		{/each}
-	</section>
-
-	<section class="panel wifi-panel" aria-labelledby="wifi-heading">
-		<div class="panel-head">
-			<h2 id="wifi-heading">Wi-Fi</h2>
-			<p class="hint">Join a phone hotspot without SSH · IP for SPP</p>
-		</div>
-
-		<div class="wifi-status" data-ok={wifi ? String(Boolean(wifi.connected)) : undefined}>
-			<p class="wifi-line">
-				<span class="wifi-label">Now</span>
-				{#if wifi?.connected}
-					{wifi.ssid || 'associated'} · {wifi.interface || 'wlan?'} · {wifi.backend}
-				{:else}
-					not associated · {wifi?.backend || '…'}
-				{/if}
-			</p>
-			<p class="wifi-line">
-				<span class="wifi-label">IP</span>
-				<code class="wifi-ip">{wifiIpLabel}</code>
-			</p>
-			{#if wifi?.detail}
-				<p class="wifi-detail">{wifi.detail}</p>
-			{/if}
-		</div>
-
-		<form
-			class="wifi-form"
-			onsubmit={(e) => {
-				e.preventDefault();
-				onJoinWifi();
-			}}
-		>
-			<label class="field">
-				<span>SSID</span>
-				<input
-					type="text"
-					name="ssid"
-					autocomplete="off"
-					maxlength="32"
-					placeholder="Phone hotspot name"
-					bind:value={wifiSsid}
-					disabled={wifiBusy}
-				/>
-			</label>
-			<label class="field">
-				<span>Password</span>
-				<input
-					type="password"
-					name="password"
-					autocomplete="new-password"
-					maxlength="63"
-					placeholder="Leave blank if already saved"
-					bind:value={wifiPassword}
-					disabled={wifiBusy}
-				/>
-			</label>
-			<div class="wifi-actions">
-				<button type="submit" class="btn" disabled={wifiBusy || !wifiSsid.trim()}>Join</button>
-				<button
-					type="button"
-					class="btn btn-ghost"
-					disabled={wifiBusy || !wifiSsid.trim()}
-					onclick={() => onSaveWifi()}
-				>
-					Save only
-				</button>
-			</div>
-		</form>
-
-		{#if wifiMessage}
-			<p class="wifi-message" role="status">{wifiMessage}</p>
-		{/if}
-
-		<ul class="wifi-list">
-			{#each wifiNetworks as n (n.ssid)}
-				<li class="wifi-row">
-					<span>
-						<span class="device-title">{n.ssid}</span>
-						<span class="device-sub">
-							{n.active ? 'active' : 'saved'}{n.has_password ? ' · key stored' : ' · open / no key'}
+								{#each CAPTURE_PATHS as p}
+									<option value={p}>{capturePathLabel(p)}</option>
+								{/each}
+							</select>
+						</label>
+						<label class="check">
+							<input
+								type="checkbox"
+								checked={host.armed}
+								onchange={(e) => {
+									updateHost(host.id, {
+										armed: /** @type {HTMLInputElement} */ (e.currentTarget).checked
+									});
+								}}
+							/>
+							<span>Armed</span>
+						</label>
+						<span class="status-pill {host.connected ? 'linked' : 'missing'}">
+							{host.connected ? 'live' : 'waiting'}
 						</span>
-					</span>
-					<span class="wifi-row-actions">
-						<button
-							type="button"
-							class="btn btn-small"
-							disabled={wifiBusy || n.active}
-							onclick={() => onJoinWifi(n.ssid)}
-						>
-							Join
-						</button>
+						{#if host.capture_path === 'network'}
+							<label class="btn btn-ghost btn-small upload-btn">
+								Upload
+								<input
+									type="file"
+									accept="audio/*,.wav,.flac,.mp3,.ogg"
+									class="sr-only"
+									onchange={(e) => onHostUpload(host.id, e)}
+								/>
+							</label>
+						{/if}
 						<button
 							type="button"
 							class="btn btn-ghost btn-small"
-							disabled={wifiBusy}
-							onclick={() => onForgetWifi(n.ssid)}
+							aria-label={`Remove ${host.name}`}
+							onclick={() => removeHost(host.id)}
 						>
-							Forget
+							Remove
 						</button>
-					</span>
-				</li>
-			{:else}
-				<li class="wifi-empty">No saved networks yet</li>
-			{/each}
-		</ul>
-	</section>
+					</li>
+				{:else}
+					<li class="empty-group">No hosts yet — register or bind a discovered source</li>
+				{/each}
+			</ul>
+			{#if captureDetail}
+				<p class="hint muted">{captureDetail}</p>
+			{/if}
+		</section>
+	</div>
 </main>
