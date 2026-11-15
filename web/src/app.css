@@ -887,6 +887,11 @@ body {
 	color: var(--bad);
 }
 
+.scopes-line code {
+	font-size: 0.72rem;
+	word-break: break-word;
+}
+
 .hint.muted {
 	opacity: 0.8;
 	margin-top: 0.55rem;

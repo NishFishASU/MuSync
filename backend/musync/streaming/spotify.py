@@ -34,23 +34,35 @@ log = logging.getLogger(__name__)
 
 SPOTIFY_AUTH = "https://accounts.spotify.com"
 SPOTIFY_API = "https://api.spotify.com/v1"
-# Search with market=from_token needs user-read-private; playback needs the player scopes.
-# Space-separated list sent on /authorize — bumping this requires Disconnect → Connect
-# (show_dialog=true) so Spotify re-consents; refresh tokens do not gain new scopes.
+# Authorize scopes. Search does NOT use market=from_token (that 403s without
+# user-read-private on older tokens) — it uses MUSYNC_SPOTIFY_MARKET / US.
+# Space-separated list on /authorize — bumping requires Disconnect → Connect
+# (show_dialog=true); refresh tokens do not gain new scopes.
 SCOPES = (
     "user-read-private user-read-email "
     "user-read-playback-state user-modify-playback-state "
     "user-read-currently-playing streaming"
 )
+# Hard requirements for Connect playback; search only needs a valid user token.
 REQUIRED_SCOPES = frozenset(
     {
-        "user-read-private",
         "user-read-playback-state",
         "user-modify-playback-state",
         "user-read-currently-playing",
         "streaming",
     }
 )
+
+
+def _search_market() -> str:
+    """ISO country for /search — never ``from_token`` (Insufficient client scope)."""
+    raw = (os.environ.get("MUSYNC_SPOTIFY_MARKET") or "US").strip().upper()
+    if not raw or raw == "FROM_TOKEN":
+        return "US"
+    # Spotify expects ISO 3166-1 alpha-2
+    if len(raw) == 2 and raw.isalpha():
+        return raw
+    return "US"
 
 
 def _client_id() -> str:
@@ -191,6 +203,7 @@ class SpotifyClient:
             "premium_required": True,
             "scopes": sorted(self.granted_scopes()),
             "missing_scopes": missing,
+            "search_market": _search_market(),
             "limits": limits,
             "note": note,
         }
@@ -293,23 +306,15 @@ class SpotifyClient:
             return []
         if not self.authenticated():
             raise ValueError("Connect a Spotify account first")
-        missing = self.missing_scopes()
-        if missing:
-            # market=from_token requires user-read-private; refresh tokens keep old grants.
-            raise ValueError(
-                "Spotify token is missing required scopes "
-                f"({', '.join(missing)}). Open Streaming → Disconnect → Connect Spotify "
-                "to re-approve permissions, then search again on Queue."
-            )
+        # Do not gate search on playback scopes / user-read-private — catalog search
+        # only needs a user access token + an explicit country market (not from_token).
         data = self._get_json(
             "/search",
             params={
                 "q": q,
                 "type": "track",
                 "limit": max(1, min(limit, 25)),
-                # Prefer the signed-in user's market so catalog search isn't empty/forbidden.
-                # Requires user-read-private (requested in SCOPES + force-consent authorize).
-                "market": "from_token",
+                "market": _search_market(),
             },
         )
         items = (data.get("tracks") or {}).get("items") or []
@@ -712,10 +717,9 @@ class SpotifyClient:
         detail_l = detail.lower()
         if "insufficient client scope" in detail_l:
             return (
-                "Spotify: Insufficient client scope — your token was granted before MuSync "
-                "requested search scopes (user-read-private). Open Streaming → Disconnect → "
-                "Connect Spotify (re-consent dialog), then search again on Queue. "
-                f"({detail})"
+                "Spotify: Insufficient client scope — reconnect on Streaming if playback "
+                "scopes are missing. Catalog search no longer uses market=from_token "
+                f"(uses {_search_market()}). ({detail})"
             )
         if path == "/me" and status == 403:
             return (
