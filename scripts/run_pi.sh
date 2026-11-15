@@ -205,4 +205,9 @@ echo "After boot, curl http://127.0.0.1:${MUSYNC_PORT}/api/health — look for R
 echo "  mDNS:     curl http://127.0.0.1:${MUSYNC_PORT}/api/mdns"
 echo
 
+# HDMI / console walk-up: big http://PI_IP:PORT + printable ASCII QR (scan from TV).
+# --console also writes /dev/console + /dev/tty1 when permitted (soft-fail OK).
+"$PY" -m musync.lan_banner --console || echo "  (LAN banner soft-fail — pip install -r requirements.txt)"
+echo
+
 exec "$PY" -m musync

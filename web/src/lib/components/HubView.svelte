@@ -187,6 +187,16 @@
 	);
 	const playing = $derived(transport?.state === 'playing');
 	const wifiIpLabel = $derived(wifi?.ips?.length ? wifi.ips.join(', ') : '—');
+	/** Phone-friendly hub URL for Wi‑Fi / home card + QR (http://PI_IP:PORT). */
+	const wifiLanUrl = $derived(
+		wifi?.lan_url ||
+			(wifi?.ips?.length
+				? `http://${wifi.ips[0]}:${wifi.port || 8080}`
+				: '')
+	);
+	const wifiQrSrc = $derived(
+		wifiLanUrl ? `/api/wifi/lan-qr.svg?u=${encodeURIComponent(wifiLanUrl)}` : ''
+	);
 	const activeQueueId = $derived(transport?.queue_item_id ?? null);
 	const activeQueueItem = $derived(queue.find((q) => q.id === activeQueueId) ?? null);
 	/** Play disabled when the active cue is not ready (unavailable / unbound live). */
@@ -1677,26 +1687,57 @@
 		<section class="panel wifi-panel" aria-labelledby="wifi-heading">
 			<div class="panel-head">
 				<h2 id="wifi-heading">Wi-Fi</h2>
-				<p class="hint">Home Wi-Fi or phone hotspot · Pi IP for SPP</p>
+				<p class="hint">Home Wi-Fi or phone hotspot · open hub URL on the same LAN</p>
 			</div>
 
-			<div class="wifi-status" data-ok={wifi ? String(Boolean(wifi.connected)) : undefined}>
-				<div class="wifi-ip-block">
-					<span class="wifi-label">Pi IP</span>
-					<code class="wifi-ip">{wifiIpLabel}</code>
-				</div>
-				<p class="wifi-line muted-line">
-					{#if wifi?.connected}
-						{wifi.ssid || 'associated'}
-						{#if wifi.interface}
-							· {wifi.interface}
-						{/if}
+			<div class="wifi-lan-card" data-ok={wifi ? String(Boolean(wifi.connected)) : undefined}>
+				<div class="wifi-lan-copy">
+					<span class="wifi-label">LAN URL</span>
+					{#if wifiLanUrl}
+						<a class="wifi-lan-url" href={wifiLanUrl}>{wifiLanUrl}</a>
+						<button
+							type="button"
+							class="btn btn-ghost btn-small wifi-copy-btn"
+							onclick={async () => {
+								try {
+									await navigator.clipboard.writeText(wifiLanUrl);
+									wifiMessage = `Copied ${wifiLanUrl}`;
+								} catch {
+									wifiMessage = wifiLanUrl;
+								}
+							}}
+						>
+							Copy
+						</button>
 					{:else}
-						Not associated
+						<code class="wifi-lan-url wifi-lan-missing">http://PI_IP:{wifi?.port || 8080}</code>
+						<p class="wifi-line muted-line">Join a network below to reveal the live URL.</p>
 					{/if}
-				</p>
-				{#if wifi?.detail}
-					<p class="wifi-detail">{wifi.detail}</p>
+					<p class="wifi-line muted-line">
+						{#if wifi?.connected}
+							{wifi.ssid || 'associated'}
+							{#if wifi.interface}
+								· {wifi.interface}
+							{/if}
+							· IPs {wifiIpLabel}
+						{:else}
+							Not associated · IPs {wifiIpLabel}
+						{/if}
+					</p>
+					{#if wifi?.mdns_hostname}
+						<p class="wifi-line muted-line">
+							mDNS UI: http://{wifi.mdns_hostname}:{wifi?.port || 8080} (not for Spotify OAuth)
+						</p>
+					{/if}
+					{#if wifi?.detail}
+						<p class="wifi-detail">{wifi.detail}</p>
+					{/if}
+				</div>
+				{#if wifiQrSrc}
+					<figure class="wifi-qr">
+						<img src={wifiQrSrc} width="168" height="168" alt={`QR code for ${wifiLanUrl}`} />
+						<figcaption>Scan to open</figcaption>
+					</figure>
 				{/if}
 			</div>
 

@@ -1463,7 +1463,8 @@ input[type='range'] {
 	height: 1.05rem;
 }
 
-.wifi-status {
+.wifi-status,
+.wifi-lan-card {
 	margin-bottom: 0.85rem;
 	padding: 0.85rem 0.95rem;
 	border-radius: 12px;
@@ -1471,11 +1472,26 @@ input[type='range'] {
 	background: rgba(255, 255, 255, 0.03);
 }
 
-.wifi-status[data-ok='true'] {
+.wifi-lan-card {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: flex-start;
+	justify-content: space-between;
+	gap: 1rem 1.25rem;
+}
+
+.wifi-lan-copy {
+	flex: 1 1 14rem;
+	min-width: 0;
+}
+
+.wifi-status[data-ok='true'],
+.wifi-lan-card[data-ok='true'] {
 	border-color: rgba(62, 207, 173, 0.35);
 }
 
-.wifi-status[data-ok='false'] {
+.wifi-status[data-ok='false'],
+.wifi-lan-card[data-ok='false'] {
 	border-color: rgba(224, 180, 92, 0.35);
 }
 
@@ -1485,6 +1501,55 @@ input[type='range'] {
 	align-items: baseline;
 	gap: 0.45rem 0.75rem;
 	margin-bottom: 0.35rem;
+}
+
+.wifi-lan-url {
+	display: block;
+	margin: 0.2rem 0 0.45rem;
+	font-family: var(--font-mono);
+	font-size: clamp(1.15rem, 3.6vw, 1.85rem);
+	font-weight: 700;
+	line-height: 1.25;
+	color: var(--accent);
+	letter-spacing: 0.01em;
+	word-break: break-all;
+	text-decoration: none;
+}
+
+a.wifi-lan-url:hover {
+	text-decoration: underline;
+}
+
+.wifi-lan-url.wifi-lan-missing {
+	opacity: 0.55;
+	font-weight: 600;
+}
+
+.wifi-copy-btn {
+	margin: 0 0 0.55rem;
+}
+
+.wifi-qr {
+	margin: 0;
+	flex: 0 0 auto;
+	text-align: center;
+}
+
+.wifi-qr img {
+	display: block;
+	width: 168px;
+	height: 168px;
+	background: #fff;
+	border-radius: 8px;
+	padding: 0.35rem;
+}
+
+.wifi-qr figcaption {
+	margin-top: 0.35rem;
+	color: var(--ink-muted);
+	font-size: 0.72rem;
+	letter-spacing: 0.04em;
+	text-transform: uppercase;
 }
 
 .wifi-line {

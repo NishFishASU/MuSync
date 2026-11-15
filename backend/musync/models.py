@@ -826,6 +826,9 @@ class WifiStatus(BaseModel):
     detail: str = ""
     # Optional UI hint when mDNS is advertising (not used for Spotify OAuth).
     mdns_hostname: Optional[str] = None
+    # Hub listen port + phone-friendly LAN UI URL (http://PI_IP:PORT).
+    port: int = 8080
+    lan_url: Optional[str] = None
 
 
 class MdnsStatus(BaseModel):
