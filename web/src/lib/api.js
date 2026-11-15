@@ -335,6 +335,7 @@ export function spaPollRequestsPerSecond(cadence) {
  * @property {boolean | null} [librespot_available]
  * @property {boolean | null} [librespot_running]
  * @property {string | null} [librespot_name]
+ * @property {string | null} [librespot_bin]
  * @property {boolean | null} [ytdlp_available]
  * @property {string | null} [ytdlp_version]
  * @property {boolean | null} [ytdlp_outdated]
@@ -352,6 +353,7 @@ export function spaPollRequestsPerSecond(cadence) {
  * @property {string[]} [limits]
  * @property {string} [note]
  * @property {string | null} [last_error]
+ * @property {string | null} [install_hint]
  * @property {boolean | null} [running]
  */
 
