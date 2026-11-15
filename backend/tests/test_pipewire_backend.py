@@ -93,6 +93,47 @@ def test_health_reports_dry_run(backend: PipeWireBackend) -> None:
     assert health.backend == "pipewire"
     assert health.graph_dry_run is True
     assert health.sink_count == 2
+    assert "READY=" in health.detail
+    assert "MISSING=" in health.detail
+
+
+def test_sink_readiness_ready_vs_missing(backend: PipeWireBackend) -> None:
+    backend._devices["sink-1"].connected = True
+    backend._devices["sink-2"].connected = False
+    ready, missing = backend._sink_readiness_summary()
+    assert "sink-1" in ready
+    assert "sink-2" in missing
+
+
+def test_reconnect_bt_throttled_and_connects(backend: PipeWireBackend, monkeypatch) -> None:
+    monkeypatch.setattr(backend, "_env_dry_run", lambda: False)
+    backend._tools["bluetoothctl"] = "/usr/bin/bluetoothctl"
+    # Real-looking MAC (AA:BB:CC:DD:EE:* is treated as YAML placeholder and skipped).
+    backend._devices["sink-1"].mac = "11:22:33:44:55:66"
+    backend._devices["sink-1"].connected = False
+    backend._pw_node_ids.pop("sink-1", None)
+
+    from musync.audio.pw_tools import BtRemote
+
+    monkeypatch.setattr(
+        "musync.audio.pipewire.discover_bluetooth_remotes",
+        lambda **_k: (
+            [BtRemote(mac="11:22:33:44:55:66", name="Speaker A", paired=True)],
+            "fixture",
+        ),
+    )
+    calls: list[str] = []
+
+    def fake_connect(_bt, mac, **_k):
+        calls.append(mac)
+        return True, "ok"
+
+    monkeypatch.setattr("musync.audio.pipewire.bluetoothctl_connect", fake_connect)
+    first = backend._reconnect_bt_sinks(force=True)
+    assert "sink-1" in first
+    assert calls == ["11:22:33:44:55:66"]
+    # Immediate second call without force is throttled.
+    assert backend._reconnect_bt_sinks(force=False) == []
 
 
 def test_transport_still_works_software(backend: PipeWireBackend) -> None:

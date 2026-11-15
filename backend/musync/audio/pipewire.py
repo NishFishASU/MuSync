@@ -103,6 +103,7 @@ from .pw_tools import (
     GraphLink,
     GraphPlan,
     PwNode,
+    bluetoothctl_connect,
     build_capture_loopback_commands,
     build_sink_commands,
     classify_capture_source,
@@ -126,6 +127,7 @@ from .pw_tools import (
 from .source_session import SourceSession
 from .spp import (
     build_spp_ffmpeg,
+    free_spp_listen_port,
     spp_anullsrc,
     spp_plan_notes,
     spp_tcp_url,
@@ -179,6 +181,9 @@ class PipeWireBackend(AudioBackend):
         # Track SPP input mode so we can switch silence → file on Play without
         # bouncing a healthy listener that already matches the desired source.
         self._spp_source_keys: dict[str, str] = {}
+        # Soft BT reconnect throttle (demo reboot: paired but A2DP not up yet).
+        self._last_bt_reconnect_at: float = 0.0
+        self._bt_reconnect_min_interval_s: float = 8.0
 
         self._tools = {
             "wpctl": which("wpctl"),
@@ -202,9 +207,13 @@ class PipeWireBackend(AudioBackend):
 
         # Refresh map / plan once at startup (no-op / dry-run without hardware).
         # Purge orphan MuSync_Feeder null-sinks from prior soft-load restarts.
+        # Free SPP ports + soft-reconnect paired BT so UI shows READY after reboot.
         try:
             if not self._env_dry_run():
                 self._ensure_feeder(reset=True)
+                self._free_configured_spp_ports()
+            self.refresh_sink_map()
+            self._reconnect_bt_sinks(force=True)
             self.refresh_sink_map()
             self._ensure_graph()
         except Exception as exc:  # noqa: BLE001 — never block API boot
@@ -667,6 +676,92 @@ class PipeWireBackend(AudioBackend):
         proc = self._spp_procs.get(device_id)
         return proc is not None and proc.poll() is None
 
+    def _free_configured_spp_ports(self) -> None:
+        """Clear orphan ffmpeg listens for every configured SPP port."""
+        ports = {
+            int(d.listen_port)
+            for d in self._devices.values()
+            if d.kind == DeviceKind.NETWORK_SPP and d.listen_port
+        }
+        if not ports:
+            ports = {1234}
+        for port in sorted(ports):
+            detail = free_spp_listen_port(port)
+            log.info("SPP preflight :%s — %s", port, detail)
+
+    def _reconnect_bt_sinks(self, *, force: bool = False) -> list[str]:
+        """Soft-connect enabled BT sinks that are paired but not mapped yet.
+
+        Demo reboot path: Qudelix is paired but A2DP may be down until
+        ``bluetoothctl connect``. Throttled so UI polls cannot spam BlueZ.
+        """
+        now = time.monotonic()
+        if (
+            not force
+            and (now - self._last_bt_reconnect_at) < self._bt_reconnect_min_interval_s
+        ):
+            return []
+        if self._env_dry_run():
+            return []
+        btctl = self._tools.get("bluetoothctl")
+        if not btctl:
+            return []
+
+        # Prefer fresh remotes; fall back to last discovery cache.
+        remotes, _detail = discover_bluetooth_remotes(bluetoothctl=btctl)
+        if remotes:
+            self._bt_remotes_by_mac = {
+                normalize_mac(r.mac): r for r in remotes if r.mac
+            }
+        attempted: list[str] = []
+        for device in self._devices.values():
+            if device.kind != DeviceKind.BLUETOOTH or not device.enabled:
+                continue
+            if device.connected and device.id in self._pw_node_ids:
+                continue
+            mac = normalize_mac(device.mac) if device.mac else ""
+            if not mac or mac.upper().startswith("AA:BB:CC:DD:EE:"):
+                continue
+            remote = self._bt_remotes_by_mac.get(mac)
+            # Skip unknown remotes that were never paired — connect would hang.
+            if remote is not None and not remote.paired and not remote.connected:
+                continue
+            ok, detail = bluetoothctl_connect(btctl, mac)
+            attempted.append(device.id)
+            log.info(
+                "BT reconnect %s (%s): %s — %s",
+                device.id,
+                mac,
+                "ok" if ok else "fail",
+                detail,
+            )
+        if attempted or force:
+            self._last_bt_reconnect_at = now
+        return attempted
+
+    def _refresh_live_sink_state(self, *, reconnect: bool = True) -> None:
+        """Refresh BT map + SPP listeners; optionally soft-reconnect MISSING BT."""
+        if reconnect:
+            self._reconnect_bt_sinks()
+        self.refresh_sink_map()
+        self._sync_spp_listeners()
+
+    def _sink_readiness_summary(self) -> tuple[list[str], list[str]]:
+        """Return ``(ready_ids, missing_ids)`` for enabled sinks (demo UI / health)."""
+        ready: list[str] = []
+        missing: list[str] = []
+        for device in self._devices.values():
+            if not device.enabled:
+                continue
+            if device.kind == DeviceKind.NETWORK_SPP:
+                ok = bool(device.connected) and (
+                    self._env_dry_run() or self._spp_listener_alive(device.id)
+                )
+            else:
+                ok = bool(device.connected)
+            (ready if ok else missing).append(device.id)
+        return ready, missing
+
     def _spp_desired_source(self, device: Device) -> tuple[str, str, str]:
         """Return ``(input_kind, input_spec, source_key)`` for the SPP listen.
 
@@ -707,6 +802,10 @@ class PipeWireBackend(AudioBackend):
             device.connected = True
             self._spp_source_keys[device.id] = source_key
             return
+
+        # Orphan manual ffmpeg often still owns the port after a crash/restart.
+        free_detail = free_spp_listen_port(int(device.listen_port))
+        log.info("SPP free :%s — %s", device.listen_port, free_detail)
 
         ff = self._tools.get("ffmpeg")
         if not ff:
@@ -1279,6 +1378,11 @@ class PipeWireBackend(AudioBackend):
 
     def list_devices(self) -> list[Device]:
         with self._lock:
+            # Soft refresh so UI READY/MISSING tracks BT/SPP after reboot.
+            try:
+                self._refresh_live_sink_state(reconnect=True)
+            except Exception as exc:  # noqa: BLE001 — never fail listing
+                log.debug("live sink refresh: %s", exc)
             return [d.model_copy(deep=True) for d in self._devices.values()]
 
     def get_device(self, device_id: str) -> Device:
@@ -1329,11 +1433,28 @@ class PipeWireBackend(AudioBackend):
 
     def discover_device_setup(self) -> DeviceDiscoverResponse:
         with self._lock:
+            # Refresh discovery forces a BT reconnect pass (UI "Refresh").
+            try:
+                self._reconnect_bt_sinks(force=True)
+            except Exception as exc:  # noqa: BLE001
+                log.debug("BT reconnect on discover: %s", exc)
             _by_name, _by_mac, rows, detail = self._discovery_maps()
+            try:
+                self.refresh_sink_map()
+                self._sync_spp_listeners()
+            except Exception as exc:  # noqa: BLE001
+                log.debug("post-discover sync: %s", exc)
             spp = next(
                 (d for d in self._devices.values() if d.kind == DeviceKind.NETWORK_SPP),
                 default_spp_device(),
             )
+            ready, missing = self._sink_readiness_summary()
+            readiness = ""
+            if ready or missing:
+                readiness = (
+                    f"; READY={','.join(ready) or '—'} "
+                    f"MISSING={','.join(missing) or '—'}"
+                )
             path = devices_config_path()
             return DeviceDiscoverResponse(
                 bluetooth=rows,
@@ -1341,7 +1462,7 @@ class PipeWireBackend(AudioBackend):
                 config_path=str(path),
                 config_ok=self._config_ok,
                 config_detail=self._config_detail,
-                detail=detail,
+                detail=f"{detail}{readiness}",
             )
 
     def apply_devices_config(self, entries: list[DeviceConfigEntry]) -> list[Device]:
@@ -1541,6 +1662,11 @@ class PipeWireBackend(AudioBackend):
 
     def health(self) -> Health:
         with self._lock:
+            # Keep connected flags fresh without spamming BlueZ (throttled).
+            try:
+                self._refresh_live_sink_state(reconnect=True)
+            except Exception as exc:  # noqa: BLE001
+                log.debug("health refresh: %s", exc)
             up, detail = self.probe_pipewire()
             devices = list(self._devices.values())
             hci_map = {d.hci: d.mac for d in devices if d.hci}
@@ -1561,19 +1687,32 @@ class PipeWireBackend(AudioBackend):
                 )
             ]
             spp_n = sum(1 for d in devices if d.kind == DeviceKind.NETWORK_SPP)
+            ready, missing = self._sink_readiness_summary()
             hint = ""
             if placeholders:
                 hint += (
                     f"; PLACEHOLDER_MACS={','.join(placeholders)} "
-                    "(edit config/devices.yaml — see devices.pi-2sink.example.yaml)"
+                    "(use Device setup — discover by name, Save sinks)"
                 )
             if spp_n == 0:
-                hint += "; NO_SPP_SINK (add kind: network_spp spp-1)"
+                hint += "; NO_SPP_SINK (enable Phone SPP in Device setup)"
+            hint += (
+                f"; READY={','.join(ready) or '—'} "
+                f"MISSING={','.join(missing) or '—'}"
+            )
+            spp_ports = [
+                f"{d.id}:{d.listen_port}={'READY' if d.connected else 'MISSING'}"
+                for d in devices
+                if d.kind == DeviceKind.NETWORK_SPP and d.enabled
+            ]
+            if spp_ports:
+                hint += f"; SPP={','.join(spp_ports)}"
             from ..streaming import get_streaming_service
 
             stream = get_streaming_service().status()
+            all_ready = not missing
             return Health(
-                ok=True,
+                ok=up or dry or all_ready,
                 backend="pipewire",
                 pipewire_up=up,
                 sink_count=len(devices),

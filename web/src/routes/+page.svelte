@@ -190,8 +190,24 @@
 		if (apiError) return 'API offline';
 		if (!health) return '…';
 		const label = health.backend === 'mock' ? 'mock' : 'pipewire';
-		return `${label} · ${health.enabled_count}/${health.sink_count} sinks · ${inputs.length}/4 hosts`;
+		const detail = health.detail || '';
+		const readyM = detail.match(/READY=([^;]+)/);
+		const missM = detail.match(/MISSING=([^;]+)/);
+		const ready = readyM?.[1]?.trim();
+		const missing = missM?.[1]?.trim();
+		const readiness =
+			ready || missing
+				? ` · ${missing && missing !== '—' ? 'MISSING' : 'READY'}`
+				: '';
+		return `${label} · ${health.enabled_count}/${health.sink_count} sinks · ${inputs.length}/4 hosts${readiness}`;
 	});
+
+	/** @param {import('$lib/api.js').Device} d */
+	function sinkStatusLabel(d) {
+		if (!d.enabled) return 'off';
+		if (d.kind === 'network_spp') return d.connected ? 'READY' : 'MISSING';
+		return d.connected ? 'READY' : 'MISSING';
+	}
 
 	const sourcesByType = $derived.by(() => {
 		/** @type {Record<string, import('$lib/api.js').Source[]>} */
@@ -1048,6 +1064,9 @@
 				</div>
 				<div class="setup-col">
 					<h3 class="setup-sub">Phone SPP</h3>
+					<p class="hint spp-phone-hint">
+						Phone app host = <code>{wifiIpLabel}</code> (not 0.0.0.0) · port below
+					</p>
 					<label class="check setup-check">
 						<input type="checkbox" bind:checked={setupSppEnabled} />
 						<span>
@@ -1134,14 +1153,14 @@
 										{/if}
 									</span>
 								</span>
-								<span class="status-pill {d.connected ? 'linked' : 'missing'}">
-									{d.kind === 'network_spp'
-										? d.enabled
-											? 'listen'
-											: 'off'
-										: d.connected
-											? 'linked'
-											: 'missing'}{d.enabled || d.kind === 'network_spp' ? '' : ' · off'}
+								<span
+									class="status-pill {sinkStatusLabel(d) === 'READY'
+										? 'linked'
+										: sinkStatusLabel(d) === 'off'
+											? ''
+											: 'missing'}"
+								>
+									{sinkStatusLabel(d)}
 								</span>
 							</button>
 						</li>
@@ -1166,9 +1185,10 @@
 					<p class="detail-name">{selected.name}</p>
 					<p class="detail-meta">
 						{#if selected.kind === 'network_spp'}
-							SPP · {selected.listen_host}:{selected.listen_port} · {selected.sample_rate} Hz / {selected.channels} ch · {selected.connected ? 'listening' : 'idle'}
+							SPP · listen {selected.listen_host}:{selected.listen_port} · phone → {wifiIpLabel}:{selected.listen_port}
+							· {selected.sample_rate} Hz / {selected.channels} ch · {sinkStatusLabel(selected)}
 						{:else}
-							BT · {selected.connected ? 'linked' : 'waiting'} · pick by name in Device setup
+							BT · {sinkStatusLabel(selected)} · Refresh in Device setup reconnects after reboot
 						{/if}
 					</p>
 

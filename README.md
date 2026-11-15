@@ -60,6 +60,7 @@ config/
   devices.pi-2sink.example.yaml   # start here on Pi
   devices.example.yaml            # full 6-sink template
 docs/pi-pipewire.md
+docs/demo-checklist.md                # Qudelix + Phone SPP demo path
 docs/spp-network-sink.md              # phone as SPP TCP *output*
 docs/phone-bt-source-vs-spp-sink.md   # phone as BT A2DP *source* vs SPP sink
 docs/wifi-join.md                     # phone hotspot join (nmcli)
@@ -161,20 +162,21 @@ You do **not** need to hand-edit `devices.yaml` MACs — the web UI discovers sp
 export MUSYNC_BACKEND=pipewire
 cp /path/to/track.flac media/
 cp /path/to/clip.mp4 media/   # optional — audio → musync_feeder; muted preview in UI
-# stop any old MuSync/ffmpeg listen on :1234 first
-./scripts/run_pi.sh
+./scripts/run_pi.sh   # clears stray ffmpeg on SPP ports; prints READY/MISSING preflight
 # UI: http://<pi-lan-ip>:8080
 ```
 
 Missing or broken `devices.yaml` is fine — MuSync boots with **Phone SPP** defaults.
 
+**Demo day:** short Qudelix + Phone SPP checklist → **[docs/demo-checklist.md](docs/demo-checklist.md)**.
+
 ### 4. Device setup in the web UI (no YAML copy)
 
 1. Open **Device setup**.
-2. **Refresh discovery** — Qudelix (and other bluez remotes) appear by friendly name.
+2. **Refresh** — Qudelix (and other bluez remotes) appear by friendly name; paired BT is soft-reconnected after reboot.
 3. Enable the BT sink(s) you want; enable **Phone SPP** and set host/port/rate/channels.
 4. **Save sinks** — writes `config/devices.yaml` atomically (MAC filled from discovery).
-5. Play a hub-local audio or video file (Catalog). Phone Simple Protocol Player → Pi IP:`port`, matching rate/channels s16le.
+5. Sink pills: **READY** vs **MISSING** (SPP listen / BT linked). Play a hub-local file. Phone Simple Protocol Player → **Pi IP** (from Wi‑Fi panel, not `0.0.0.0`):`port`, matching rate/channels s16le.
 
 Graph details: [docs/pi-pipewire.md](docs/pi-pipewire.md). SPP details: [docs/spp-network-sink.md](docs/spp-network-sink.md).
 

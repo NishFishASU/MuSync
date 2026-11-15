@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from musync.audio.pw_tools import (
     alsa_usb_to_pw_node,
+    bluetoothctl_connect,
     build_capture_loopback_commands,
     build_sink_commands,
     classify_capture_source,
@@ -191,3 +192,22 @@ def test_build_capture_loopback_commands() -> None:
     assert any("alsa_input.usb-Generic_USB_Audio-00" in line for line in usb_flat)
     assert any("sink=musync_feeder" in line for line in usb_flat)
     assert usb_notes
+
+
+def test_bluetoothctl_connect_success(monkeypatch) -> None:
+    from types import SimpleNamespace
+
+    def fake_run(args, **_kwargs):
+        assert args[-2:] == ["connect", "AA:BB:CC:DD:EE:01"]
+        return SimpleNamespace(returncode=0, stdout="Connection successful\n", stderr="")
+
+    monkeypatch.setattr("musync.audio.pw_tools.run_cmd", fake_run)
+    ok, detail = bluetoothctl_connect("/usr/bin/bluetoothctl", "aa:bb:cc:dd:ee:01")
+    assert ok is True
+    assert "successful" in detail.lower()
+
+
+def test_bluetoothctl_connect_rejects_bad_mac() -> None:
+    ok, detail = bluetoothctl_connect("/usr/bin/bluetoothctl", "not-a-mac")
+    assert ok is False
+    assert "invalid" in detail.lower()

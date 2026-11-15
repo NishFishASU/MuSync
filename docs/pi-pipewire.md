@@ -47,12 +47,14 @@ cd /path/to/MuSync
 export MUSYNC_BACKEND=pipewire
 ./scripts/pair_bt600.sh hci0            # if not already paired
 ./scripts/build_web.sh                  # once, or rsync laptop build
-# kill stray: pkill -f 'ffmpeg.*1234' ; pkill -f 'python3 -m musync'
-./scripts/run_pi.sh
+./scripts/run_pi.sh                     # clears stray ffmpeg; soft-reconnects paired BT
 # Open http://<Pi-IP>:8080 → Device setup
-#   Refresh discovery → enable Qudelix by name → enable Phone SPP
+#   Refresh → enable Qudelix by name → enable Phone SPP
 #   set port / sample rate / channels → Save sinks
+#   READY vs MISSING on sink pills; /api/health detail lists READY=/MISSING=
 ```
+
+Demo path: [demo-checklist.md](demo-checklist.md).
 
 1. Install packages (see README) — include `ffmpeg` + `pipewire-pulse` for SPP.
 2. Build UI: `./scripts/build_web.sh` → `web/build/` (gitignored; copy from laptop OK).

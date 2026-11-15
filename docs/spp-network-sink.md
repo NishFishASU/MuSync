@@ -53,14 +53,15 @@ No `-af`. BT sinks still use the PipeWire feeder via mpv; SPP mirrors the local 
 
 ```bash
 export MUSYNC_BACKEND=pipewire
-# stop manual ffmpeg listen / old MuSync if any
-pkill -f 'ffmpeg.*1234' || true
-./scripts/run_pi.sh
+./scripts/run_pi.sh   # clears stray ffmpeg on SPP ports; backend also frees the port on listen start
 
-# UI Device setup: enable Qudelix by name + Phone SPP → Save
+# UI Device setup: Refresh → enable Qudelix by name + Phone SPP → Save
+# Sink pills: READY (listening / linked) vs MISSING
 # Play a hub-local track, then connect phone (or connect during idle silence, reconnect after Play if needed)
-# Phone: SPP → Pi LAN/Tailscale IP:port → matching rate/channels s16le
+# Phone: SPP → Pi LAN/Tailscale IP from Wi‑Fi panel (not 0.0.0.0):port → matching rate/channels s16le
 ```
+
+See also [demo-checklist.md](demo-checklist.md).
 
 ## Pi verify (`ss` / `ps`)
 
