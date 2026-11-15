@@ -82,6 +82,28 @@ If the phone’s **own** speakers keep playing while hub headphones/SPP also pla
 3. **Phone as A2DP source** — set the phone’s media output to the Pi (Bluetooth speaker). If media still uses phone speakers, Android/iOS routing is wrong — MuSync cannot force exclusive audio from the browser SPA.
 4. **SPP sink** — Simple Protocol Player is an *output*; turn down/mute the phone’s other media so you only hear SPP.
 
+## Stopping MuSync (Ctrl+C) vs Bluetooth disconnect
+
+On graceful shutdown (SIGINT/SIGTERM / FastAPI lifespan), MuSync **unloads** the
+capture→`musync_feeder`→sink `module-loopback`s it owns, purges orphan
+`musync_feeder` null-sinks, and stops librespot / yt-dlp / ffmpeg / mpv children.
+That stops the PipeWire bridge so phone audio should **not** keep reaching
+Qudelix through MuSync after exit.
+
+MuSync does **not** unpair or force-disconnect BlueZ A2DP. The phone may still
+show connected to the Pi (and Qudelix to the Pi) until you disconnect Bluetooth
+manually — that is intentional (non-destructive). If audio still plays after a
+clean MuSync exit, check for leftover loopbacks
+(`pactl list modules short | grep -E 'musync_|musync_feeder'`) or a stuck prior
+process; a fresh `./scripts/run_pi.sh` purges orphans on startup.
+
+## Dual A2DP on one HCI (choppy)
+
+Phone as A2DP **source** and Qudelix as A2DP **sink** both on onboard `hci0`
+shares one radio — expect choppy / underrun audio (turn-taking on or off does
+not fix the radio). Prefer a **second USB HCI dongle** so inbound and outbound
+A2DP use different adapters. See [pi-pipewire.md](./pi-pipewire.md#dual-a2dp--one-hci).
+
 ## Mock / laptop
 
 Without PipeWire, the mock backend seeds **Galaxy S21 FE** as a live `bt_a2dp` host (`bluez_input.AA_BB_CC_DD_EE_21` fixture) so the UI can select live input and Play. Capture discovery returns the same fixture names.

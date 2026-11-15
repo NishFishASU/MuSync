@@ -7,6 +7,7 @@ whether to execute (Pi with tools) or only log/plan (cloud dry-run).
 from __future__ import annotations
 
 import logging
+import os
 import re
 import shutil
 import subprocess
@@ -19,13 +20,34 @@ log = logging.getLogger(__name__)
 # Explicit rate/channels avoid resample + oversized null-sink buffers.
 # Capture path: 10 ms (was 20) — ~10 ms less input→feeder delay.
 # adjust_time=0 disables adaptive resampler buffering that grows latency.
+# Dual A2DP on one HCI is often choppy — prefer a second dongle; optional
+# MUSYNC_PW_FEEDER_NODE_LATENCY / MUSYNC_PW_CAPTURE_LATENCY_MSEC raise cushion.
 FEEDER_RATE = 48000
 FEEDER_CHANNELS = 2
 # ~10.7 ms target quantum on the null sink (512 / 48000).
-FEEDER_NODE_LATENCY = "512/48000"
-CAPTURE_LOOPBACK_LATENCY_MSEC = 10
+_DEFAULT_FEEDER_NODE_LATENCY = "512/48000"
+_DEFAULT_CAPTURE_LOOPBACK_LATENCY_MSEC = 10
 # Floor for max_latency_msec when intentional delay is 0 (stability headroom).
 LOOPBACK_MIN_MAX_LATENCY_MSEC = 10
+
+
+def _env_feeder_node_latency() -> str:
+    raw = (os.environ.get("MUSYNC_PW_FEEDER_NODE_LATENCY") or "").strip()
+    if raw and re.fullmatch(r"\d+/\d+", raw):
+        return raw
+    return _DEFAULT_FEEDER_NODE_LATENCY
+
+
+def _env_capture_latency_msec() -> int:
+    raw = (os.environ.get("MUSYNC_PW_CAPTURE_LATENCY_MSEC") or "").strip()
+    if raw.isdigit():
+        return max(0, min(200, int(raw)))
+    return _DEFAULT_CAPTURE_LOOPBACK_LATENCY_MSEC
+
+
+# Resolved at import; re-read via helpers in command builders when env may change.
+FEEDER_NODE_LATENCY = _env_feeder_node_latency()
+CAPTURE_LOOPBACK_LATENCY_MSEC = _env_capture_latency_msec()
 
 # bluez_output.XX_XX_XX_XX_XX_XX or bluez_sink.XX_XX_...
 _BLUEZ_MAC_RE = re.compile(
@@ -806,6 +828,7 @@ def match_capture_source(
 def feeder_null_sink_args(feeder_name: str) -> list[str]:
     """``module-null-sink`` argv fragment after ``load-module`` (low-latency)."""
     name = (feeder_name or "musync_feeder").strip() or "musync_feeder"
+    node_latency = _env_feeder_node_latency()
     return [
         "module-null-sink",
         f"sink_name={name}",
@@ -813,7 +836,7 @@ def feeder_null_sink_args(feeder_name: str) -> list[str]:
         f"channels={FEEDER_CHANNELS}",
         "sink_properties="
         f"device.description=MuSync_Feeder "
-        f"node.latency={FEEDER_NODE_LATENCY}",
+        f"node.latency={node_latency}",
     ]
 
 
@@ -830,7 +853,7 @@ def loopback_latency_args(delay_ms: int) -> list[str]:
 
 def estimated_capture_loopback_saving_ms() -> int:
     """Measurable win vs prior hardcoded ``latency_msec=20`` capture path."""
-    return max(0, 20 - CAPTURE_LOOPBACK_LATENCY_MSEC)
+    return max(0, 20 - _env_capture_latency_msec())
 
 
 def build_capture_loopback_commands(
@@ -846,6 +869,7 @@ def build_capture_loopback_commands(
     pactl = tools.get("pactl")
     pw_link = tools.get("pw-link")
     tag = capture_module_tag(host_id)
+    capture_ms = _env_capture_latency_msec()
 
     if pactl:
         cmds.append(
@@ -853,7 +877,7 @@ def build_capture_loopback_commands(
                 pactl,
                 "load-module",
                 "module-loopback",
-                *loopback_latency_args(CAPTURE_LOOPBACK_LATENCY_MSEC),
+                *loopback_latency_args(capture_ms),
                 f"source={source_ref}",
                 f"sink={feeder}",
                 "sink_dont_move=true",
@@ -863,7 +887,7 @@ def build_capture_loopback_commands(
         )
         notes.append(
             f"{host_id}: capture loopback {source_ref} → {feeder} "
-            f"(latency_msec={CAPTURE_LOOPBACK_LATENCY_MSEC}, adjust_time=0)"
+            f"(latency_msec={capture_ms}, adjust_time=0)"
         )
     elif pw_link:
         cmds.append([pw_link, f"{source_ref}:capture_FL", f"{feeder}:playback_FL"])
@@ -888,6 +912,37 @@ def find_musync_capture_ids(modules_text: str, host_id: str) -> list[str]:
     found: list[str] = []
     for mid, rest in parse_pactl_modules_short(modules_text):
         if tag in rest or f"musync_capture_{host_id}" in rest:
+            found.append(mid)
+    return found
+
+
+def find_all_musync_owned_loopback_ids(
+    modules_text: str,
+    feeder_name: str = "musync_feeder",
+) -> list[str]:
+    """Module indexes for every MuSync-owned ``module-loopback``.
+
+    Matches tagged capture/sink loopbacks (``musync_capture_*`` /
+    ``musync_loopback_*``) and untagged loopbacks that source or sink the
+    MuSync feeder — leftovers after Ctrl+C / crashed sessions.
+    """
+    name = (feeder_name or "musync_feeder").strip() or "musync_feeder"
+    feeder_l = name.lower()
+    found: list[str] = []
+    seen: set[str] = set()
+    for mid, rest in parse_pactl_modules_short(modules_text):
+        if "module-loopback" not in rest:
+            continue
+        hay = rest.lower()
+        owned = (
+            "musync_loopback_" in hay
+            or "musync_capture_" in hay
+            or f"source={feeder_l}.monitor" in hay
+            or f"sink={feeder_l}" in hay
+            or f"sink={feeder_l}." in hay
+        )
+        if owned and mid not in seen:
+            seen.add(mid)
             found.append(mid)
     return found
 

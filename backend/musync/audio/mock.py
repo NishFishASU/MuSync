@@ -1007,6 +1007,25 @@ class MockAudioBackend(AudioBackend):
             return
         self._host_player.play(None, position_ms=transport.position_ms)
 
+    def shutdown(self) -> None:
+        """Stop host speakers + streaming children on Ctrl+C / lifespan."""
+        try:
+            self._stop_host_player()
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            self._host_player.cleanup()
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            from ..streaming import get_streaming_service
+
+            svc = get_streaming_service()
+            svc.stop_spotify(keep_librespot=False)
+            svc.stop_youtube()
+        except Exception:  # noqa: BLE001
+            pass
+
     def health(self) -> Health:
         with self._lock:
             from ..streaming import get_streaming_service

@@ -14,6 +14,7 @@ from musync.audio.pw_tools import (
     estimated_capture_loopback_saving_ms,
     feeder_listed_in_sinks,
     feeder_null_sink_args,
+    find_all_musync_owned_loopback_ids,
     find_feeder_null_sink_ids,
     find_musync_loopback_ids,
     is_capture_candidate,
@@ -148,6 +149,18 @@ def test_build_capture_loopback_low_latency() -> None:
 def test_find_musync_loopback_ids() -> None:
     text = "12\tmodule-loopback sink_input_properties=media.name=musync_loopback_sink_1\n"
     assert find_musync_loopback_ids(text, "sink-1") == ["12"]
+
+
+def test_find_all_musync_owned_loopback_ids() -> None:
+    modules = """
+10\tmodule-loopback sink_input_properties=media.name=musync_loopback_qudelix
+11\tmodule-loopback sink_input_properties=media.name=musync_capture_phone
+12\tmodule-loopback source=musync_feeder.monitor sink=bluez_output.AA_BB
+13\tmodule-loopback source=bluez_input.XX sink=musync_feeder
+14\tmodule-loopback source=other.monitor sink=speakers
+15\tmodule-null-sink sink_name=musync_feeder
+"""
+    assert find_all_musync_owned_loopback_ids(modules) == ["10", "11", "12", "13"]
 
 
 def test_find_feeder_null_sink_ids_and_listed() -> None:

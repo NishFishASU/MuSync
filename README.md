@@ -254,6 +254,8 @@ sudo systemctl enable --now musync
 | `MUSYNC_WEB_DIR` | `web/build/` | Built SvelteKit static root |
 | `MUSYNC_PW_FEEDER` | `musync_feeder` | Virtual sink name for fan-out |
 | `MUSYNC_PW_DRY_RUN` | auto | `1` force plan-only; `0` force live CLI; unset = dry-run when PipeWire down |
+| `MUSYNC_PW_FEEDER_NODE_LATENCY` | `512/48000` | Optional larger feeder quantum (e.g. `1024/48000`) for choppy dual-A2DP on one HCI — prefer a second dongle |
+| `MUSYNC_PW_CAPTURE_LATENCY_MSEC` | `10` | Capture→feeder loopback latency cushion (raise to `20` on single-HCI demos) |
 | `MUSYNC_RELOAD` | unset | Set `1` for uvicorn reload |
 | `MUSYNC_API_PROXY` | `http://127.0.0.1:8080` | Vite dev proxy target (`web/`) |
 | `MUSYNC_WIFI_BACKEND` | `auto` | `auto` / `nmcli` / `mock` — phone-hotspot join ([docs/wifi-join.md](docs/wifi-join.md)) |

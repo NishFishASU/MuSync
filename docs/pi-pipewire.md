@@ -26,9 +26,10 @@ USB / PC capture (ALSA auto-detect → feeder): [usb-pc-capture.md](./usb-pc-cap
 | Volume / mute | `wpctl set-volume` / `wpctl set-mute` |
 | Enable/disable | Unload that sink's loopback only (others keep playing) |
 | Discovery | `wpctl status` / `bluetoothctl` → UI by friendly name (MAC auto-filled) |
-| Feeder | One `musync_feeder` null-sink — startup purges orphan `MuSync_Feeder` modules |
+| Feeder | One `musync_feeder` null-sink — startup/shutdown purge orphan `MuSync_Feeder` modules + MuSync loopbacks |
 | Streaming | Spotify librespot → feeder; AirPlay receive (shairport) — [spotify-apple.md](spotify-apple.md), [airplay-receive.md](airplay-receive.md) |
 | AVRCP | Absolute Volume → sliders; play/pause/skip via BlueZ `Media1.RegisterPlayer` (MPRIS) → hub transport (local/Spotify/YouTube); soft-fail without `python3-dbus` / bluetoothd |
+| Lifecycle | Ctrl+C / SIGTERM / systemd stop → unload capture→feeder→sink loopbacks, purge feeder, stop librespot/yt-dlp/ffmpeg/mpv. **Does not** unpair BlueZ — disconnect BT in phone/speaker settings if the raw A2DP link should go away |
 
 ## Cloud vs Pi
 
@@ -70,6 +71,22 @@ Onboard-only is fine (one A2DP sink); extra USB HCI dongles expand capacity when
 Unhealthy USB HCI sticks are soft-skipped (short BlueZ timeouts) so they never block onboard scan/reconnect.
 
 **Untested without hardware:** multi-dongle USB HCI A2DP is inventoried and soft-fail ready in software; live verification awaits a working dongle (BT600 was dead).
+
+## Dual A2DP / one HCI
+
+Phone A2DP **source** + Qudelix A2DP **sink** on the **same** adapter (`hci0`)
+often sounds choppy (shared radio / scheduling), independent of Ethernet ICS or
+thermals and with turn-taking on or off. MuSync’s low-latency feeder defaults
+(`node.latency=512/48000`, capture loopback 10 ms) favor sync over cushion.
+
+| Mitigation | Notes |
+|------------|--------|
+| **Second USB HCI dongle** (recommended) | Put phone inbound on one HCI, Qudelix outbound on another |
+| Larger feeder buffer (optional) | `MUSYNC_PW_FEEDER_NODE_LATENCY=1024/48000` (or `2048/48000`) before `run_pi.sh` — trades a few ms latency for fewer underruns on single-HCI demos |
+| Capture loopback cushion | `MUSYNC_PW_CAPTURE_LATENCY_MSEC=20` (default 10) |
+
+Ctrl+C / shutdown still tears down MuSync loopbacks + feeder (see Lifecycle row
+above); BlueZ pairing stays until you disconnect BT manually.
 
 ## Manual command cheat-sheet
 
