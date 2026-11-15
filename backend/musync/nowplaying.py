@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import html
 import logging
 from pathlib import Path
 from typing import TYPE_CHECKING, Optional
@@ -13,6 +14,30 @@ if TYPE_CHECKING:
     from .audio.source_session import SourceSession
 
 log = logging.getLogger(__name__)
+
+# Laptop / mock defaults so the transport header always has title · artist · cover.
+MOCK_COVER_PATH = "/api/now-playing/cover?source=mock-sample"
+DEMO_SOURCE_ID = "local:demo/sample-tone"
+DEMO_SAMPLE = {
+    "title": "Sample Tone",
+    "artist": "MuSync Demo",
+    "album": "Laptop Mock",
+    "cover_url": MOCK_COVER_PATH,
+}
+STREAMING_SAMPLES: dict[SourceType, dict[str, str]] = {
+    SourceType.SPOTIFY: {
+        "title": "Mock Spotify Track",
+        "artist": "MuSync Connect",
+        "album": "Streaming Mock",
+        "cover_url": MOCK_COVER_PATH,
+    },
+    SourceType.APPLE: {
+        "title": "Mock Apple Song",
+        "artist": "MuSync MusicKit",
+        "album": "Streaming Mock",
+        "cover_url": MOCK_COVER_PATH,
+    },
+}
 
 
 def build_now_playing(session: "SourceSession") -> NowPlaying:
@@ -131,14 +156,97 @@ def build_now_playing(session: "SourceSession") -> NowPlaying:
     )
 
 
+def apply_mock_sample_metadata(np: NowPlaying, session: "SourceSession") -> NowPlaying:
+    """Fill title / artist / album / cover for laptop mock when real tags are absent."""
+    source_type = np.source_type
+    title = np.title
+    artist = np.artist
+    album = np.album
+    cover_url = np.cover_url
+
+    if source_type == SourceType.LOCAL:
+        sid = None
+        if np.queue_item_id:
+            for item in session.list_queue():
+                if item.id == np.queue_item_id:
+                    sid = item.source_id
+                    break
+        transport = session.get_transport()
+        sid = sid or transport.source_id
+        is_demo = bool(sid and str(sid).startswith("local:demo")) or not np.locator or (
+            np.locator or ""
+        ).startswith("demo/")
+        if is_demo or not (artist and album and cover_url):
+            # Prefer real tags when present; otherwise demo sample.
+            title = title or DEMO_SAMPLE["title"]
+            artist = artist or DEMO_SAMPLE["artist"]
+            album = album or DEMO_SAMPLE["album"]
+            cover_url = cover_url or DEMO_SAMPLE["cover_url"]
+    elif source_type in STREAMING_SAMPLES:
+        sample = STREAMING_SAMPLES[source_type]
+        title = title or sample["title"]
+        artist = artist or sample["artist"]
+        album = album or sample["album"]
+        cover_url = cover_url or sample["cover_url"]
+    elif source_type == SourceType.INPUT:
+        host = session.active_input_host()
+        if host:
+            title = title or f"{host.name} · live"
+            artist = artist or host.name
+            album = album or host.capture_path.value
+        else:
+            title = title or "Live input"
+            artist = artist or "Device"
+            album = album or "Capture"
+        cover_url = cover_url or MOCK_COVER_PATH
+    else:
+        # Stopped / empty cue — still show a friendly idle sample on mock.
+        title = title or DEMO_SAMPLE["title"]
+        artist = artist or DEMO_SAMPLE["artist"]
+        album = album or DEMO_SAMPLE["album"]
+        cover_url = cover_url or DEMO_SAMPLE["cover_url"]
+
+    return np.model_copy(
+        update={
+            "title": title,
+            "artist": artist,
+            "album": album,
+            "cover_url": cover_url,
+            "has_cover": bool(cover_url),
+        }
+    )
+
+
+def mock_cover_bytes(*, label: str = "MuSync") -> tuple[bytes, str]:
+    """Tiny SVG album art for mock / demo sources (no media file required)."""
+    safe = html.escape((label or "MuSync")[:28])
+    svg = f"""<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="240" height="240" viewBox="0 0 240 240">
+  <defs>
+    <linearGradient id="g" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#1a3d2e"/>
+      <stop offset="100%" stop-color="#0d1f18"/>
+    </linearGradient>
+  </defs>
+  <rect width="240" height="240" fill="url(#g)"/>
+  <circle cx="120" cy="105" r="52" fill="none" stroke="#c9a227" stroke-width="3"/>
+  <circle cx="120" cy="105" r="10" fill="#c9a227"/>
+  <text x="120" y="198" text-anchor="middle" fill="#e8d9a0"
+        font-family="Georgia, serif" font-size="15">{safe}</text>
+</svg>
+"""
+    return svg.encode("utf-8"), "image/svg+xml"
+
+
 def resolve_cover_bytes(
     session: "SourceSession",
     *,
     source_id: Optional[str] = None,
+    allow_mock: bool = False,
 ) -> tuple[bytes, str] | None:
-    """Return (bytes, content_type) for embedded local cover art."""
+    """Return (bytes, content_type) for embedded local cover art (or mock SVG)."""
     path: Optional[str] = None
-    if source_id:
+    if source_id and source_id not in {"mock-sample"}:
         for src in session.list_sources():
             if src.id == source_id and src.path:
                 path = src.path
@@ -150,15 +258,27 @@ def resolve_cover_bytes(
                 if item.id == transport.queue_item_id and item.path:
                     path = item.path
                     break
-    if not path:
-        return None
-    cover = extract_embedded_cover(path)
-    if not cover or not cover.is_file():
-        return None
-    data = cover.read_bytes()
-    suffix = cover.suffix.lower()
-    ctype = "image/jpeg" if suffix in {".jpg", ".jpeg"} else "image/png"
-    return data, ctype
+    if path:
+        cover = extract_embedded_cover(path)
+        if cover and cover.is_file():
+            data = cover.read_bytes()
+            suffix = cover.suffix.lower()
+            ctype = "image/jpeg" if suffix in {".jpg", ".jpeg"} else "image/png"
+            return data, ctype
+
+    # Mock / demo fallback (laptop UI without media tags).
+    want_mock = allow_mock or source_id in {"mock-sample", DEMO_SOURCE_ID} or (
+        bool(source_id) and str(source_id).startswith("local:demo")
+    )
+    if want_mock:
+        label = DEMO_SAMPLE["title"]
+        try:
+            np = build_now_playing(session)
+            label = np.title or label
+        except Exception:  # noqa: BLE001
+            pass
+        return mock_cover_bytes(label=label)
+    return None
 
 
 def _probe_avrcp_title() -> Optional[dict[str, str]]:

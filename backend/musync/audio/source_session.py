@@ -20,6 +20,7 @@ from ..models import (
     TransportPut,
     TransportState,
 )
+from ..nowplaying import DEMO_SAMPLE, DEMO_SOURCE_ID
 from ..streaming import get_streaming_service
 from .input_registry import (
     InputRegistry,
@@ -128,6 +129,10 @@ class SourceSession:
             source_type=active.source_type if active else None,
             input_id=active.input_id if active else None,
             title=active.title if active else None,
+            artist=active.artist if active else None,
+            album=active.album if active else None,
+            cover_url=active.cover_url if active else None,
+            media_kind=active.media_kind if active else None,
         )
         self._play_started_wall: Optional[float] = None
         self._play_started_pos: int = 0
@@ -142,24 +147,30 @@ class SourceSession:
     def _build_sources(self) -> list[Source]:
         local = discover_local_sources()
         if not local:
-            local = [
-                Source(
-                    id="local:demo/sample-tone",
-                    title="Sample Tone (demo)",
-                    type=SourceType.LOCAL,
-                    path=None,
-                    locator="demo/sample-tone",
-                    available=True,
-                    duration_ms=DEMO_DURATION_MS,
-                    note="Virtual demo track — drop files under media/ for real paths",
-                )
-            ]
+            local = [self._demo_local_source()]
         else:
             for src in local:
                 if src.locator is None and src.path:
                     src.locator = src.path
         # Hub stream rows + per-host contributions (local/spotify/apple/live).
         return local + self._streaming_placeholders() + self._inputs.catalog_sources()
+
+    @staticmethod
+    def _demo_local_source() -> Source:
+        """Virtual demo cue with sample now-playing metadata for laptop mock."""
+        return Source(
+            id=DEMO_SOURCE_ID,
+            title=f"{DEMO_SAMPLE['title']} (demo)",
+            type=SourceType.LOCAL,
+            path=None,
+            locator="demo/sample-tone",
+            available=True,
+            duration_ms=DEMO_DURATION_MS,
+            note="Virtual demo track — drop files under media/ for real paths",
+            artist=DEMO_SAMPLE["artist"],
+            album=DEMO_SAMPLE["album"],
+            cover_url=DEMO_SAMPLE["cover_url"],
+        )
 
     def _streaming_placeholders(self) -> list[Source]:
         out: list[Source] = []
@@ -289,18 +300,7 @@ class SourceSession:
                 if s.type == SourceType.LOCAL and not s.input_id
             ]
             if not local:
-                local = [
-                    Source(
-                        id="local:demo/sample-tone",
-                        title="Sample Tone (demo)",
-                        type=SourceType.LOCAL,
-                        path=None,
-                        locator="demo/sample-tone",
-                        available=True,
-                        duration_ms=DEMO_DURATION_MS,
-                        note="Virtual demo track — drop files under media/ for real paths",
-                    )
-                ]
+                local = [self._demo_local_source()]
         else:
             for src in local:
                 if src.locator is None and src.path:

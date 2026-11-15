@@ -167,7 +167,14 @@ def api_now_playing_cover(source: str | None = Query(default=None)) -> Response:
     session = getattr(backend, "_session", None)
     if session is None:
         raise HTTPException(status_code=404, detail="No cover available")
-    result = resolve_cover_bytes(session, source_id=source)
+    # Mock backend always falls back to sample SVG so laptop UI shows album art.
+    health = getattr(backend, "health", None)
+    allow_mock = False
+    try:
+        allow_mock = bool(health and health().backend == "mock")
+    except Exception:  # noqa: BLE001
+        allow_mock = False
+    result = resolve_cover_bytes(session, source_id=source, allow_mock=allow_mock)
     if result is None:
         raise HTTPException(status_code=404, detail="No embedded cover art")
     data, ctype = result

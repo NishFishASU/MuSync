@@ -170,6 +170,51 @@ def test_now_playing_api_for_local(tmp_path, monkeypatch) -> None:
     body = res.json()
     assert "title" in body
     assert body.get("source_type") in {None, "local", "spotify", "apple", "input"}
+    # Mock laptop path always surfaces sample title / artist / album / cover.
+    assert body.get("title")
+    assert body.get("artist")
+    assert body.get("album")
+    assert body.get("cover_url")
+    assert body.get("has_cover") is True
+    cover = client.get("/api/now-playing/cover?source=mock-sample")
+    assert cover.status_code == 200
+    assert "image" in (cover.headers.get("content-type") or "")
+    assert len(cover.content) > 40
+
+
+def test_now_playing_sample_for_input_and_streaming(tmp_path, monkeypatch) -> None:
+    from musync.app import create_app
+    from musync.models import QueueItemCreate, SourceType
+
+    backend = _backend(tmp_path, monkeypatch)
+    client = TestClient(create_app(audio_backend=backend))
+
+    hosts = client.get("/api/inputs").json()
+    assert hosts
+    host_id = hosts[0]["id"]
+    item = backend.add_queue_item(
+        QueueItemCreate(source_type=SourceType.INPUT, input_id=host_id, title="Live cue")
+    )
+    backend.set_active_queue_item(item.id)
+    np = client.get("/api/now-playing").json()
+    assert np.get("source_type") == "input"
+    assert np.get("title")
+    assert np.get("artist")
+    assert np.get("cover_url")
+
+    spotify = backend.add_queue_item(
+        QueueItemCreate(
+            source_type=SourceType.SPOTIFY,
+            locator="spotify:track:mock123",
+            title=None,
+        )
+    )
+    backend.set_active_queue_item(spotify.id)
+    np2 = client.get("/api/now-playing").json()
+    assert np2.get("source_type") == "spotify"
+    assert np2.get("artist")
+    assert np2.get("album")
+    assert np2.get("cover_url")
 
 
 def test_apple_airplay_marks_playable(tmp_path, monkeypatch) -> None:
