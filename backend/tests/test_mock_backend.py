@@ -12,6 +12,8 @@ from musync.models import Device, DevicePatch, TransportPut, TransportState
 def backend(tmp_path, monkeypatch) -> MockAudioBackend:
     monkeypatch.setenv("MUSYNC_DEVICES_CONFIG", str(tmp_path / "devices.yaml"))
     monkeypatch.setenv("MUSYNC_MEDIA_DIR", str(tmp_path / "media"))
+    # Avoid spawning ffplay during unit tests (host speakers covered in test_host_player).
+    monkeypatch.setenv("MUSYNC_HOST_SPEAKERS", "0")
     devices = [
         Device(
             id="sink-1",

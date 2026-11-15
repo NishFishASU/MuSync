@@ -15,6 +15,7 @@ pip install -r requirements.txt
 ./scripts/build_web.sh
 
 # Mock backend (default) — no PipeWire or BT hardware required
+# Local Play routes to host default speakers (ffplay/mpv/sounddevice; soft-fail if none)
 ./scripts/run_dev.sh
 # → http://127.0.0.1:8080  (API + built SPA)
 ```
@@ -22,6 +23,7 @@ pip install -r requirements.txt
 ```bash
 export PYTHONPATH=backend
 export MUSYNC_BACKEND=mock
+# optional: MUSYNC_HOST_SPEAKERS=0 to keep software-clock-only
 python3 -m musync
 ```
 
@@ -50,7 +52,8 @@ pytest
 ```
 backend/musync/audio/
   base.py           # AudioBackend interface
-  mock.py           # Fake ≤6 sinks + local playback clock
+  mock.py           # Fake ≤6 sinks + host-speaker playback (laptop)
+  host_player.py    # sounddevice / ffplay / mpv → OS default speakers
   pipewire.py       # Feeder → loopback delay → bluez fan-out
   pw_tools.py       # wpctl/pactl parsers + graph plan helpers
 web/                # SvelteKit SPA (adapter-static)
@@ -131,7 +134,7 @@ Pi tip: `web/build/` is gitignored — build on a laptop (or once on the Pi with
 | Sinks | In-memory fake devices (≤6) | Same model; maps MAC/`pw_node` → WirePlumber ids |
 | Delay | Stored on device object | `pactl module-loopback latency_msec=N` from feeder |
 | Volume/mute | In-memory | `wpctl set-volume` / `set-mute` |
-| Playback | Software clock (+ live/streaming cues) | `mpv` / librespot / yt-dlp\|ffmpeg / capture loopback → `musync_feeder` |
+| Playback | Local files → host default speakers (`sounddevice` / `ffplay` / `mpv` / …; soft-fail if no audio) + software clock | `mpv` / librespot / yt-dlp\|ffmpeg / capture loopback → `musync_feeder` |
 | Without hardware | Always | **Dry-run**: writes `config/pipewire-graph.plan.sh` |
 | UI | Same SvelteKit `web/build` | Same |
 

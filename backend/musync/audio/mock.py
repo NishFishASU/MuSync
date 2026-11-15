@@ -40,10 +40,13 @@ from ..models import (
     QueueItemCreate,
     QueueItemPatch,
     Source,
+    SourceType,
     Transport,
     TransportPut,
 )
+from ..nowplaying import DEMO_SOURCE_ID
 from .avrcp import AvrcpAction, AvrcpBridge, parse_action, relay_action_to_session
+from .host_player import HostSpeakerPlayer
 
 # Laptop/dev discovery fixtures — friendly names, no real bluez.
 _MOCK_DISCOVERED = [
@@ -231,10 +234,16 @@ class MockAudioBackend(AudioBackend):
             a.model_copy(deep=True) for a in _MOCK_ADAPTERS
         ]
 
-        # Feeder callbacks are no-ops: mock has no PipeWire graph to preserve.
         # Seed S21 FE as live BT A2DP so Play works for live input on laptop.
+        # Local files route to host default speakers (ffplay/sounddevice/…); soft-fail OK.
         self._inputs = InputRegistry(hosts=_mock_live_hosts(), lock=self._lock)
-        self._session = SourceSession(inputs=self._inputs, lock=self._lock)
+        self._host_player = HostSpeakerPlayer()
+        self._session = SourceSession(
+            inputs=self._inputs,
+            lock=self._lock,
+            on_feeder_stop=self._stop_host_player,
+            on_feeder_start=self._start_host_player,
+        )
         # Laptop: Absolute Volume / headset buttons via inject API (no BlueZ).
         self._avrcp = AvrcpBridge(
             on_volume=self._on_avrcp_volume,
@@ -810,6 +819,33 @@ class MockAudioBackend(AudioBackend):
         self._avrcp.inject_volume(device_id, clamp_volume(volume))
         return self.get_device(device_id)
 
+    def _stop_host_player(self) -> None:
+        self._host_player.stop()
+
+    def _start_host_player(self) -> None:
+        """Route local mock playback to host speakers; soft-fail if no audio."""
+        transport = self._session.get_transport()
+        # Live / streaming cues stay software-clock on laptop mock.
+        if transport.source_type in {
+            SourceType.SPOTIFY,
+            SourceType.APPLE,
+            SourceType.YOUTUBE,
+            SourceType.INPUT,
+        }:
+            self._host_player.stop()
+            return
+        path = self._session.active_file_path()
+        if path:
+            self._host_player.play(path, position_ms=transport.position_ms)
+            return
+        # Pathless demo cue — short generated tone (still soft-fails without a player).
+        if (transport.source_id or "") == DEMO_SOURCE_ID or (
+            transport.source_id or ""
+        ).startswith("local:demo"):
+            self._host_player.play_demo_tone(position_ms=0)
+            return
+        self._host_player.play(None, position_ms=transport.position_ms)
+
     def health(self) -> Health:
         with self._lock:
             from ..streaming import get_streaming_service
@@ -820,7 +856,8 @@ class MockAudioBackend(AudioBackend):
             healthy_n = sum(1 for a in adapters if a.healthy)
             stream = get_streaming_service().status()
             detail = (
-                "MockAudioBackend — simulated sinks; source switch keeps sink graph (noop)"
+                "MockAudioBackend — simulated sinks; local play → host speakers "
+                f"({self._host_player.detail})"
             )
             if soft_warn:
                 detail = f"{detail}; {soft_warn}"
@@ -841,5 +878,6 @@ class MockAudioBackend(AudioBackend):
                 apple_ready=stream.airplay.configured,
                 youtube_ready=stream.youtube.configured,
                 avrcp_supported=True,
+                host_speakers=self._host_player.backend,
                 detail=detail,
             )
