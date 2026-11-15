@@ -3,7 +3,7 @@ r"""PipeWireBackend — Pi demo control plane via wpctl / pactl / pw-link / mpv.
 ## Fan-out graph (Phase 1)
 
 ```
-[mpv local file]  OR  [bluez_input / USB capture via module-loopback]
+[mpv local file]  OR  [bluez_input / USB / HDMI capture via module-loopback]
         │
         ▼
   musync_feeder  (null/virtual sink)
@@ -38,6 +38,11 @@ pactl load-module module-loopback latency_msec=40 \
 # Phone as A2DP source (S21 FE → bluez_input) into the same feeder
 pactl load-module module-loopback latency_msec=20 \
   source=bluez_input.XX_XX_XX_XX_XX_XX sink=musync_feeder \
+  sink_dont_move=true source_dont_move=true
+
+# HDMI / capture card (ALSA → PipeWire source) into the same feeder
+pactl load-module module-loopback latency_msec=20 \
+  source=alsa_input.usb-MACROSILICON_HDMI-00 sink=musync_feeder \
   sink_dont_move=true source_dont_move=true
 
 wpctl set-volume <NODE_ID> 0.75
@@ -113,6 +118,7 @@ from .pw_tools import (
     build_capture_loopback_commands,
     build_sink_commands,
     classify_capture_source,
+    discover_alsa_hdmi_cards,
     discover_alsa_usb_cards,
     discover_bluetooth_remotes,
     discover_nodes,
@@ -124,6 +130,7 @@ from .pw_tools import (
     friendly_bluez_label,
     is_capture_candidate,
     match_capture_source,
+    merge_alsa_hdmi_into_sources,
     merge_alsa_usb_into_sources,
     match_device_node,
     normalize_mac,
@@ -1102,7 +1109,7 @@ class PipeWireBackend(AudioBackend):
             self._player_proc = None
 
     def _start_capture_into_feeder(self, host: InputHost) -> None:
-        """Route bluez_input / USB Audio/Source into musync_feeder (fan-out untouched)."""
+        """Route bluez_input / USB / HDMI Audio/Source into musync_feeder."""
         self._refresh_input_host_links()
         host = self._inputs.get_host(host.id)
         source_ref = (host.endpoint or "").strip()
@@ -1232,7 +1239,11 @@ class PipeWireBackend(AudioBackend):
             except KeyError:
                 log.warning("Active input host missing: %s", transport.input_id)
                 return
-            if host.capture_path in {CapturePath.BT_A2DP, CapturePath.USB}:
+            if host.capture_path in {
+                CapturePath.BT_A2DP,
+                CapturePath.USB,
+                CapturePath.HDMI,
+            }:
                 self._start_capture_into_feeder(host)
                 return
             if host.capture_path == CapturePath.NETWORK and host.endpoint:
@@ -1258,21 +1269,22 @@ class PipeWireBackend(AudioBackend):
         self._start_mpv_into_feeder(path, position_ms=transport.position_ms)
 
     def _discover_capture_candidates(self) -> tuple[list[PwNode], str]:
-        """PipeWire Audio/Source + ALSA USB cards (auto-detect sound cards)."""
+        """PipeWire Audio/Source + ALSA USB + HDMI/capture cards."""
         nodes, detail = discover_sources(
             wpctl=self._tools["wpctl"],
             pw_cli=self._tools["pw-cli"],
         )
-        alsa_cards, alsa_detail = discover_alsa_usb_cards(
-            arecord=which("arecord"),
-        )
+        arecord = which("arecord")
+        alsa_cards, alsa_detail = discover_alsa_usb_cards(arecord=arecord)
+        hdmi_cards, hdmi_detail = discover_alsa_hdmi_cards(arecord=arecord)
         merged = merge_alsa_usb_into_sources(nodes, alsa_cards)
+        merged = merge_alsa_hdmi_into_sources(merged, hdmi_cards)
         candidates = [n for n in merged if is_capture_candidate(n)]
         # Synthesized ALSA-only nodes are always capture candidates.
         for n in merged:
             if n.id.startswith("alsa:") and n not in candidates:
                 candidates.append(n)
-        detail_full = f"{detail}; {alsa_detail}"
+        detail_full = f"{detail}; {alsa_detail}; {hdmi_detail}"
         return candidates, detail_full
 
     def _auto_bind_usb_hosts(self, candidates: list[PwNode]) -> list[str]:
@@ -1285,7 +1297,6 @@ class PipeWireBackend(AudioBackend):
             n
             for n in candidates
             if classify_capture_source(n) == CapturePath.USB.value
-            or n.id.startswith("alsa:")
         ]
         if not usb_nodes:
             return []
@@ -1352,6 +1363,79 @@ class PipeWireBackend(AudioBackend):
                     connected=True,
                     endpoint=source_ref,
                     note=CAPTURE_NOTES[CapturePath.USB],
+                )
+            )
+            used_endpoints.add(source_ref)
+            bound.append(created.id)
+        return bound
+
+    def _auto_bind_hdmi_hosts(self, candidates: list[PwNode]) -> list[str]:
+        """Bind unbound HDMI / capture-card sources onto HDMI hosts."""
+        hdmi_nodes = [
+            n
+            for n in candidates
+            if classify_capture_source(n) == CapturePath.HDMI.value
+        ]
+        if not hdmi_nodes:
+            return []
+
+        bound: list[str] = []
+        used_endpoints = {
+            (h.endpoint or "").strip()
+            for h in self._inputs.list_hosts()
+            if h.capture_path == CapturePath.HDMI and h.endpoint
+        }
+
+        def _claim(node: PwNode, host_id: str, *, name: str | None = None) -> None:
+            source_ref = node.name or node.id
+            host = self._inputs.get_host(host_id)
+            keep_name = "hdmi" in host.name.lower() or "capture" in host.name.lower()
+            patch_kwargs: dict = {
+                "capture_path": CapturePath.HDMI,
+                "connected": True,
+                "endpoint": source_ref,
+                "armed": True,
+                "kind": HostKind.OTHER,
+                "note": CAPTURE_NOTES[CapturePath.HDMI],
+            }
+            if name and not keep_name:
+                patch_kwargs["name"] = name
+            self._inputs.patch_host(host_id, InputHostPatch(**patch_kwargs))
+            used_endpoints.add(source_ref)
+            bound.append(host_id)
+
+        for node in hdmi_nodes:
+            source_ref = node.name or node.id
+            if source_ref in used_endpoints:
+                continue
+            waiting = next(
+                (
+                    h
+                    for h in self._inputs.list_hosts()
+                    if h.capture_path == CapturePath.HDMI
+                    and not (h.connected and h.endpoint)
+                ),
+                None,
+            )
+            label = (node.description or "").strip() or node.name
+            if waiting:
+                _claim(node, waiting.id, name=label if label else waiting.name)
+                continue
+            if any(
+                (h.endpoint or "") == source_ref for h in self._inputs.list_hosts()
+            ):
+                continue
+            if len(self._inputs.list_hosts()) >= MAX_INPUT_HOSTS:
+                break
+            created = self._inputs.add_host(
+                InputHostCreate(
+                    name=label or "HDMI Capture",
+                    kind=HostKind.OTHER,
+                    capture_path=CapturePath.HDMI,
+                    armed=True,
+                    connected=True,
+                    endpoint=source_ref,
+                    note=CAPTURE_NOTES[CapturePath.HDMI],
                 )
             )
             used_endpoints.add(source_ref)
@@ -1491,7 +1575,11 @@ class PipeWireBackend(AudioBackend):
                         ),
                     )
 
-        # Prefer auto-detect: claim USB sound cards + BT A2DP phones without manual bind.
+        # Prefer auto-detect: claim USB / HDMI / BT A2DP without manual bind.
+        try:
+            self._auto_bind_hdmi_hosts(candidates)
+        except Exception as exc:  # noqa: BLE001
+            log.debug("HDMI auto-bind skipped: %s", exc)
         try:
             self._auto_bind_usb_hosts(candidates)
         except Exception as exc:  # noqa: BLE001
@@ -1898,12 +1986,16 @@ class PipeWireBackend(AudioBackend):
             )
             remotes_by_mac = {normalize_mac(r.mac): r for r in remotes if r.mac}
 
-            # Auto-bind USB sound cards before building the response rows.
+            # Auto-bind HDMI / USB before building the response rows.
+            auto_ids: list[str] = []
             try:
-                auto_ids = self._auto_bind_usb_hosts(candidates)
+                auto_ids.extend(self._auto_bind_hdmi_hosts(candidates))
+            except Exception as exc:  # noqa: BLE001
+                log.debug("HDMI auto-bind on discover failed: %s", exc)
+            try:
+                auto_ids.extend(self._auto_bind_usb_hosts(candidates))
             except Exception as exc:  # noqa: BLE001
                 log.debug("USB auto-bind on discover failed: %s", exc)
-                auto_ids = []
 
             configured_by_name = {
                 h.name.strip().lower(): h.id for h in self._inputs.list_hosts()
@@ -1917,7 +2009,9 @@ class PipeWireBackend(AudioBackend):
             rows: list[DiscoveredCaptureSource] = []
             for node in candidates:
                 path_val = classify_capture_source(node)
-                if node.id.startswith("alsa:") and path_val == "network":
+                if node.id.startswith("alsa:hdmi:") and path_val == "network":
+                    path_val = CapturePath.HDMI.value
+                elif node.id.startswith("alsa:") and path_val == "network":
                     path_val = CapturePath.USB.value
                 path = CapturePath(path_val)
                 label = node.description.strip() if node.description else ""
@@ -1969,7 +2063,7 @@ class PipeWireBackend(AudioBackend):
                 refreshed.append(row.model_copy(update={"configured_id": cfg}))
 
             auto_note = (
-                f"; auto-bound USB hosts={','.join(auto_ids)}" if auto_ids else ""
+                f"; auto-bound hosts={','.join(auto_ids)}" if auto_ids else ""
             )
             return CaptureDiscoverResponse(
                 sources=refreshed,

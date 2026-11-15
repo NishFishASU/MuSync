@@ -82,7 +82,7 @@ from .base import AudioBackend
 from .input_registry import InputRegistry, CAPTURE_NOTES
 from .source_session import SourceSession
 
-# Laptop/dev: S21 FE appears as a live bluez_input so UI can pick playable live input.
+# Laptop/dev: S21 FE + USB + HDMI fixtures so UI can pick playable live input.
 _MOCK_CAPTURE_SOURCES = [
     DiscoveredCaptureSource(
         name="Galaxy S21 FE",
@@ -98,6 +98,14 @@ _MOCK_CAPTURE_SOURCES = [
         pw_name="alsa_input.usb-Generic_USB_Audio-00",
         mac="",
         capture_path=CapturePath.USB,
+        connected=True,
+    ),
+    DiscoveredCaptureSource(
+        name="HDMI Capture Card",
+        pw_node="63",
+        pw_name="alsa_input.usb-MACROSILICON_HDMI-00",
+        mac="",
+        capture_path=CapturePath.HDMI,
         connected=True,
     ),
 ]
@@ -124,6 +132,16 @@ def _mock_live_hosts() -> list[InputHost]:
             connected=True,
             endpoint="alsa_input.usb-Generic_USB_Audio-00",
             note=CAPTURE_NOTES[CapturePath.USB],
+        ),
+        InputHost(
+            id="input-3",
+            name="HDMI Capture",
+            kind=HostKind.OTHER,
+            capture_path=CapturePath.HDMI,
+            armed=True,
+            connected=True,
+            endpoint="alsa_input.usb-MACROSILICON_HDMI-00",
+            note=CAPTURE_NOTES[CapturePath.HDMI],
         ),
     ]
 
@@ -474,42 +492,60 @@ class MockAudioBackend(AudioBackend):
 
     def discover_capture_sources(self) -> CaptureDiscoverResponse:
         with self._lock:
-            # Prefer auto-detect: bind USB fixture onto a waiting USB/PC host.
-            usb_fix = next(
-                (s for s in _MOCK_CAPTURE_SOURCES if s.capture_path == CapturePath.USB),
-                None,
-            )
             auto_bound: list[str] = []
-            if usb_fix:
+
+            def _auto_bind_fixture(
+                path: CapturePath,
+                *,
+                kind: HostKind,
+                keep_name_tokens: tuple[str, ...],
+            ) -> None:
+                fixture = next(
+                    (s for s in _MOCK_CAPTURE_SOURCES if s.capture_path == path),
+                    None,
+                )
+                if not fixture:
+                    return
                 waiting = next(
                     (
                         h
                         for h in self._inputs.list_hosts()
-                        if h.capture_path == CapturePath.USB
+                        if h.capture_path == path
                         and not (h.connected and h.endpoint)
                     ),
                     None,
                 )
                 already = any(
-                    (h.endpoint or "") == usb_fix.pw_name
+                    (h.endpoint or "") == fixture.pw_name
                     for h in self._inputs.list_hosts()
                 )
                 if waiting and not already:
-                    keep_laptop = "laptop" in waiting.name.lower()
+                    keep = any(t in waiting.name.lower() for t in keep_name_tokens)
                     self._inputs.patch_host(
                         waiting.id,
                         InputHostPatch(
-                            name=waiting.name if keep_laptop else usb_fix.name,
-                            kind=HostKind.PC,
-                            capture_path=CapturePath.USB,
+                            name=waiting.name if keep else fixture.name,
+                            kind=kind,
+                            capture_path=path,
                             connected=True,
-                            endpoint=usb_fix.pw_name,
+                            endpoint=fixture.pw_name,
                             armed=True,
-                            note=CAPTURE_NOTES[CapturePath.USB],
+                            note=CAPTURE_NOTES[path],
                         ),
                     )
                     auto_bound.append(waiting.id)
-                    self._session.refresh_live_availability()
+
+            # Prefer auto-detect: bind USB / HDMI fixtures onto waiting hosts.
+            _auto_bind_fixture(
+                CapturePath.USB, kind=HostKind.PC, keep_name_tokens=("laptop", "usb")
+            )
+            _auto_bind_fixture(
+                CapturePath.HDMI,
+                kind=HostKind.OTHER,
+                keep_name_tokens=("hdmi", "capture"),
+            )
+            if auto_bound:
+                self._session.refresh_live_availability()
 
             configured = {h.name.strip().lower(): h.id for h in self._inputs.list_hosts()}
             also_ep = {
@@ -522,12 +558,12 @@ class MockAudioBackend(AudioBackend):
                 cfg = configured.get(item.name.lower()) or also_ep.get(item.pw_name)
                 sources.append(item.model_copy(update={"configured_id": cfg}))
             auto_note = (
-                f"; auto-bound USB hosts={','.join(auto_bound)}" if auto_bound else ""
+                f"; auto-bound hosts={','.join(auto_bound)}" if auto_bound else ""
             )
             return CaptureDiscoverResponse(
                 sources=sources,
                 detail=(
-                    "mock capture — Galaxy S21 FE bluez_input + USB Audio fixtures"
+                    "mock capture — Galaxy S21 FE + USB Audio + HDMI Capture fixtures"
                     f"{auto_note}"
                 ),
             )

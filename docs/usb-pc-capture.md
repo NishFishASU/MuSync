@@ -65,5 +65,6 @@ can select USB live input and Play.
 
 ## Related
 
+- HDMI / capture card: [hdmi-capture.md](./hdmi-capture.md)
 - Phone as BT A2DP **source**: [phone-bt-source-vs-spp-sink.md](./phone-bt-source-vs-spp-sink.md)
 - Feeder fan-out: [pi-pipewire.md](./pi-pipewire.md)

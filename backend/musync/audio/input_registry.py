@@ -1,4 +1,4 @@
-"""Phone/PC input hosts (≤4) — BT A2DP / USB / network capture into the feeder."""
+"""Phone/PC/HDMI input hosts (≤4) — BT A2DP / USB / HDMI / network → feeder."""
 
 from __future__ import annotations
 
@@ -22,6 +22,8 @@ CAPTURE_NOTES: dict[CapturePath, str] = {
     CapturePath.BT_A2DP: "BT A2DP source → PipeWire bluez_input → musync_feeder",
     CapturePath.USB: "USB-A sound card / interface → ALSA → musync_feeder "
     "(Pi 5 USB-C PD is power-only — not audio)",
+    CapturePath.HDMI: "HDMI / capture card → ALSA → PipeWire → musync_feeder "
+    "(audio only; picture stays on the capture display path)",
     CapturePath.NETWORK: "Network / uploaded file → musync_feeder",
 }
 
@@ -29,6 +31,8 @@ STUB_CAPTURE_NOTES: dict[CapturePath, str] = {
     CapturePath.BT_A2DP: "Waiting for bluez_input — pair phone as A2DP source to Pi",
     CapturePath.USB: "Waiting for USB-A sound card (not USB-C PD). "
     "Plug an interface, then Refresh inputs",
+    CapturePath.HDMI: "Waiting for HDMI / capture card. "
+    "Plug a capture dongle, then Refresh inputs",
     CapturePath.NETWORK: "Upload a file or set endpoint to play into the feeder",
 }
 
@@ -50,12 +54,12 @@ def host_is_live(host: InputHost) -> bool:
     if host.capture_path == CapturePath.NETWORK:
         # Network path is live when endpoint is an existing file (upload stub).
         return Path(host.endpoint).is_file()
-    # BT A2DP / USB: connected + PipeWire source endpoint.
+    # BT A2DP / USB / HDMI: connected + PipeWire source endpoint.
     return True
 
 
 def default_demo_hosts() -> list[InputHost]:
-    """Demo hosts — S21 FE BT path + USB PC; mock marks S21 live."""
+    """Demo hosts — S21 FE BT + USB PC + HDMI capture; mock marks them live."""
     return [
         InputHost(
             id="input-1",
@@ -76,6 +80,16 @@ def default_demo_hosts() -> list[InputHost]:
             connected=False,
             endpoint=None,
             note=STUB_CAPTURE_NOTES[CapturePath.USB],
+        ),
+        InputHost(
+            id="input-3",
+            name="HDMI Capture",
+            kind=HostKind.OTHER,
+            capture_path=CapturePath.HDMI,
+            armed=False,
+            connected=False,
+            endpoint=None,
+            note=STUB_CAPTURE_NOTES[CapturePath.HDMI],
         ),
     ]
 
@@ -221,7 +235,7 @@ class InputRegistry:
                             input_id=host.id,
                             note=(
                                 "On-device Spotify session (not hub) — use Streaming "
-                                f"panel + librespot, or live A2DP/USB; {path_note}"
+                                f"panel + librespot, or live A2DP/USB/HDMI; {path_note}"
                             ),
                         )
                     )

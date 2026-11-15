@@ -7,7 +7,7 @@
 /** @typedef {'stopped' | 'playing' | 'paused'} TransportState */
 /** @typedef {'local' | 'spotify' | 'apple' | 'input'} SourceType */
 /** @typedef {'audio' | 'video'} MediaKind */
-/** @typedef {'bt_a2dp' | 'usb' | 'network'} CapturePath */
+/** @typedef {'bt_a2dp' | 'usb' | 'hdmi' | 'network'} CapturePath */
 /** @typedef {'phone' | 'pc' | 'other'} HostKind */
 
 /** @typedef {'bluetooth' | 'network_spp'} DeviceKind */
@@ -261,7 +261,7 @@
  */
 
 export const SOURCE_TYPES = /** @type {const} */ (['local', 'spotify', 'apple', 'input']);
-export const CAPTURE_PATHS = /** @type {const} */ (['bt_a2dp', 'usb', 'network']);
+export const CAPTURE_PATHS = /** @type {const} */ (['bt_a2dp', 'usb', 'hdmi', 'network']);
 export const HOST_KINDS = /** @type {const} */ (['phone', 'pc', 'other']);
 
 /**
@@ -631,6 +631,8 @@ export function capturePathLabel(path) {
 			return 'BT A2DP source';
 		case 'usb':
 			return 'USB audio';
+		case 'hdmi':
+			return 'HDMI / capture';
 		case 'network':
 			return 'Network / upload';
 		default:

@@ -130,7 +130,7 @@ def build_now_playing(session: "SourceSession") -> NowPlaying:
             note = note or (
                 None
                 if host.connected and host.endpoint
-                else "Waiting for live capture (BT A2DP / USB-A sound card)"
+                else "Waiting for live capture (BT A2DP / USB-A / HDMI capture)"
             )
             # Best-effort BlueZ media player title (AVRCP) when available.
             avrcp = _probe_avrcp_title()

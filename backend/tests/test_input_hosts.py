@@ -40,9 +40,10 @@ def test_demo_hosts_and_max_four(tmp_path, monkeypatch) -> None:
     assert {h.capture_path for h in hosts} <= {
         CapturePath.BT_A2DP,
         CapturePath.USB,
+        CapturePath.HDMI,
         CapturePath.NETWORK,
     }
-    # Mock seeds S21 FE + USB Audio as live capture hosts.
+    # Mock seeds S21 FE + USB Audio + HDMI Capture as live capture hosts.
     s21 = next(h for h in hosts if "S21" in h.name)
     assert s21.capture_path == CapturePath.BT_A2DP
     assert s21.connected is True
@@ -50,6 +51,9 @@ def test_demo_hosts_and_max_four(tmp_path, monkeypatch) -> None:
     usb = next(h for h in hosts if h.capture_path == CapturePath.USB)
     assert usb.connected is True
     assert usb.endpoint and "alsa_input" in usb.endpoint
+    hdmi = next(h for h in hosts if h.capture_path == CapturePath.HDMI)
+    assert hdmi.connected is True
+    assert hdmi.endpoint and ("hdmi" in hdmi.endpoint.lower() or "alsa_input" in hdmi.endpoint)
 
     while len(backend.list_inputs()) < 4:
         n = len(backend.list_inputs()) + 1
@@ -132,9 +136,16 @@ def test_api_inputs_discover_and_upload(tmp_path, monkeypatch) -> None:
         s.get("capture_path") == "usb" or "alsa_input" in s.get("pw_name", "")
         for s in body["sources"]
     )
-    # USB fixture is auto-bound onto a host (configured_id set).
+    assert any(s.get("capture_path") == "hdmi" for s in body["sources"])
+    # USB / HDMI fixtures are auto-bound onto hosts (configured_id set).
     usb_row = next(s for s in body["sources"] if s.get("capture_path") == "usb")
     assert usb_row.get("configured_id")
+    hdmi_row = next(s for s in body["sources"] if s.get("capture_path") == "hdmi")
+    assert hdmi_row.get("configured_id")
+
+    # Free a slot (mock seeds 3 live hosts) before registering a network host.
+    spare = next(h for h in listed.json() if h["capture_path"] == "hdmi")
+    assert client.delete(f"/api/inputs/{spare['id']}").status_code == 204
 
     created = client.post(
         "/api/inputs",
@@ -226,3 +237,34 @@ def test_usb_auto_bind_on_discover_when_waiting(tmp_path, monkeypatch) -> None:
     assert host.connected is True
     assert host.endpoint and "alsa_input" in host.endpoint
     assert host.kind == HostKind.PC
+
+
+def test_mock_hdmi_live_playable(tmp_path, monkeypatch) -> None:
+    backend = _backend(tmp_path, monkeypatch)
+    hdmi = next(h for h in backend.list_inputs() if h.capture_path == CapturePath.HDMI)
+    item = backend.add_queue_item(
+        QueueItemCreate(source_type=SourceType.INPUT, input_id=hdmi.id, title="HDMI live")
+    )
+    assert item.available is True
+    transport = backend.set_active_queue_item(item.id)
+    assert transport.input_id == hdmi.id
+    playing = backend.set_transport(TransportPut(state=TransportState.PLAYING))
+    assert playing.state == TransportState.PLAYING
+
+
+def test_hdmi_auto_bind_on_discover_when_waiting(tmp_path, monkeypatch) -> None:
+    backend = _backend(tmp_path, monkeypatch)
+    hdmi = next(h for h in backend.list_inputs() if h.capture_path == CapturePath.HDMI)
+    backend.patch_input(
+        hdmi.id,
+        InputHostPatch(
+            connected=False, endpoint=None, armed=False, name="HDMI Capture"
+        ),
+    )
+    disc = backend.discover_capture_sources()
+    assert "auto-bound" in disc.detail
+    host = next(h for h in backend.list_inputs() if h.id == hdmi.id)
+    assert host.connected is True
+    assert host.endpoint and "alsa_input" in host.endpoint
+    assert host.capture_path == CapturePath.HDMI
+    assert host.kind == HostKind.OTHER

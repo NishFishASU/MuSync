@@ -31,7 +31,7 @@ from .input_registry import (
 STUB_NOTES: dict[SourceType, str] = {
     SourceType.SPOTIFY: "Stub — connect Spotify (docs/spotify-apple.md); sink graph stays up",
     SourceType.APPLE: "Stub — Apple limited on Linux; configure MusicKit/AirPlay or use Spotify",
-    SourceType.INPUT: "Waiting for live capture — bind a bluez_input / USB / upload",
+    SourceType.INPUT: "Waiting for live capture — bind a bluez_input / USB / HDMI / upload",
 }
 
 
