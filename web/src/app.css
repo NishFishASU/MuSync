@@ -1210,6 +1210,23 @@ input[type='range'] {
 	}
 }
 
+.queue-policy {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: 0.75rem 1.25rem;
+	margin: 0 0 0.85rem;
+	padding: 0.65rem 0.75rem;
+	border-radius: var(--radius-sm);
+	border: 1px solid var(--line);
+	background: rgba(0, 0, 0, 0.18);
+}
+
+.queue-policy .hint {
+	flex: 1 1 100%;
+	margin: 0;
+}
+
 .device-list,
 .source-list,
 .queue-list {

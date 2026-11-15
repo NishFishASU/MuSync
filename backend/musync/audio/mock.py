@@ -40,15 +40,24 @@ from ..models import (
     QueueItem,
     QueueItemCreate,
     QueueItemPatch,
+    QueueSettings,
+    QueueSettingsPut,
     Source,
     SourceType,
     Transport,
     TransportPut,
+    TransportState,
 )
 from ..nowplaying import DEMO_SOURCE_ID
 from .avrcp import AvrcpAction, AvrcpBridge, parse_action, relay_action_to_session
 from .cast import DEFAULT_CAST_DELAY_MS, mock_nest_mini
 from .host_player import HostSpeakerPlayer
+from .turn_taking import (
+    ROTATION_NOTE,
+    eligible_turn_devices,
+    mute_targets_for_turn,
+    next_turn_device_id,
+)
 
 # Laptop/dev discovery fixtures — friendly names, no real bluez.
 _MOCK_DISCOVERED = [
@@ -243,17 +252,23 @@ class MockAudioBackend(AudioBackend):
         # Local files route to host default speakers (ffplay/sounddevice/…); soft-fail OK.
         self._inputs = InputRegistry(hosts=_mock_live_hosts(), lock=self._lock)
         self._host_player = HostSpeakerPlayer()
+        self._turn_taking: bool = True
+        self._turn_device_id: Optional[str] = None
+        self._turn_assignments: dict[str, str] = {}
         self._session = SourceSession(
             inputs=self._inputs,
             lock=self._lock,
             on_feeder_stop=self._stop_host_player,
             on_feeder_start=self._start_host_player,
+            on_auto_advance=self._on_queue_auto_advance,
         )
         # Laptop: Absolute Volume / headset buttons via inject API (no BlueZ).
         self._avrcp = AvrcpBridge(
             on_volume=self._on_avrcp_volume,
             on_action=self._on_avrcp_action,
         )
+        # Solo the first eligible sink when turn-taking starts (fan-out until then).
+        self._apply_turn_policy(rotate=False)
         self._avrcp.update_targets(
             mac_by_device={
                 d.id: d.mac
@@ -702,7 +717,82 @@ class MockAudioBackend(AudioBackend):
         return self._session.get_transport()
 
     def set_transport(self, body: TransportPut) -> Transport:
-        return self._session.set_transport(body)
+        transport = self._session.set_transport(body)
+        # Ensure solo sink is applied when Play starts (no rotate).
+        if body.state is TransportState.PLAYING:
+            self._apply_turn_policy(rotate=False)
+        return transport
+
+    def _on_queue_auto_advance(self) -> None:
+        """Track end → next eligible output device (mute solo)."""
+        self._apply_turn_policy(rotate=True)
+
+    def _apply_turn_policy(self, *, rotate: bool) -> None:
+        with self._lock:
+            devices = list(self._devices.values())
+            eligible = eligible_turn_devices(
+                devices, assignments=self._turn_assignments
+            )
+            eligible_ids = [d.id for d in eligible]
+            self._turn_device_id = next_turn_device_id(
+                eligible_ids, self._turn_device_id, rotate=rotate
+            )
+            for device_id, want_mute in mute_targets_for_turn(
+                devices,
+                turn_device_id=self._turn_device_id,
+                turn_taking=self._turn_taking,
+            ):
+                device = self._devices.get(device_id)
+                if device is None or device.mute == want_mute:
+                    continue
+                self._devices[device_id] = device.model_copy(update={"mute": want_mute})
+            try:
+                self._persist()
+            except Exception:  # noqa: BLE001
+                pass
+
+    def get_queue_settings(
+        self, *, assignments: Optional[dict[str, str]] = None
+    ) -> QueueSettings:
+        if assignments is not None:
+            self._turn_assignments = {
+                k: v for k, v in assignments.items() if v
+            }
+        with self._lock:
+            devices = list(self._devices.values())
+            eligible = eligible_turn_devices(
+                devices, assignments=self._turn_assignments
+            )
+            order = [d.id for d in eligible]
+            if self._turn_taking and self._turn_device_id not in order and order:
+                self._turn_device_id = order[0]
+            return QueueSettings(
+                loop=self._session.get_loop(),
+                turn_taking=self._turn_taking,
+                turn_device_id=self._turn_device_id if self._turn_taking else None,
+                turn_order=order,
+                rotation_note=ROTATION_NOTE,
+            )
+
+    def set_queue_settings(
+        self,
+        body: QueueSettingsPut,
+        *,
+        assignments: Optional[dict[str, str]] = None,
+    ) -> QueueSettings:
+        if assignments is not None:
+            self._turn_assignments = {
+                k: v for k, v in assignments.items() if v
+            }
+        if body.loop is not None:
+            self._session.set_loop(body.loop)
+        if body.turn_taking is not None:
+            self._turn_taking = bool(body.turn_taking)
+            self._apply_turn_policy(rotate=False)
+        return self.get_queue_settings(assignments=assignments)
+
+    def notify_playback_ended(self) -> Transport:
+        return self._session.notify_playback_ended()
 
     def list_sources(self) -> list[Source]:
         return self._session.list_sources()
@@ -723,7 +813,9 @@ class MockAudioBackend(AudioBackend):
         self._session.remove_queue_item(item_id)
 
     def set_active_queue_item(self, item_id: str) -> Transport:
-        return self._session.set_active_queue_item(item_id)
+        transport = self._session.set_active_queue_item(item_id)
+        self._apply_turn_policy(rotate=False)
+        return transport
 
     def list_inputs(self) -> list[InputHost]:
         return self._inputs.list_hosts()

@@ -94,6 +94,24 @@ def test_unavailable_hub_stream_activates_not_400(client: TestClient) -> None:
     assert playing.json()["state"] == "playing"
 
 
+def test_queue_settings_loop_and_turn(client: TestClient) -> None:
+    res = client.get("/api/queue/settings")
+    assert res.status_code == 200
+    body = res.json()
+    assert body["loop"] is False
+    assert body["turn_taking"] is True
+    assert "rotation_note" in body
+    assert isinstance(body.get("turn_order"), list)
+
+    updated = client.put("/api/queue/settings", json={"loop": True})
+    assert updated.status_code == 200
+    assert updated.json()["loop"] is True
+
+    fanout = client.put("/api/queue/settings", json={"turn_taking": False})
+    assert fanout.status_code == 200
+    assert fanout.json()["turn_taking"] is False
+
+
 def test_queue_source_type_switch(client: TestClient) -> None:
     queue = client.get("/api/queue")
     assert queue.status_code == 200

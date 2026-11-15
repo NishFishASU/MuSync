@@ -21,6 +21,8 @@ from ..models import (
     QueueItem,
     QueueItemCreate,
     QueueItemPatch,
+    QueueSettings,
+    QueueSettingsPut,
     Source,
     Transport,
     TransportPut,
@@ -92,6 +94,25 @@ class AudioBackend(ABC):
     @abstractmethod
     def set_active_queue_item(self, item_id: str) -> Transport:
         ...
+
+    def get_queue_settings(
+        self, *, assignments: dict[str, str] | None = None
+    ) -> QueueSettings:
+        """Queue loop + turn-taking status (override in backends)."""
+        raise NotImplementedError
+
+    def set_queue_settings(
+        self,
+        body: QueueSettingsPut,
+        *,
+        assignments: dict[str, str] | None = None,
+    ) -> QueueSettings:
+        """Update loop / turn-taking (override in backends)."""
+        raise NotImplementedError
+
+    def notify_playback_ended(self) -> Transport:
+        """Player/process EOF → advance queue (override when session supports it)."""
+        raise NotImplementedError
 
     @abstractmethod
     def list_inputs(self) -> list[InputHost]:

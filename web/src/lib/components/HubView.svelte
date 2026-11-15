@@ -51,6 +51,8 @@
 		listSources,
 		listWifiNetworks,
 		logoutSpotify,
+		getQueueSettings,
+		putQueueSettings,
 		patchDevice,
 		patchInput,
 		patchProfile,
@@ -76,6 +78,8 @@
 	let sources = $state([]);
 	/** @type {import('$lib/api.js').QueueItem[]} */
 	let queue = $state([]);
+	/** @type {import('$lib/api.js').QueueSettings | null} */
+	let queueSettings = $state(null);
 	/** @type {import('$lib/api.js').InputHost[]} */
 	let inputs = $state([]);
 	/** @type {import('$lib/api.js').Transport | null} */
@@ -670,12 +674,13 @@
 	}
 
 	async function refresh() {
-		const [h, d, t, s, q, i, st, np] = await Promise.all([
+		const [h, d, t, s, q, qs, i, st, np] = await Promise.all([
 			getHealth(),
 			listDevices(),
 			getTransport(),
 			listSources(),
 			listQueue(),
+			getQueueSettings().catch(() => null),
 			listInputs(),
 			getStreamingStatus().catch(() => null),
 			getNowPlaying().catch(() => null)
@@ -684,6 +689,7 @@
 		devices = d;
 		sources = s;
 		queue = q;
+		if (qs) queueSettings = qs;
 		inputs = i;
 		if (st) streaming = st;
 		if (np) nowPlaying = np;
@@ -697,6 +703,25 @@
 			setupMessage = err instanceof Error ? err.message : String(err);
 		});
 		await refreshCaptureDiscovery().catch(() => {});
+	}
+
+	async function toggleQueueLoop(checked) {
+		try {
+			queueSettings = await putQueueSettings({ loop: checked });
+			sourceError = '';
+		} catch (err) {
+			sourceError = err instanceof Error ? err.message : String(err);
+		}
+	}
+
+	async function toggleQueueTurnTaking(checked) {
+		try {
+			queueSettings = await putQueueSettings({ turn_taking: checked });
+			devices = await listDevices();
+			sourceError = '';
+		} catch (err) {
+			sourceError = err instanceof Error ? err.message : String(err);
+		}
 	}
 
 	async function refreshStreaming() {
@@ -1481,7 +1506,18 @@
 			const pollTransport = async () => {
 				if (cancelled || document.hidden) return;
 				try {
-					applyTransport(await getTransport());
+					const prevQueueId = transport?.queue_item_id;
+					const t = await getTransport();
+					applyTransport(t);
+					if (t.queue_item_id !== prevQueueId) {
+						const [qs, d] = await Promise.all([
+							getQueueSettings().catch(() => null),
+							listDevices().catch(() => null)
+						]);
+						if (qs) queueSettings = qs;
+						if (d) devices = d;
+						queue = await listQueue().catch(() => queue);
+					}
 				} catch (err) {
 					console.error(err);
 				}
@@ -3114,6 +3150,48 @@
 			<div class="panel-head">
 				<h2 id="queue-heading">Song queue</h2>
 				<p class="hint">Search Spotify/YouTube · AirPlay via Inputs · sinks stay linked</p>
+			</div>
+			<div class="queue-policy" role="group" aria-label="Queue playback policy">
+				<label class="check">
+					<input
+						type="checkbox"
+						checked={queueSettings?.loop ?? false}
+						onchange={(e) =>
+							toggleQueueLoop(/** @type {HTMLInputElement} */ (e.currentTarget).checked)}
+					/>
+					<span>Loop queue</span>
+				</label>
+				<label class="check">
+					<input
+						type="checkbox"
+						checked={queueSettings?.turn_taking ?? true}
+						onchange={(e) =>
+							toggleQueueTurnTaking(
+								/** @type {HTMLInputElement} */ (e.currentTarget).checked
+							)}
+					/>
+					<span>Turn-taking</span>
+				</label>
+				{#if queueSettings?.turn_taking && queueSettings?.turn_device_id}
+					<p class="hint muted">
+						Up now:
+						{devices.find((d) => d.id === queueSettings?.turn_device_id)?.name ||
+							queueSettings.turn_device_id}
+						{#if queueSettings.turn_order?.length}
+							· rotate
+							{queueSettings.turn_order
+								.map((id) => devices.find((d) => d.id === id)?.name || id)
+								.join(' → ')}
+						{/if}
+					</p>
+				{:else if queueSettings && !queueSettings.turn_taking}
+					<p class="hint muted">Fan-out to all enabled sinks (no solo rotation)</p>
+				{:else}
+					<p class="hint muted">
+						After each track: next song + next ready sink (enabled + connected / armed). Loop
+						repeats from the top.
+					</p>
+				{/if}
 			</div>
 			<form
 				class="stream-search"
