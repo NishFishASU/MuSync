@@ -205,6 +205,152 @@ def test_spotify_authorize_url_when_configured(tmp_path, monkeypatch) -> None:
     )
 
 
+def test_spotify_callback_me_403_redirects_allowlist_error(tmp_path, monkeypatch) -> None:
+    """Dev-mode allowlist: token OK, GET /me 403 → SPA error, never HTTP 500."""
+    from unittest.mock import MagicMock, patch
+    from urllib.parse import parse_qs, unquote, urlparse
+
+    import httpx
+
+    from musync.app import create_app
+    from musync.streaming import get_streaming_service
+
+    token_path = tmp_path / "spotify_tokens.json"
+    backend = _backend(tmp_path, monkeypatch)
+    monkeypatch.setenv("MUSYNC_SPOTIFY_CLIENT_ID", "cid")
+    monkeypatch.setenv("MUSYNC_SPOTIFY_CLIENT_SECRET", "csecret")
+    monkeypatch.setenv("MUSYNC_SPOTIFY_TOKEN_PATH", str(token_path))
+    monkeypatch.setenv(
+        "MUSYNC_SPOTIFY_REDIRECT_URI",
+        "http://127.0.0.1:8081/api/streaming/spotify/callback",
+    )
+    reset_streaming_service()
+    client = TestClient(create_app(audio_backend=backend))
+
+    login = client.get("/api/streaming/spotify/login", follow_redirects=False)
+    assert login.status_code in {302, 307}
+    qs = parse_qs(urlparse(login.headers["location"]).query)
+    state = qs["state"][0]
+    assert qs["redirect_uri"][0] == (
+        "http://127.0.0.1:8081/api/streaming/spotify/callback"
+    )
+
+    token_resp = MagicMock()
+    token_resp.status_code = 200
+    token_resp.json.return_value = {
+        "access_token": "at",
+        "refresh_token": "rt",
+        "expires_in": 3600,
+        "token_type": "Bearer",
+    }
+    token_resp.text = "{}"
+
+    me_resp = MagicMock()
+    me_resp.status_code = 403
+    me_resp.json.return_value = {
+        "error": {"status": 403, "message": "Forbidden"}
+    }
+    me_resp.text = '{"error":{"status":403,"message":"Forbidden"}}'
+    me_req = MagicMock()
+
+    def _raise_me() -> None:
+        raise httpx.HTTPStatusError("403", request=me_req, response=me_resp)
+
+    me_resp.raise_for_status.side_effect = _raise_me
+
+    mock_client = MagicMock()
+    mock_client.__enter__.return_value = mock_client
+    mock_client.__exit__.return_value = False
+    mock_client.post.return_value = token_resp
+    mock_client.get.return_value = me_resp
+
+    with patch("musync.streaming.spotify.httpx.Client", return_value=mock_client):
+        res = client.get(
+            "/api/streaming/spotify/callback",
+            params={"code": "auth-code", "state": state},
+            follow_redirects=False,
+        )
+
+    assert res.status_code in {302, 307}
+    loc = res.headers.get("location") or ""
+    assert "spotify=error" in loc
+    detail = unquote(parse_qs(urlparse(loc).query).get("detail", [""])[0]).lower()
+    assert "403" in detail or "forbidden" in detail
+    assert "user management" in detail or "allowlist" in detail or "dashboard" in detail
+    assert not token_path.exists()
+    assert get_streaming_service().spotify.authenticated() is False
+
+
+def test_spotify_callback_missing_secret_redirects(tmp_path, monkeypatch) -> None:
+    from urllib.parse import parse_qs, unquote, urlparse
+
+    from musync.app import create_app
+    from musync.streaming import get_streaming_service
+
+    backend = _backend(tmp_path, monkeypatch)
+    monkeypatch.setenv("MUSYNC_SPOTIFY_CLIENT_ID", "cid")
+    monkeypatch.setenv("MUSYNC_SPOTIFY_CLIENT_SECRET", "csecret")
+    reset_streaming_service()
+    client = TestClient(create_app(audio_backend=backend))
+    login = client.get("/api/streaming/spotify/login", follow_redirects=False)
+    state = parse_qs(urlparse(login.headers["location"]).query)["state"][0]
+
+    # Drop secret after authorize (simulates misconfigured Windows env reload).
+    monkeypatch.delenv("MUSYNC_SPOTIFY_CLIENT_SECRET", raising=False)
+    res = client.get(
+        "/api/streaming/spotify/callback",
+        params={"code": "auth-code", "state": state},
+        follow_redirects=False,
+    )
+    assert res.status_code in {302, 307}
+    loc = res.headers.get("location") or ""
+    assert "spotify=error" in loc
+    detail = unquote(parse_qs(urlparse(loc).query).get("detail", [""])[0]).lower()
+    assert "secret" in detail or "credential" in detail or "missing" in detail
+    assert get_streaming_service().spotify.authenticated() is False
+
+
+def test_spotify_callback_redirect_uri_mismatch_message(tmp_path, monkeypatch) -> None:
+    from unittest.mock import MagicMock, patch
+    from urllib.parse import parse_qs, unquote, urlparse
+
+    from musync.app import create_app
+
+    backend = _backend(tmp_path, monkeypatch)
+    monkeypatch.setenv("MUSYNC_SPOTIFY_CLIENT_ID", "cid")
+    monkeypatch.setenv("MUSYNC_SPOTIFY_CLIENT_SECRET", "csecret")
+    monkeypatch.setenv("MUSYNC_SPOTIFY_TOKEN_PATH", str(tmp_path / "tok.json"))
+    reset_streaming_service()
+    client = TestClient(create_app(audio_backend=backend))
+    login = client.get("/api/streaming/spotify/login", follow_redirects=False)
+    state = parse_qs(urlparse(login.headers["location"]).query)["state"][0]
+
+    token_resp = MagicMock()
+    token_resp.status_code = 400
+    token_resp.json.return_value = {
+        "error": "invalid_grant",
+        "error_description": "Invalid redirect URI",
+    }
+    token_resp.text = '{"error":"invalid_grant","error_description":"Invalid redirect URI"}'
+
+    mock_client = MagicMock()
+    mock_client.__enter__.return_value = mock_client
+    mock_client.__exit__.return_value = False
+    mock_client.post.return_value = token_resp
+
+    with patch("musync.streaming.spotify.httpx.Client", return_value=mock_client):
+        res = client.get(
+            "/api/streaming/spotify/callback",
+            params={"code": "auth-code", "state": state},
+            follow_redirects=False,
+        )
+    assert res.status_code in {302, 307}
+    detail = unquote(
+        parse_qs(urlparse(res.headers["location"]).query).get("detail", [""])[0]
+    ).lower()
+    assert "redirect" in detail
+
+
 def test_load_streaming_env_parses_export_and_bom(tmp_path, monkeypatch) -> None:
     from musync.streaming.credentials import load_streaming_env_files
 
