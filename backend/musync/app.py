@@ -7,12 +7,14 @@ from pathlib import Path
 from urllib.parse import unquote
 
 from fastapi import FastAPI, File, HTTPException, Query, Request, Response, UploadFile
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
 from . import __version__
 from .audio import AudioBackend, create_backend
 from .config import media_library_path, resolve_media_file, web_root
+from .streaming.spotify import default_redirect_uri
 from .models import (
     ActiveQueuePut,
     ActiveSourcePut,
@@ -59,6 +61,25 @@ app = FastAPI(
     title="MuSync",
     version=__version__,
     description="Multi-device Bluetooth audio sync hub — song-level source switching",
+)
+
+# Vite (:5173) / preview (:4173) and alternate mock ports (:8081) call the API
+# cross-origin; OAuth itself is a top-level redirect, but status/search need CORS.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://127.0.0.1:5173",
+        "http://localhost:5173",
+        "http://127.0.0.1:4173",
+        "http://localhost:4173",
+        "http://127.0.0.1:8080",
+        "http://localhost:8080",
+        "http://127.0.0.1:8081",
+        "http://localhost:8081",
+    ],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 
@@ -288,15 +309,35 @@ def api_streaming_status() -> StreamingStatus:
     return get_streaming_service().status()
 
 
+def _spotify_redirect_uri(request: Request) -> str:
+    """Resolve the OAuth redirect URI Spotify will call back to.
+
+    Prefer explicit ``MUSYNC_SPOTIFY_REDIRECT_URI``. Otherwise derive from the
+    request Host (Pi LAN IP or 127.0.0.1:PORT). Never use the Vite port
+    (:5173) — callback must hit the FastAPI process (default :8080, or
+    ``MUSYNC_PORT`` e.g. :8081 on Windows mock).
+    """
+    import os
+
+    configured = (os.environ.get("MUSYNC_SPOTIFY_REDIRECT_URI") or "").strip()
+    if configured:
+        return configured
+    base = str(request.base_url).rstrip("/")
+    # If a reverse-proxy / Vite forwarded Host is a frontend-only port, fall
+    # back to the API default so Spotify dashboard URI stays on the API port.
+    for bad in (":5173", ":4173"):
+        if bad in base:
+            return default_redirect_uri()
+    return f"{base}/api/streaming/spotify/callback"
+
+
 @app.get("/api/streaming/spotify/login")
 def api_spotify_login(request: Request) -> RedirectResponse:
     """Link-style OAuth: redirect browser to Spotify authorize → callback → tokens.
 
-    Not a password form. Client ID/secret come from env (``~/musync.env``).
-    When ``MUSYNC_SPOTIFY_REDIRECT_URI`` is unset, derive it from the request Host
-    so Pi LAN access (http://<Pi-IP>:8080/…) matches the Spotify dashboard URI.
+    Not a password form. Client ID/secret come from env (``~/musync.env`` /
+    ``%USERPROFILE%\\musync.env`` on Windows).
     """
-    import os
     from urllib.parse import quote
 
     if not get_streaming_service().spotify.configured():
@@ -304,18 +345,46 @@ def api_spotify_login(request: Request) -> RedirectResponse:
             "/?spotify=error&detail="
             + quote(
                 "Spotify app credentials missing — set MUSYNC_SPOTIFY_CLIENT_ID and "
-                "MUSYNC_SPOTIFY_CLIENT_SECRET in ~/musync.env, restart MuSync, then Connect again"
+                "MUSYNC_SPOTIFY_CLIENT_SECRET in ~/musync.env "
+                "(Windows: %USERPROFILE%\\musync.env or config/streaming.local.env), "
+                "restart MuSync, then Connect again"
             )
         )
-    configured = (os.environ.get("MUSYNC_SPOTIFY_REDIRECT_URI") or "").strip()
-    redirect_uri = configured or (
-        str(request.base_url).rstrip("/") + "/api/streaming/spotify/callback"
-    )
+    redirect_uri = _spotify_redirect_uri(request)
     try:
         url = get_streaming_service().spotify.auth_url(redirect_uri=redirect_uri)
     except ValueError as exc:
         return RedirectResponse("/?spotify=error&detail=" + quote(str(exc)))
     return RedirectResponse(url)
+
+
+@app.get("/api/streaming/spotify/authorize-url")
+def api_spotify_authorize_url(request: Request) -> dict[str, str | bool]:
+    """JSON helper for the Connect button — returns authorize URL or a clear error.
+
+    Prefer the same-origin ``/login`` redirect; this exists so the SPA can
+    preflight credentials and show errors without a confusing blank navigation.
+    """
+    svc = get_streaming_service().spotify
+    if not svc.configured():
+        return {
+            "ok": False,
+            "error": (
+                "Spotify app credentials missing — set MUSYNC_SPOTIFY_CLIENT_ID and "
+                "MUSYNC_SPOTIFY_CLIENT_SECRET in ~/musync.env "
+                "(Windows: %USERPROFILE%\\musync.env), restart, then Connect again"
+            ),
+            "redirect_uri": _spotify_redirect_uri(request),
+        }
+    redirect_uri = _spotify_redirect_uri(request)
+    try:
+        return {
+            "ok": True,
+            "url": svc.auth_url(redirect_uri=redirect_uri),
+            "redirect_uri": redirect_uri,
+        }
+    except ValueError as exc:
+        return {"ok": False, "error": str(exc), "redirect_uri": redirect_uri}
 
 
 @app.get("/api/streaming/spotify/callback")

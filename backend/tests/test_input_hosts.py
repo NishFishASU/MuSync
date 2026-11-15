@@ -103,20 +103,16 @@ def test_queue_binds_active_live_input(tmp_path, monkeypatch) -> None:
     assert playing.state == TransportState.PLAYING
 
 
-def test_per_host_catalog_contributions(tmp_path, monkeypatch) -> None:
+def test_per_host_catalog_live_only(tmp_path, monkeypatch) -> None:
+    """Hosts contribute live input rows only — no fake on-device Spotify/Apple stubs."""
     backend = _backend(tmp_path, monkeypatch)
     host = next(h for h in backend.list_inputs() if h.connected)
     sources = backend.list_sources()
     host_rows = [s for s in sources if s.input_id == host.id]
-    types = {s.type for s in host_rows}
-    assert SourceType.LOCAL in types
-    assert SourceType.SPOTIFY in types
-    assert SourceType.APPLE in types
-    assert SourceType.INPUT in types
+    assert host_rows
+    assert all(s.type == SourceType.INPUT for s in host_rows)
     live = next(s for s in host_rows if s.type == SourceType.INPUT)
     assert live.available is True
-    stubs = [s for s in host_rows if s.type != SourceType.INPUT]
-    assert all(not s.available for s in stubs)
 
 
 def test_api_inputs_discover_and_upload(tmp_path, monkeypatch) -> None:

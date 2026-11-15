@@ -72,21 +72,20 @@ def test_transport_and_sources(client: TestClient) -> None:
     assert stopped.json()["position_ms"] == 0
 
 
-def test_host_local_catalog_activates_as_stub_not_400(client: TestClient) -> None:
-    """Regression: host:*:local used to 400 while other stubs returned 200."""
+def test_unavailable_hub_stream_activates_not_400(client: TestClient) -> None:
+    """Regression: unavailable catalog rows activate (200); Play is what rejects."""
     sources = client.get("/api/sources")
     assert sources.status_code == 200
-    host_local = next(
+    hub_spotify = next(
         s
         for s in sources.json()
-        if s["type"] == "local" and not s["available"] and s.get("input_id")
+        if s["type"] == "spotify" and not s["available"] and not s.get("input_id")
     )
-    active = client.put("/api/sources/active", json={"id": host_local["id"]})
+    active = client.put("/api/sources/active", json={"id": hub_spotify["id"]})
     assert active.status_code == 200, active.text
-    assert active.json()["source_type"] == "local"
-    assert active.json()["input_id"] == host_local["input_id"]
+    assert active.json()["source_type"] == "spotify"
 
-    # Playable hub local still works after stub selection.
+    # Playable hub local still works after selecting an unavailable row.
     hub = next(s for s in sources.json() if s["available"] and s["type"] == "local")
     restored = client.put("/api/sources/active", json={"id": hub["id"]})
     assert restored.status_code == 200

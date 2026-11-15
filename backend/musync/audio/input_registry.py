@@ -27,20 +27,23 @@ CAPTURE_NOTES: dict[CapturePath, str] = {
     CapturePath.NETWORK: "Network / uploaded file → musync_feeder",
 }
 
-STUB_CAPTURE_NOTES: dict[CapturePath, str] = {
-    CapturePath.BT_A2DP: "Waiting for bluez_input — pair phone as A2DP source to Pi",
-    CapturePath.USB: "Waiting for USB-A sound card (not USB-C PD). "
+WAITING_CAPTURE_NOTES: dict[CapturePath, str] = {
+    CapturePath.BT_A2DP: "Unavailable — waiting for bluez_input; pair phone as A2DP source",
+    CapturePath.USB: "Unavailable — waiting for USB-A sound card (not USB-C PD). "
     "Plug an interface, then Refresh inputs",
-    CapturePath.HDMI: "Waiting for HDMI / capture card. "
+    CapturePath.HDMI: "Unavailable — waiting for HDMI / capture card. "
     "Plug a capture dongle, then Refresh inputs",
-    CapturePath.NETWORK: "Upload a file or set endpoint to play into the feeder",
+    CapturePath.NETWORK: "Unavailable — upload a file or set endpoint to play into the feeder",
 }
+
+# Back-compat alias
+STUB_CAPTURE_NOTES = WAITING_CAPTURE_NOTES
 
 
 def host_live_note(host: InputHost) -> str:
     if host.connected and host.endpoint:
         return f"Live · {CAPTURE_NOTES[host.capture_path]} · {host.endpoint}"
-    return host.note or STUB_CAPTURE_NOTES[host.capture_path]
+    return host.note or WAITING_CAPTURE_NOTES[host.capture_path]
 
 
 def host_is_live(host: InputHost) -> bool:
@@ -52,7 +55,7 @@ def host_is_live(host: InputHost) -> bool:
     if not host.endpoint:
         return False
     if host.capture_path == CapturePath.NETWORK:
-        # Network path is live when endpoint is an existing file (upload stub).
+        # Network path is live when endpoint is an existing file (upload).
         return Path(host.endpoint).is_file()
     # BT A2DP / USB / HDMI: connected + PipeWire source endpoint.
     return True
@@ -69,7 +72,7 @@ def default_demo_hosts() -> list[InputHost]:
             armed=True,
             connected=False,
             endpoint=None,
-            note=STUB_CAPTURE_NOTES[CapturePath.BT_A2DP],
+            note=WAITING_CAPTURE_NOTES[CapturePath.BT_A2DP],
         ),
         InputHost(
             id="input-2",
@@ -79,7 +82,7 @@ def default_demo_hosts() -> list[InputHost]:
             armed=False,
             connected=False,
             endpoint=None,
-            note=STUB_CAPTURE_NOTES[CapturePath.USB],
+            note=WAITING_CAPTURE_NOTES[CapturePath.USB],
         ),
         InputHost(
             id="input-3",
@@ -89,13 +92,13 @@ def default_demo_hosts() -> list[InputHost]:
             armed=False,
             connected=False,
             endpoint=None,
-            note=STUB_CAPTURE_NOTES[CapturePath.HDMI],
+            note=WAITING_CAPTURE_NOTES[CapturePath.HDMI],
         ),
     ]
 
 
 class InputRegistry:
-    """In-memory ≤4 phone/PC hosts. Persistence can come later."""
+    """In-memory ≤4 phone/PC/HDMI hosts. Persistence can come later."""
 
     def __init__(
         self,
@@ -154,7 +157,7 @@ class InputRegistry:
                 or (
                     CAPTURE_NOTES[body.capture_path]
                     if body.connected and body.endpoint
-                    else STUB_CAPTURE_NOTES[body.capture_path]
+                    else WAITING_CAPTURE_NOTES[body.capture_path]
                 ),
             )
             self._hosts[host.id] = host
@@ -174,7 +177,7 @@ class InputRegistry:
                 data["note"] = (
                     CAPTURE_NOTES[path]
                     if connected and endpoint
-                    else STUB_CAPTURE_NOTES[path]
+                    else WAITING_CAPTURE_NOTES[path]
                 )
             updated = InputHost.model_validate(data)
             self._hosts[host_id] = updated
@@ -187,71 +190,29 @@ class InputRegistry:
             del self._hosts[host_id]
 
     def catalog_sources(self) -> list[Source]:
-        """Per-host contribution rows: local / Spotify / Apple stubs + live input."""
+        """Per-host hub paths: live BT A2DP / USB / HDMI / upload only (no fake stubs).
+
+        On-device Spotify/Apple/local sessions are not hub PCM — use Streaming
+        (OAuth + librespot) or +Device from a live input instead.
+        """
         with self._lock:
             out: list[Source] = []
             for host in self._hosts.values():
                 path_note = host_live_note(host)
-                # Live capture is the real hub path for phone/PC. Per-device
-                # Spotify/Apple/local session rows stay unavailable (not hub PCM).
-                if host.offers_live_input:
-                    live = host_is_live(host)
-                    out.append(
-                        Source(
-                            id=f"host:{host.id}:input",
-                            title=f"{host.name} · live ({host.capture_path.value})",
-                            type=SourceType.INPUT,
-                            locator=f"input:{host.id}:{host.capture_path.value}",
-                            available=live,
-                            input_id=host.id,
-                            note=None if live else path_note,
-                            artist=host.name if live else None,
-                            album=CAPTURE_NOTES[host.capture_path] if live else None,
-                        )
+                if not host.offers_live_input:
+                    continue
+                live = host_is_live(host)
+                out.append(
+                    Source(
+                        id=f"host:{host.id}:input",
+                        title=f"{host.name} · live ({host.capture_path.value})",
+                        type=SourceType.INPUT,
+                        locator=f"input:{host.id}:{host.capture_path.value}",
+                        available=live,
+                        input_id=host.id,
+                        note=None if live else path_note,
+                        artist=host.name if live else None,
+                        album=CAPTURE_NOTES[host.capture_path] if live else None,
                     )
-                if host.offers_local:
-                    out.append(
-                        Source(
-                            id=f"host:{host.id}:local",
-                            title=f"{host.name} · local files",
-                            type=SourceType.LOCAL,
-                            locator=f"host:{host.id}:local",
-                            available=False,
-                            input_id=host.id,
-                            note=(
-                                f"On-device files only (not hub) — use live input "
-                                f"or hub media/; {path_note}"
-                            ),
-                        )
-                    )
-                if host.offers_spotify:
-                    out.append(
-                        Source(
-                            id=f"host:{host.id}:spotify",
-                            title=f"{host.name} · Spotify",
-                            type=SourceType.SPOTIFY,
-                            locator=f"spotify:host:{host.id}",
-                            available=False,
-                            input_id=host.id,
-                            note=(
-                                "On-device Spotify session (not hub) — use Streaming "
-                                f"panel + librespot, or live A2DP/USB/HDMI; {path_note}"
-                            ),
-                        )
-                    )
-                if host.offers_apple:
-                    out.append(
-                        Source(
-                            id=f"host:{host.id}:apple",
-                            title=f"{host.name} · Apple Music",
-                            type=SourceType.APPLE,
-                            locator=f"apple:host:{host.id}",
-                            available=False,
-                            input_id=host.id,
-                            note=(
-                                "On-device Apple session (not hub PCM) — AirPlay/"
-                                f"MusicKit limited; use live input or Spotify; {path_note}"
-                            ),
-                        )
-                    )
+                )
             return out

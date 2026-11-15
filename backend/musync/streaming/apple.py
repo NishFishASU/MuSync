@@ -88,7 +88,7 @@ class AppleMusicClient:
             "or MusicKit JS in a browser (not hub PCM)",
         ]
         if not configured:
-            limits.insert(0, "Apple MusicKit keys not set — Apple stays stub")
+            limits.insert(0, "Apple MusicKit keys not set — catalog search unavailable")
         if not airplay:
             limits.append(
                 "Set MUSYNC_APPLE_AIRPLAY_SOURCE to a shairport PipeWire source "
@@ -100,15 +100,17 @@ class AppleMusicClient:
             "authenticated": configured,  # developer token only; user token optional
             "user_token_set": bool(_user_token()),
             "airplay_source": airplay or None,
-            "playback_mode": "airplay_capture" if airplay else "limited_stub",
+            "playback_mode": "airplay_capture" if airplay else "unavailable",
             "limits": limits,
             "note": (
                 "Search OK; play uses AirPlay capture into musync_feeder"
                 if configured and airplay
                 else (
-                    "Search OK; play remains limited without AirPlay source"
+                    "Search OK; hub play unavailable without AirPlay "
+                    "(Apple DRM — no native Linux player)"
                     if configured
-                    else "Credentials missing — mock/local still work; Apple stays stub"
+                    else "MusicKit keys missing — Apple hub play unavailable (DRM); "
+                    "use Spotify or live BT/USB input"
                 )
             ),
         }

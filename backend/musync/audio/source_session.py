@@ -28,11 +28,23 @@ from .input_registry import (
     host_live_note,
 )
 
-STUB_NOTES: dict[SourceType, str] = {
-    SourceType.SPOTIFY: "Stub — connect Spotify (docs/spotify-apple.md); sink graph stays up",
-    SourceType.APPLE: "Stub — Apple limited on Linux; configure MusicKit/AirPlay or use Spotify",
-    SourceType.INPUT: "Waiting for live capture — bind a bluez_input / USB / HDMI / upload",
+UNAVAILABLE_NOTES: dict[SourceType, str] = {
+    SourceType.SPOTIFY: (
+        "Unavailable — Connect Spotify in Streaming (docs/spotify-apple.md); "
+        "sink graph stays up"
+    ),
+    SourceType.APPLE: (
+        "Unavailable — Apple DRM has no native Linux hub player; "
+        "MusicKit search + optional AirPlay, or use Spotify / live input"
+    ),
+    SourceType.INPUT: (
+        "Unavailable — waiting for live capture "
+        "(BT A2DP / USB-A / HDMI / upload)"
+    ),
 }
+
+# Back-compat alias for older imports/tests
+STUB_NOTES = UNAVAILABLE_NOTES
 
 
 def _hub_stream_ready(source_type: SourceType) -> bool:
@@ -59,7 +71,7 @@ def is_playable(
             return False
     if source_type == SourceType.SPOTIFY:
         if input_id:
-            return False  # host-bound Spotify remains a phone-session stub
+            return False  # host-bound Spotify is on-device only (not hub PCM)
         if not _hub_stream_ready(SourceType.SPOTIFY):
             return False
         loc = (locator or "").strip()
@@ -78,20 +90,25 @@ def is_playable(
     return True
 
 
-def stub_note(source_type: SourceType) -> Optional[str]:
+def unavailable_note(source_type: SourceType) -> Optional[str]:
     if source_type == SourceType.SPOTIFY:
         svc = get_streaming_service()
         if svc.spotify_ready():
             return "Pick a Spotify track in Streaming — then Play into musync_feeder"
-        return STUB_NOTES[SourceType.SPOTIFY]
+        return UNAVAILABLE_NOTES[SourceType.SPOTIFY]
     if source_type == SourceType.APPLE:
         svc = get_streaming_service()
         if svc.apple_ready() and not svc.apple_playable():
             return svc.apple_play_note()
         if svc.apple_ready():
             return "Pick an Apple song; AirPlay capture feeds musync_feeder"
-        return STUB_NOTES[SourceType.APPLE]
-    return STUB_NOTES.get(source_type)
+        return UNAVAILABLE_NOTES[SourceType.APPLE]
+    return UNAVAILABLE_NOTES.get(source_type)
+
+
+def stub_note(source_type: SourceType) -> Optional[str]:
+    """Deprecated name — prefer unavailable_note()."""
+    return unavailable_note(source_type)
 
 
 class SourceSession:
@@ -265,7 +282,10 @@ class SourceSession:
         if source_type == SourceType.APPLE:
             return f"{host.name} Apple Music session — {path_note}"
         if source_type == SourceType.LOCAL:
-            return f"{host.name} local files — upload stub; {path_note}"
+            return (
+                f"Unavailable — {host.name} on-device files are not hub PCM; "
+                f"upload via Inputs or use live capture; {path_note}"
+            )
         return path_note
 
     def _live_input_playable(self, input_id: Optional[str]) -> bool:
@@ -353,7 +373,8 @@ class SourceSession:
                 item = self._queue_by_id(item_id)
                 if not item.available:
                     raise ValueError(
-                        f"Cannot play stub source ({item.source_type.value}): {item.note or item.id}"
+                        f"Cannot play unavailable source ({item.source_type.value}): "
+                        f"{item.note or item.id}"
                     )
             if current == TransportState.PLAYING:
                 return

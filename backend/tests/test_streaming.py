@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -55,7 +56,8 @@ def test_streaming_status_without_credentials(tmp_path, monkeypatch) -> None:
     assert body["spotify"]["configured"] is False
     assert body["spotify"]["authenticated"] is False
     assert body["apple"]["configured"] is False
-    assert "stub" in body["spotify"]["note"].lower() or "missing" in body["spotify"]["note"].lower()
+    note = body["spotify"]["note"].lower()
+    assert "missing" in note or "credential" in note or "unavailable" in note or "stub" in note
 
 
 def test_mock_local_still_works_without_streaming_creds(tmp_path, monkeypatch) -> None:
@@ -158,6 +160,77 @@ def test_spotify_login_redirects_when_not_configured(tmp_path, monkeypatch) -> N
     loc = res.headers.get("location") or ""
     assert "spotify=error" in loc
     assert "CLIENT" in loc.upper() or "credential" in loc.lower() or "missing" in loc.lower()
+
+
+def test_spotify_authorize_url_json_when_not_configured(tmp_path, monkeypatch) -> None:
+    from musync.app import create_app
+
+    backend = _backend(tmp_path, monkeypatch)
+    client = TestClient(create_app(audio_backend=backend))
+    res = client.get("/api/streaming/spotify/authorize-url")
+    assert res.status_code == 200
+    body = res.json()
+    assert body["ok"] is False
+    assert "CLIENT" in body["error"].upper() or "credential" in body["error"].lower()
+    assert "redirect_uri" in body
+
+
+def test_spotify_authorize_url_when_configured(tmp_path, monkeypatch) -> None:
+    from musync.app import create_app
+
+    backend = _backend(tmp_path, monkeypatch)
+    monkeypatch.setenv("MUSYNC_SPOTIFY_CLIENT_ID", "cid")
+    monkeypatch.setenv("MUSYNC_SPOTIFY_CLIENT_SECRET", "csecret")
+    monkeypatch.setenv(
+        "MUSYNC_SPOTIFY_REDIRECT_URI",
+        "http://127.0.0.1:8081/api/streaming/spotify/callback",
+    )
+    reset_streaming_service()
+    client = TestClient(create_app(audio_backend=backend))
+    res = client.get("/api/streaming/spotify/authorize-url")
+    assert res.status_code == 200
+    body = res.json()
+    assert body["ok"] is True
+    assert "accounts.spotify.com/authorize" in body["url"]
+    assert "8081" in body["redirect_uri"]
+    login = client.get("/api/streaming/spotify/login", follow_redirects=False)
+    assert login.status_code in {302, 307}
+    loc = login.headers.get("location") or ""
+    assert "accounts.spotify.com/authorize" in loc
+    from urllib.parse import parse_qs, urlparse
+
+    qs = parse_qs(urlparse(loc).query)
+    assert qs.get("redirect_uri", [""])[0] == (
+        "http://127.0.0.1:8081/api/streaming/spotify/callback"
+    )
+
+
+def test_load_streaming_env_parses_export_and_bom(tmp_path, monkeypatch) -> None:
+    from musync.streaming.credentials import load_streaming_env_files
+
+    env_path = tmp_path / "musync.env"
+    # UTF-8 BOM + export prefix + CRLF — Windows-ish file
+    env_path.write_bytes(
+        b"\xef\xbb\xbfexport MUSYNC_SPOTIFY_CLIENT_ID=\"win-cid\"\r\n"
+        b"set MUSYNC_SPOTIFY_CLIENT_SECRET=win-secret\r\n"
+        b"MUSYNC_SPOTIFY_REDIRECT_URI=http://127.0.0.1:8081/api/streaming/spotify/callback\r\n"
+        b"MUSYNC_SPOTIFY_CLIENT_ID=\r\n"  # blank must not wipe prior
+    )
+    monkeypatch.delenv("MUSYNC_SPOTIFY_CLIENT_ID", raising=False)
+    monkeypatch.delenv("MUSYNC_SPOTIFY_CLIENT_SECRET", raising=False)
+    monkeypatch.delenv("MUSYNC_SPOTIFY_REDIRECT_URI", raising=False)
+    monkeypatch.setattr(
+        "musync.streaming.credentials.Path.home", lambda: tmp_path
+    )
+    monkeypatch.setattr(
+        "musync.streaming.credentials.local_env_path",
+        lambda: tmp_path / "missing.local.env",
+    )
+    loaded = load_streaming_env_files()
+    assert loaded
+    assert os.environ["MUSYNC_SPOTIFY_CLIENT_ID"] == "win-cid"
+    assert os.environ["MUSYNC_SPOTIFY_CLIENT_SECRET"] == "win-secret"
+    assert "8081" in os.environ["MUSYNC_SPOTIFY_REDIRECT_URI"]
 
 
 def test_now_playing_api_for_local(tmp_path, monkeypatch) -> None:
