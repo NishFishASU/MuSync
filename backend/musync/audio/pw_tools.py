@@ -833,6 +833,290 @@ class BtRemote:
     connected: bool = False
 
 
+@dataclass
+class BtAdapter:
+    """One BlueZ HCI controller (onboard Pi BT or USB BT600)."""
+
+    hci: str
+    mac: str = ""
+    name: str = ""
+    powered: bool = False
+    healthy: bool = True
+    onboard: bool = False
+    detail: str = ""
+
+
+# Short timeouts so a dead RTL8761 / BT600 cannot stall the API or reconnect loop.
+BT_ADAPTER_PROBE_TIMEOUT_S = 1.5
+BT_CONNECT_SOFT_TIMEOUT_S = 3.5
+BT_PAIR_SOFT_TIMEOUT_S = 6.0
+
+
+def parse_bluetoothctl_list(text: str) -> list[BtAdapter]:
+    """Parse ``bluetoothctl list`` lines: ``Controller AA:BB:… hci0 [default]``."""
+    adapters: list[BtAdapter] = []
+    line_re = re.compile(
+        r"^Controller\s+([0-9A-Fa-f]{2}(?::[0-9A-Fa-f]{2}){5})\s+(\S+)(?:\s+(.*))?$"
+    )
+    for raw in text.splitlines():
+        m = line_re.match(raw.strip())
+        if not m:
+            continue
+        mac = normalize_mac(m.group(1))
+        token = m.group(2).strip()
+        rest = (m.group(3) or "").strip()
+        hci = ""
+        name = ""
+        # Formats: "hci0 [default]" | "My Pi" | "hci1"
+        if re.fullmatch(r"hci\d+", token, re.IGNORECASE):
+            hci = token.lower()
+            name = rest.replace("[default]", "").strip() or hci
+        elif re.search(r"hci\d+", rest, re.IGNORECASE):
+            found = re.search(r"(hci\d+)", rest, re.IGNORECASE)
+            hci = found.group(1).lower() if found else ""
+            name = token
+        else:
+            name = token
+            # Fall back: look for hciN anywhere on the line.
+            found = re.search(r"(hci\d+)", raw, re.IGNORECASE)
+            hci = found.group(1).lower() if found else ""
+        if not hci:
+            continue
+        adapters.append(BtAdapter(hci=hci, mac=mac, name=name or hci))
+    return adapters
+
+
+def list_sysfs_bluetooth_hcis() -> list[str]:
+    """Return ``hciN`` names under ``/sys/class/bluetooth`` (empty off-Pi)."""
+    import os
+
+    root = "/sys/class/bluetooth"
+    try:
+        names = [
+            name
+            for name in os.listdir(root)
+            if re.fullmatch(r"hci\d+", name, re.IGNORECASE)
+        ]
+    except OSError:
+        return []
+    return sorted(names, key=lambda n: int(re.sub(r"\D", "", n) or "0"))
+
+
+def adapter_sysfs_onboard(hci: str) -> bool:
+    """True when the HCI looks like Pi onboard (UART/platform), not USB."""
+    import os
+
+    base = f"/sys/class/bluetooth/{hci}"
+    try:
+        device = os.path.realpath(os.path.join(base, "device"))
+    except OSError:
+        return False
+    low = device.lower()
+    if "/usb" in low:
+        return False
+    # Onboard Pi BT is typically uart / serial / platform.
+    return any(tok in low for tok in ("serial", "uart", "platform", "soc"))
+
+
+def parse_bluetoothctl_show(text: str) -> dict[str, str]:
+    """Best-effort parse of ``bluetoothctl show`` / ``show <mac>``."""
+    info: dict[str, str] = {}
+    for raw in text.splitlines():
+        line = raw.strip()
+        if ":" not in line:
+            continue
+        key, _, val = line.partition(":")
+        info[key.strip().lower()] = val.strip()
+    return info
+
+
+def discover_bluetooth_adapters(
+    *,
+    bluetoothctl: Optional[str],
+    probe: bool = True,
+    probe_timeout: float = BT_ADAPTER_PROBE_TIMEOUT_S,
+) -> tuple[list[BtAdapter], str]:
+    """List HCI adapters; soft-mark unresponsive BT600s without blocking long.
+
+    Never raises. Dead USB sticks that hang ``show`` are marked ``healthy=False``
+    after a short timeout so reconnect/connect can skip them.
+    """
+    adapters: list[BtAdapter] = []
+    if bluetoothctl:
+        try:
+            proc = run_cmd([bluetoothctl, "list"], timeout=3.0)
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            return [], f"bluetoothctl list error: {exc}"
+        if proc.returncode == 0:
+            adapters = parse_bluetoothctl_list(proc.stdout or "")
+        else:
+            detail = (proc.stderr or proc.stdout or "bluetoothctl list failed").strip()
+            # Fall through to sysfs — still useful when bluez is half-up.
+            adapters = []
+            sys_hcis = list_sysfs_bluetooth_hcis()
+            if not sys_hcis:
+                return [], detail
+            for hci in sys_hcis:
+                adapters.append(
+                    BtAdapter(
+                        hci=hci,
+                        onboard=adapter_sysfs_onboard(hci),
+                        healthy=False,
+                        detail="listed via sysfs only",
+                    )
+                )
+            return adapters, f"{detail}; sysfs → {len(adapters)} hci"
+
+    if not adapters:
+        # No bluetoothctl or empty list — try sysfs alone.
+        for hci in list_sysfs_bluetooth_hcis():
+            adapters.append(
+                BtAdapter(
+                    hci=hci,
+                    onboard=adapter_sysfs_onboard(hci),
+                    healthy=bool(bluetoothctl),
+                    detail="sysfs" if not bluetoothctl else "hci present",
+                )
+            )
+        if not adapters:
+            return [], "no Bluetooth adapters"
+        if not bluetoothctl:
+            return adapters, f"sysfs → {len(adapters)} hci (bluetoothctl missing)"
+
+    # Enrich powered / healthy with a hard short timeout per adapter.
+    for adapter in adapters:
+        if not adapter.onboard:
+            adapter.onboard = adapter_sysfs_onboard(adapter.hci)
+        if not probe or not bluetoothctl:
+            continue
+        try:
+            # Prefer show <mac> so we do not rely on global default controller.
+            target = adapter.mac or adapter.hci
+            proc = run_cmd(
+                [bluetoothctl, "show", target],
+                timeout=probe_timeout,
+            )
+        except subprocess.TimeoutExpired:
+            adapter.healthy = False
+            adapter.powered = False
+            adapter.detail = f"probe timeout {probe_timeout:.1f}s — skip (dead BT600?)"
+            log.warning("BT adapter %s probe timed out — treating as dead", adapter.hci)
+            continue
+        except OSError as exc:
+            adapter.healthy = False
+            adapter.powered = False
+            adapter.detail = f"probe error: {exc}"
+            continue
+        if proc.returncode != 0:
+            out = ((proc.stdout or "") + (proc.stderr or "")).strip()
+            adapter.healthy = False
+            adapter.powered = False
+            adapter.detail = out or f"show failed (rc={proc.returncode})"
+            continue
+        info = parse_bluetoothctl_show(proc.stdout or "")
+        powered = info.get("powered", "").lower()
+        adapter.powered = powered in {"yes", "true", "1"}
+        name = info.get("name") or info.get("alias")
+        if name:
+            adapter.name = name
+        adapter.healthy = True
+        adapter.detail = "powered" if adapter.powered else "present (powered off)"
+
+    healthy_n = sum(1 for a in adapters if a.healthy)
+    onboard_n = sum(1 for a in adapters if a.onboard)
+    return (
+        adapters,
+        f"adapters={len(adapters)} healthy={healthy_n} onboard={onboard_n}",
+    )
+
+
+def bluetoothctl_select(
+    bluetoothctl: Optional[str],
+    adapter: str,
+    *,
+    timeout: float = BT_ADAPTER_PROBE_TIMEOUT_S,
+) -> tuple[bool, str]:
+    """Select an HCI by MAC or ``hciN`` before pair/connect (multi-adapter)."""
+    if not bluetoothctl:
+        return False, "bluetoothctl missing"
+    want = (adapter or "").strip()
+    if not want:
+        return False, "empty adapter"
+    try:
+        proc = run_cmd([bluetoothctl, "select", want], timeout=timeout)
+    except subprocess.TimeoutExpired:
+        return False, f"select {want}: timeout"
+    except OSError as exc:
+        return False, f"select {want}: {exc}"
+    out = ((proc.stdout or "") + (proc.stderr or "")).strip()
+    if proc.returncode == 0:
+        return True, out or f"selected {want}"
+    return False, out or f"select {want} failed (rc={proc.returncode})"
+
+
+def bluetoothctl_power_on(
+    bluetoothctl: Optional[str],
+    *,
+    timeout: float = BT_ADAPTER_PROBE_TIMEOUT_S,
+) -> tuple[bool, str]:
+    """Best-effort ``power on`` for the currently selected adapter."""
+    if not bluetoothctl:
+        return False, "bluetoothctl missing"
+    try:
+        proc = run_cmd([bluetoothctl, "power", "on"], timeout=timeout)
+    except subprocess.TimeoutExpired:
+        return False, "power on: timeout"
+    except OSError as exc:
+        return False, f"power on: {exc}"
+    out = ((proc.stdout or "") + (proc.stderr or "")).strip()
+    low = out.lower()
+    if proc.returncode == 0 or "succeeded" in low or "already" in low:
+        return True, out or "power on"
+    return False, out or f"power on failed (rc={proc.returncode})"
+
+
+def pick_free_adapter(
+    adapters: list[BtAdapter],
+    *,
+    used_hcis: set[str],
+    preferred_hci: str = "",
+) -> Optional[BtAdapter]:
+    """Choose a healthy free HCI for the next A2DP sink (prefer preferred, then onboard)."""
+    healthy = [a for a in adapters if a.healthy]
+    if preferred_hci:
+        want = preferred_hci.strip().lower()
+        for a in healthy:
+            if a.hci == want and a.hci not in used_hcis:
+                return a
+    # Prefer free onboard first (known-good Qudelix path), then USB BT600s.
+    ordered = sorted(
+        healthy,
+        key=lambda a: (0 if a.onboard else 1, int(re.sub(r"\D", "", a.hci) or "99")),
+    )
+    for a in ordered:
+        if a.hci not in used_hcis:
+            return a
+    return None
+
+
+def adapter_capacity_note(adapters: list[BtAdapter]) -> str:
+    """Human soft-fail note when only onboard (or fewer) adapters are healthy."""
+    healthy = [a for a in adapters if a.healthy]
+    n = len(healthy)
+    if n == 0:
+        return (
+            "No healthy Bluetooth adapters — BT outputs stay MISSING; "
+            "onboard / BT600 soft-fail (API stays up)"
+        )
+    if n == 1:
+        label = "onboard" if healthy[0].onboard else healthy[0].hci
+        return (
+            f"Only 1 healthy adapter ({label}) — one A2DP sink max; "
+            "extra BT600s soft-fail until plugged / healthy"
+        )
+    return f"{n} healthy adapters · up to {min(n, 6)} A2DP sinks"
+
+
 def parse_bluetoothctl_devices(text: str) -> list[BtRemote]:
     """Parse ``bluetoothctl devices`` lines: ``Device AA:BB:… Name``."""
     remotes: list[BtRemote] = []
@@ -945,9 +1229,12 @@ def bluetoothctl_pair(
     bluetoothctl: Optional[str],
     mac: str,
     *,
-    timeout: float = 12.0,
+    timeout: float = BT_PAIR_SOFT_TIMEOUT_S,
 ) -> tuple[bool, str]:
-    """Best-effort ``bluetoothctl pair <mac>`` before connect."""
+    """Best-effort ``bluetoothctl pair <mac>`` before connect.
+
+    Short default timeout — a hung BT600 must not block the API.
+    """
     if not bluetoothctl:
         return False, "bluetoothctl missing"
     want = normalize_mac(mac)
@@ -955,7 +1242,9 @@ def bluetoothctl_pair(
         return False, f"invalid mac: {mac!r}"
     try:
         proc = run_cmd([bluetoothctl, "pair", want], timeout=timeout)
-    except (OSError, subprocess.TimeoutExpired) as exc:
+    except subprocess.TimeoutExpired:
+        return False, f"pair {want}: timeout {timeout:.1f}s"
+    except OSError as exc:
         return False, f"pair {want}: {exc}"
     out = ((proc.stdout or "") + (proc.stderr or "")).strip()
     low = out.lower()
@@ -973,12 +1262,13 @@ def bluetoothctl_connect(
     bluetoothctl: Optional[str],
     mac: str,
     *,
-    timeout: float = 10.0,
+    timeout: float = BT_CONNECT_SOFT_TIMEOUT_S,
 ) -> tuple[bool, str]:
     """Soft ``bluetoothctl connect <mac>`` for demo reboot recovery.
 
     Returns ``(ok, detail)``. Already-connected remotes usually succeed quickly.
-    Never raises — demo path prefers MISSING over a hung API.
+    Never raises — demo path prefers MISSING over a hung API. Default timeout is
+    short so dead BT600 dongles cannot stall multi-sink reconnect.
     """
     if not bluetoothctl:
         return False, "bluetoothctl missing"
@@ -987,7 +1277,9 @@ def bluetoothctl_connect(
         return False, f"invalid mac: {mac!r}"
     try:
         proc = run_cmd([bluetoothctl, "connect", want], timeout=timeout)
-    except (OSError, subprocess.TimeoutExpired) as exc:
+    except subprocess.TimeoutExpired:
+        return False, f"connect {want}: timeout {timeout:.1f}s"
+    except OSError as exc:
         return False, f"connect {want}: {exc}"
     out = ((proc.stdout or "") + (proc.stderr or "")).strip()
     low = out.lower()

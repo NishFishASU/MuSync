@@ -78,7 +78,9 @@ from ..config import (
     validate_devices,
 )
 from ..models import (
+    MAX_BT_SINKS,
     MAX_INPUT_HOSTS,
+    BluetoothAdapter,
     BluetoothConnectRequest,
     BluetoothConnectResponse,
     BluetoothScanStatus,
@@ -108,18 +110,24 @@ from ..models import (
 from .base import AudioBackend
 from .input_registry import CAPTURE_NOTES, STUB_CAPTURE_NOTES, InputRegistry
 from .pw_tools import (
+    BT_CONNECT_SOFT_TIMEOUT_S,
+    BT_PAIR_SOFT_TIMEOUT_S,
     GraphLink,
     GraphPlan,
     PwNode,
+    adapter_capacity_note,
     bluetoothctl_connect,
     bluetoothctl_pair,
+    bluetoothctl_power_on,
     bluetoothctl_scan_off,
     bluetoothctl_scan_on,
+    bluetoothctl_select,
     build_capture_loopback_commands,
     build_sink_commands,
     classify_capture_source,
     discover_alsa_hdmi_cards,
     discover_alsa_usb_cards,
+    discover_bluetooth_adapters,
     discover_bluetooth_remotes,
     discover_nodes,
     discover_sources,
@@ -134,6 +142,7 @@ from .pw_tools import (
     merge_alsa_usb_into_sources,
     match_device_node,
     normalize_mac,
+    pick_free_adapter,
     run_cmd,
     which,
 )
@@ -202,6 +211,11 @@ class PipeWireBackend(AudioBackend):
         self._bt_scanning: bool = False
         self._bt_scan_cache: dict[str, DiscoveredBluetoothSink] = {}
         self._bt_scan_cleared_macs: set[str] = set()
+        # Onboard + USB HCI inventory (dead BT600s marked unhealthy, never block).
+        self._bt_adapters: list[BluetoothAdapter] = []
+        self._bt_adapters_detail: str = ""
+        self._last_adapter_probe_at: float = 0.0
+        self._adapter_probe_min_interval_s: float = 12.0
 
         self._tools = {
             "wpctl": which("wpctl"),
@@ -226,7 +240,9 @@ class PipeWireBackend(AudioBackend):
         # Refresh map / plan once at startup (no-op / dry-run without hardware).
         # Purge orphan MuSync_Feeder null-sinks from prior soft-load restarts.
         # Free SPP ports + soft-reconnect paired BT so UI shows READY after reboot.
+        # Adapter probe is soft — dead BT600 timeouts must not block API boot.
         try:
+            self._refresh_adapters(force=True)
             if not self._env_dry_run():
                 self._ensure_feeder(reset=True)
                 self._free_configured_spp_ports()
@@ -747,11 +763,140 @@ class PipeWireBackend(AudioBackend):
             detail = free_spp_listen_port(port)
             log.info("SPP preflight :%s — %s", port, detail)
 
+    def _refresh_adapters(self, *, force: bool = False) -> list[BluetoothAdapter]:
+        """Probe onboard + USB HCI adapters; dead BT600s soft-fail (short timeout)."""
+        now = time.monotonic()
+        if (
+            not force
+            and self._bt_adapters
+            and (now - self._last_adapter_probe_at) < self._adapter_probe_min_interval_s
+        ):
+            return list(self._bt_adapters)
+        btctl = self._tools.get("bluetoothctl")
+        raw, detail = discover_bluetooth_adapters(bluetoothctl=btctl, probe=True)
+        models = [
+            BluetoothAdapter(
+                hci=a.hci,
+                mac=a.mac,
+                name=a.name,
+                powered=a.powered,
+                healthy=a.healthy,
+                onboard=a.onboard,
+                detail=a.detail,
+            )
+            for a in raw
+        ]
+        self._bt_adapters = models
+        self._bt_adapters_detail = detail
+        self._last_adapter_probe_at = now
+        if models:
+            log.info("BT adapters: %s", detail)
+        return list(models)
+
+    def _adapter_snapshot(self) -> tuple[list[BluetoothAdapter], int, str]:
+        """Return ``(adapters, healthy_capacity, soft_warn)`` for API payloads."""
+        adapters = self._refresh_adapters()
+        # Convert to BtAdapter-shaped objects for capacity note helper.
+        from .pw_tools import BtAdapter
+
+        raw = [
+            BtAdapter(
+                hci=a.hci,
+                mac=a.mac,
+                name=a.name,
+                powered=a.powered,
+                healthy=a.healthy,
+                onboard=a.onboard,
+                detail=a.detail,
+            )
+            for a in adapters
+        ]
+        capacity = min(sum(1 for a in adapters if a.healthy), MAX_BT_SINKS)
+        warn = adapter_capacity_note(raw)
+        return adapters, capacity, warn
+
+    def _used_hcis(self, *, exclude_id: str | None = None) -> set[str]:
+        used: set[str] = set()
+        for d in self._devices.values():
+            if d.kind != DeviceKind.BLUETOOTH:
+                continue
+            if exclude_id and d.id == exclude_id:
+                continue
+            hci = (d.hci or "").strip().lower()
+            if hci:
+                used.add(hci)
+        return used
+
+    def _adapter_by_hci(self, hci: str) -> BluetoothAdapter | None:
+        want = (hci or "").strip().lower()
+        if not want:
+            return None
+        for a in self._bt_adapters:
+            if a.hci == want:
+                return a
+        return None
+
+    def _prepare_adapter_for_connect(
+        self,
+        *,
+        preferred_hci: str = "",
+        existing_hci: str = "",
+        exclude_device_id: str | None = None,
+    ) -> tuple[BluetoothAdapter | None, str]:
+        """Pick + select a healthy free HCI. Soft-fail when only onboard / none free."""
+        adapters, _cap, warn = self._adapter_snapshot()
+        from .pw_tools import BtAdapter
+
+        raw = [
+            BtAdapter(
+                hci=a.hci,
+                mac=a.mac,
+                name=a.name,
+                powered=a.powered,
+                healthy=a.healthy,
+                onboard=a.onboard,
+                detail=a.detail,
+            )
+            for a in adapters
+        ]
+        used = self._used_hcis(exclude_id=exclude_device_id)
+        # Reuse existing HCI when still healthy.
+        prefer = (preferred_hci or existing_hci or "").strip().lower()
+        if prefer:
+            current = self._adapter_by_hci(prefer)
+            if current and current.healthy and (
+                prefer not in used or prefer == (existing_hci or "").strip().lower()
+            ):
+                picked = current
+            else:
+                picked_raw = pick_free_adapter(
+                    raw, used_hcis=used, preferred_hci=prefer
+                )
+                picked = self._adapter_by_hci(picked_raw.hci) if picked_raw else None
+        else:
+            picked_raw = pick_free_adapter(raw, used_hcis=used)
+            picked = self._adapter_by_hci(picked_raw.hci) if picked_raw else None
+
+        if picked is None:
+            return None, warn
+
+        btctl = self._tools.get("bluetoothctl")
+        if btctl and not self._env_dry_run():
+            target = picked.mac or picked.hci
+            sel_ok, sel_detail = bluetoothctl_select(btctl, target)
+            if not sel_ok:
+                # Soft-fail this adapter — try without select (default controller).
+                log.warning("BT select %s failed: %s", target, sel_detail)
+            else:
+                bluetoothctl_power_on(btctl)
+        return picked, warn
+
     def _reconnect_bt_sinks(self, *, force: bool = False) -> list[str]:
         """Soft-connect enabled BT sinks that are paired but not mapped yet.
 
         Demo reboot path: Qudelix is paired but A2DP may be down until
         ``bluetoothctl connect``. Throttled so UI polls cannot spam BlueZ.
+        Dead BT600 adapters are skipped (short connect timeout).
         """
         now = time.monotonic()
         if (
@@ -764,6 +909,12 @@ class PipeWireBackend(AudioBackend):
         btctl = self._tools.get("bluetoothctl")
         if not btctl:
             return []
+
+        # Probe adapters first — never block long on a dead dongle.
+        try:
+            self._refresh_adapters(force=force)
+        except Exception as exc:  # noqa: BLE001
+            log.debug("adapter probe on reconnect: %s", exc)
 
         # Prefer fresh remotes; fall back to last discovery cache.
         remotes, _detail = discover_bluetooth_remotes(bluetoothctl=btctl)
@@ -784,7 +935,25 @@ class PipeWireBackend(AudioBackend):
             # Skip unknown remotes that were never paired — connect would hang.
             if remote is not None and not remote.paired and not remote.connected:
                 continue
-            ok, detail = bluetoothctl_connect(btctl, mac)
+
+            # Skip sinks whose assigned HCI is known-dead (don't burn the timeout).
+            if device.hci:
+                adapter = self._adapter_by_hci(device.hci)
+                if adapter is not None and not adapter.healthy:
+                    log.info(
+                        "BT reconnect skip %s — adapter %s unhealthy (%s)",
+                        device.id,
+                        device.hci,
+                        adapter.detail or "dead",
+                    )
+                    attempted.append(device.id)
+                    continue
+                if adapter is not None and (adapter.mac or adapter.hci):
+                    bluetoothctl_select(btctl, adapter.mac or adapter.hci)
+
+            ok, detail = bluetoothctl_connect(
+                btctl, mac, timeout=BT_CONNECT_SOFT_TIMEOUT_S
+            )
             attempted.append(device.id)
             log.info(
                 "BT reconnect %s (%s): %s — %s",
@@ -1668,6 +1837,7 @@ class PipeWireBackend(AudioBackend):
                 self._reconnect_bt_sinks(force=True)
             except Exception as exc:  # noqa: BLE001
                 log.debug("BT reconnect on discover: %s", exc)
+            adapters, capacity, soft_warn = self._adapter_snapshot()
             _by_name, _by_mac, rows, detail = self._discovery_maps()
             try:
                 self.refresh_sink_map()
@@ -1686,13 +1856,17 @@ class PipeWireBackend(AudioBackend):
                     f"MISSING={','.join(missing) or '—'}"
                 )
             path = devices_config_path()
+            adapter_note = f"; {self._bt_adapters_detail}" if self._bt_adapters_detail else ""
             return DeviceDiscoverResponse(
                 bluetooth=rows,
                 spp_default=spp.model_copy(deep=True),
+                adapters=adapters,
+                adapter_capacity=capacity,
+                soft_warn=soft_warn,
                 config_path=str(path),
                 config_ok=self._config_ok,
                 config_detail=self._config_detail,
-                detail=f"{detail}{readiness}",
+                detail=f"{detail}{adapter_note}{readiness}",
             )
 
     def apply_devices_config(self, entries: list[DeviceConfigEntry]) -> list[Device]:
@@ -1727,28 +1901,46 @@ class PipeWireBackend(AudioBackend):
                 log.warning("Graph refresh after config apply failed: %s", exc)
             return [d.model_copy(deep=True) for d in self._devices.values()]
 
+    def _scan_status_payload(
+        self,
+        rows: list[DiscoveredBluetoothSink],
+        detail: str,
+    ) -> BluetoothScanStatus:
+        adapters, capacity, soft_warn = self._adapter_snapshot()
+        return BluetoothScanStatus(
+            scanning=self._bt_scanning,
+            bluetooth=rows,
+            adapters=adapters,
+            adapter_capacity=capacity,
+            soft_warn=soft_warn,
+            detail=detail,
+        )
+
     def bluetooth_scan_status(self) -> BluetoothScanStatus:
         with self._lock:
             _by_name, _by_mac, rows, detail = self._discovery_maps()
-            return BluetoothScanStatus(
-                scanning=self._bt_scanning,
-                bluetooth=rows,
-                detail=detail,
-            )
+            return self._scan_status_payload(rows, detail)
 
     def bluetooth_scan_start(self) -> BluetoothScanStatus:
         with self._lock:
             btctl = self._tools.get("bluetoothctl")
+            # Prefer a healthy adapter (onboard or first free USB) before scan on.
+            try:
+                adapters, _cap, _warn = self._adapter_snapshot()
+                healthy = next((a for a in adapters if a.healthy), None)
+                if healthy and btctl:
+                    bluetoothctl_select(btctl, healthy.mac or healthy.hci)
+                    bluetoothctl_power_on(btctl)
+            except Exception as exc:  # noqa: BLE001
+                log.debug("adapter select before scan: %s", exc)
             ok, msg = bluetoothctl_scan_on(btctl)
             self._bt_scanning = bool(ok) or self._bt_scanning
             if ok:
                 self._bt_scanning = True
             # Refresh remotes so newly advertised devices enter the cache.
             _by_name, _by_mac, rows, detail = self._discovery_maps()
-            return BluetoothScanStatus(
-                scanning=self._bt_scanning,
-                bluetooth=rows,
-                detail=f"{msg}; {detail}" if msg else detail,
+            return self._scan_status_payload(
+                rows, f"{msg}; {detail}" if msg else detail
             )
 
     def bluetooth_scan_stop(self) -> BluetoothScanStatus:
@@ -1758,10 +1950,8 @@ class PipeWireBackend(AudioBackend):
             if ok or not btctl:
                 self._bt_scanning = False
             _by_name, _by_mac, rows, detail = self._discovery_maps()
-            return BluetoothScanStatus(
-                scanning=self._bt_scanning,
-                bluetooth=rows,
-                detail=f"{msg}; {detail}" if msg else detail,
+            return self._scan_status_payload(
+                rows, f"{msg}; {detail}" if msg else detail
             )
 
     def bluetooth_clear_discovery(self) -> BluetoothScanStatus:
@@ -1803,10 +1993,8 @@ class PipeWireBackend(AudioBackend):
                 or not r.mac
                 or normalize_mac(r.mac) not in self._bt_scan_cleared_macs
             ]
-            return BluetoothScanStatus(
-                scanning=self._bt_scanning,
-                bluetooth=filtered,
-                detail=f"cleared {cleared} · kept {len(filtered)} · {detail}",
+            return self._scan_status_payload(
+                filtered, f"cleared {cleared} · kept {len(filtered)} · {detail}"
             )
 
     def bluetooth_connect(self, body: BluetoothConnectRequest) -> BluetoothConnectResponse:
@@ -1814,10 +2002,45 @@ class PipeWireBackend(AudioBackend):
             mac = normalize_mac(body.mac)
             btctl = self._tools.get("bluetoothctl")
             notes: list[str] = []
-            pair_ok, pair_detail = bluetoothctl_pair(btctl, mac)
+            soft_warn = ""
+
+            # Resolve existing configured sink (if any) before HCI pick.
+            name = (body.name or "").strip()
+            existing: Device | None = None
+            for d in self._devices.values():
+                if d.kind != DeviceKind.BLUETOOTH:
+                    continue
+                if normalize_mac(d.mac) == mac or (
+                    name and d.name.strip().lower() == name.lower()
+                ):
+                    existing = d
+                    break
+
+            preferred = (body.hci or "").strip()
+            adapter, capacity_warn = self._prepare_adapter_for_connect(
+                preferred_hci=preferred,
+                existing_hci=existing.hci if existing else "",
+                exclude_device_id=existing.id if existing else None,
+            )
+            soft_warn = capacity_warn
+            assigned_hci = ""
+            if adapter is not None:
+                assigned_hci = adapter.hci
+                notes.append(f"adapter {adapter.hci}")
+            elif body.enable_as_output and existing is None:
+                # Soft-fail: BlueZ pair/connect may still work on default HCI,
+                # but do not enable an extra A2DP output beyond adapter capacity.
+                notes.append(capacity_warn or "no free healthy Bluetooth adapter")
+
+            pair_ok, pair_detail = bluetoothctl_pair(
+                btctl, mac, timeout=BT_PAIR_SOFT_TIMEOUT_S
+            )
             notes.append(pair_detail)
-            ok, connect_detail = bluetoothctl_connect(btctl, mac, timeout=12.0)
+            ok, connect_detail = bluetoothctl_connect(
+                btctl, mac, timeout=BT_CONNECT_SOFT_TIMEOUT_S
+            )
             notes.append(connect_detail)
+            adapters, _capacity, soft_warn = self._adapter_snapshot()
             if not ok and not self._env_dry_run():
                 # Still refresh discovery so UI shows current state.
                 _bn, _bm, rows, _d = self._discovery_maps()
@@ -1826,18 +2049,22 @@ class PipeWireBackend(AudioBackend):
                     mac=mac,
                     detail="; ".join(n for n in notes if n),
                     bluetooth=rows,
+                    adapters=adapters,
+                    soft_warn=soft_warn,
                 )
 
             # Update / create scan-cache row.
-            name = (body.name or "").strip()
             cached = self._bt_scan_cache.get(mac)
             label = name or (cached.name if cached else f"BT {mac}")
+            row_hci = assigned_hci or (cached.hci if cached else "") or (
+                existing.hci if existing else ""
+            )
             row = DiscoveredBluetoothSink(
                 name=label,
                 mac=mac,
                 pw_node=cached.pw_node if cached else "",
                 pw_name=cached.pw_name if cached else "",
-                hci=cached.hci if cached else "",
+                hci=row_hci,
                 paired=True,
                 connected=True if ok or self._env_dry_run() else False,
             )
@@ -1845,60 +2072,83 @@ class PipeWireBackend(AudioBackend):
             self._bt_scan_cleared_macs.discard(mac)
 
             device: Device | None = None
-            if body.enable_as_output:
-                for d in self._devices.values():
-                    if d.kind == DeviceKind.BLUETOOTH and (
-                        normalize_mac(d.mac) == mac
-                        or d.name.strip().lower() == label.lower()
-                    ):
-                        data = d.model_dump()
-                        data.update(
-                            {
-                                "mac": mac,
-                                "name": label,
-                                "connected": True,
-                                "enabled": True,
-                            }
-                        )
-                        device = Device.model_validate(data)
-                        self._devices[d.id] = device
-                        break
-                if device is None:
+            enable_output = bool(body.enable_as_output)
+            if enable_output and adapter is None and existing is None:
+                # Capacity soft-fail — keep API up; sink stays unconfigured.
+                enable_output = False
+                soft_warn = capacity_warn or soft_warn
+                notes.append("enable_as_output skipped — no free healthy adapter")
+
+            if enable_output:
+                if existing is not None:
+                    data = existing.model_dump()
+                    data.update(
+                        {
+                            "mac": mac,
+                            "name": label,
+                            "connected": True,
+                            "enabled": True,
+                        }
+                    )
+                    if assigned_hci:
+                        data["hci"] = assigned_hci
+                    device = Device.model_validate(data)
+                    trial = [
+                        device if d.id == existing.id else d
+                        for d in self._devices.values()
+                    ]
+                    validate_devices(trial)
+                    self._devices[existing.id] = device
+                else:
                     bt_count = sum(
                         1 for d in self._devices.values() if d.kind == DeviceKind.BLUETOOTH
                     )
-                    new_id = f"bt-{bt_count + 1}"
-                    if new_id in self._devices:
-                        new_id = f"bt-{mac.replace(':', '').lower()[-6:]}"
-                    device = Device(
-                        id=new_id,
-                        name=label,
-                        kind=DeviceKind.BLUETOOTH,
-                        mac=mac,
-                        connected=True,
-                        enabled=True,
-                        delay_ms=0,
-                        volume=0.85,
+                    if bt_count >= MAX_BT_SINKS:
+                        soft_warn = (
+                            f"At most {MAX_BT_SINKS} Bluetooth sinks — "
+                            "connect skipped for enable"
+                        )
+                        notes.append(soft_warn)
+                    else:
+                        new_id = f"bt-{bt_count + 1}"
+                        if new_id in self._devices:
+                            new_id = f"bt-{mac.replace(':', '').lower()[-6:]}"
+                        device = Device(
+                            id=new_id,
+                            name=label,
+                            kind=DeviceKind.BLUETOOTH,
+                            mac=mac,
+                            hci=assigned_hci,
+                            connected=True,
+                            enabled=True,
+                            delay_ms=0,
+                            volume=0.85,
+                        )
+                        trial = list(self._devices.values()) + [device]
+                        validate_devices(trial)
+                        self._devices[device.id] = device
+                if device is not None:
+                    self._persist()
+                    row = row.model_copy(
+                        update={"configured_id": device.id, "hci": device.hci}
                     )
-                    trial = list(self._devices.values()) + [device]
-                    validate_devices(trial)
-                    self._devices[device.id] = device
-                self._persist()
-                row = row.model_copy(update={"configured_id": device.id})
-                self._bt_scan_cache[mac] = row
-                try:
-                    self.refresh_sink_map()
-                    self._ensure_graph()
-                except Exception as exc:  # noqa: BLE001
-                    notes.append(f"graph refresh: {exc}")
+                    self._bt_scan_cache[mac] = row
+                    try:
+                        self.refresh_sink_map()
+                        self._ensure_graph()
+                    except Exception as exc:  # noqa: BLE001
+                        notes.append(f"graph refresh: {exc}")
 
             _bn, _bm, rows, _d = self._discovery_maps()
+            adapters, _capacity, soft_warn = self._adapter_snapshot()
             return BluetoothConnectResponse(
                 ok=True if ok or self._env_dry_run() else False,
                 mac=mac,
                 detail="; ".join(n for n in notes if n),
                 device=device.model_copy(deep=True) if device else None,
                 bluetooth=rows,
+                adapters=adapters,
+                soft_warn=soft_warn,
             )
 
     def get_transport(self) -> Transport:
@@ -2126,6 +2376,12 @@ class PipeWireBackend(AudioBackend):
 
             stream = get_streaming_service().status()
             all_ready = not missing
+            adapters, capacity, soft_warn = self._adapter_snapshot()
+            healthy_n = sum(1 for a in adapters if a.healthy)
+            if soft_warn:
+                hint += f"; {soft_warn}"
+            if self._bt_adapters_detail:
+                hint += f"; {self._bt_adapters_detail}"
             return Health(
                 ok=up or dry or all_ready,
                 backend="pipewire",
@@ -2133,12 +2389,17 @@ class PipeWireBackend(AudioBackend):
                 sink_count=len(devices),
                 enabled_count=sum(1 for d in devices if d.enabled),
                 hci_map=hci_map,
+                adapters=adapters,
+                adapter_count=len(adapters),
+                healthy_adapter_count=healthy_n,
                 mapped_sinks=mapped,
                 graph_dry_run=dry,
                 spotify_ready=stream.spotify.authenticated,
                 apple_ready=stream.apple.authenticated,
                 detail=(
                     f"{detail}; mapped={mapped}/{len(devices)}; "
-                    f"planned_links={links}; dry_run={dry}; tools: {tools}{hint}"
+                    f"planned_links={links}; dry_run={dry}; "
+                    f"adapters={healthy_n}/{len(adapters)} (cap {capacity}); "
+                    f"tools: {tools}{hint}"
                 ),
             )

@@ -65,6 +65,8 @@ Demo path: [demo-checklist.md](demo-checklist.md).
 Optional YAML templates (`config/devices.pi-2sink.example.yaml`) remain for advanced edits; they are not required for the demo path.
 
 Scale to 4 then 6 by enabling more discovered BT sinks in the UI (≤6 A2DP) — same software path.
+Onboard-only is fine (one A2DP sink); extra USB BT600s expand capacity when healthy.
+Dead BT600s are soft-skipped (short BlueZ timeouts) so they never block scan/reconnect.
 
 ## Manual command cheat-sheet
 

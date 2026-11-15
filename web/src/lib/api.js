@@ -43,9 +43,23 @@
  */
 
 /**
+ * @typedef {Object} BluetoothAdapter
+ * @property {string} hci
+ * @property {string} [mac]
+ * @property {string} [name]
+ * @property {boolean} [powered]
+ * @property {boolean} [healthy]
+ * @property {boolean} [onboard]
+ * @property {string} [detail]
+ */
+
+/**
  * @typedef {Object} DeviceDiscoverResponse
  * @property {DiscoveredBluetoothSink[]} bluetooth
  * @property {Device} spp_default
+ * @property {BluetoothAdapter[]} [adapters]
+ * @property {number} [adapter_capacity]
+ * @property {string} [soft_warn]
  * @property {string} [config_path]
  * @property {boolean} [config_ok]
  * @property {string} [config_detail]
@@ -56,6 +70,9 @@
  * @typedef {Object} BluetoothScanStatus
  * @property {boolean} scanning
  * @property {DiscoveredBluetoothSink[]} bluetooth
+ * @property {BluetoothAdapter[]} [adapters]
+ * @property {number} [adapter_capacity]
+ * @property {string} [soft_warn]
  * @property {string} [detail]
  */
 
@@ -66,6 +83,8 @@
  * @property {string} [detail]
  * @property {Device | null} [device]
  * @property {DiscoveredBluetoothSink[]} [bluetooth]
+ * @property {BluetoothAdapter[]} [adapters]
+ * @property {string} [soft_warn]
  */
 
 /**
@@ -192,6 +211,9 @@
  * @property {number} sink_count
  * @property {number} enabled_count
  * @property {Record<string, string>} [hci_map]
+ * @property {BluetoothAdapter[]} [adapters]
+ * @property {number} [adapter_count]
+ * @property {number} [healthy_adapter_count]
  * @property {string} [detail]
  * @property {boolean} [spotify_ready]
  * @property {boolean} [apple_ready]
