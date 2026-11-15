@@ -41,12 +41,18 @@ from .models import (
     StreamingStatus,
     Transport,
     TransportPut,
+    VolumeProfile,
+    VolumeProfileActivePut,
+    VolumeProfileCreate,
+    VolumeProfilePatch,
+    VolumeProfilesState,
     WifiConnectRequest,
     WifiNetwork,
     WifiSaveRequest,
     WifiStatus,
 )
 from .nowplaying import resolve_cover_bytes
+from .profiles import VolumeProfileStore, apply_profile_to_backend
 from .streaming import get_streaming_service
 from .streaming.credentials import load_streaming_env_files
 from .wifi import WifiBackend, create_wifi_backend
@@ -56,6 +62,7 @@ load_streaming_env_files()
 
 backend: AudioBackend = create_backend()
 wifi_backend: WifiBackend = create_wifi_backend()
+profile_store: VolumeProfileStore = VolumeProfileStore()
 
 app = FastAPI(
     title="MuSync",
@@ -134,6 +141,55 @@ def api_get_device(device_id: str) -> Device:
 @app.patch("/api/devices/{device_id}", response_model=Device)
 def api_patch_device(device_id: str, patch: DevicePatch) -> Device:
     return backend.patch_device(device_id, patch)
+
+
+@app.get("/api/profiles", response_model=VolumeProfilesState)
+def api_list_profiles() -> VolumeProfilesState:
+    """Named listening preference profiles (silent-disco) stored on the hub."""
+    return profile_store.get_state()
+
+
+@app.post("/api/profiles", response_model=VolumeProfile, status_code=201)
+def api_create_profile(body: VolumeProfileCreate) -> VolumeProfile:
+    return profile_store.create(body)
+
+
+@app.put("/api/profiles/active", response_model=VolumeProfilesState)
+def api_set_active_profile(body: VolumeProfileActivePut) -> VolumeProfilesState:
+    """Select a profile (or clear) and apply preferred × gain volumes to outputs."""
+    state = profile_store.set_active(body.id)
+    if body.id:
+        profile = profile_store.get(body.id)
+        apply_profile_to_backend(profile, backend)
+    return state
+
+
+@app.get("/api/profiles/{profile_id}", response_model=VolumeProfile)
+def api_get_profile(profile_id: str) -> VolumeProfile:
+    return profile_store.get(profile_id)
+
+
+@app.patch("/api/profiles/{profile_id}", response_model=VolumeProfile)
+def api_patch_profile(profile_id: str, body: VolumeProfilePatch) -> VolumeProfile:
+    """Update name / preferred level / per-output overrides; re-apply if active."""
+    updated = profile_store.patch(profile_id, body)
+    active = profile_store.active_profile()
+    if active and active.id == updated.id:
+        apply_profile_to_backend(updated, backend)
+    return updated
+
+
+@app.delete("/api/profiles/{profile_id}", status_code=204)
+def api_delete_profile(profile_id: str) -> Response:
+    profile_store.delete(profile_id)
+    return Response(status_code=204)
+
+
+@app.post("/api/profiles/{profile_id}/apply", response_model=list[Device])
+def api_apply_profile(profile_id: str) -> list[Device]:
+    """Apply a profile's preferred levels to all outputs without changing selection."""
+    profile = profile_store.get(profile_id)
+    return apply_profile_to_backend(profile, backend)
 
 
 @app.get("/api/bluetooth/scan", response_model=BluetoothScanStatus)
@@ -531,11 +587,14 @@ if _web.is_dir():
 def create_app(
     audio_backend: AudioBackend | None = None,
     wifi: WifiBackend | None = None,
+    profiles: VolumeProfileStore | None = None,
 ) -> FastAPI:
     """Test helper: swap the module-level backends used by route handlers."""
-    global backend, wifi_backend
+    global backend, wifi_backend, profile_store
     if audio_backend is not None:
         backend = audio_backend
     if wifi is not None:
         wifi_backend = wifi
+    if profiles is not None:
+        profile_store = profiles
     return app

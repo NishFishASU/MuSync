@@ -384,6 +384,7 @@ def resolve_devices_from_config(
             enabled=entry.enabled,
             delay_ms=entry.delay_ms if entry.delay_ms is not None else (prev.delay_ms if prev else 0),
             volume=entry.volume if entry.volume is not None else (prev.volume if prev else 0.85),
+            gain=entry.gain if entry.gain is not None else (prev.gain if prev else 1.0),
             mute=entry.mute if entry.mute is not None else (prev.mute if prev else False),
             listen_host=(
                 entry.listen_host
@@ -656,3 +657,8 @@ def clamp_delay_ms(value: int) -> int:
 
 def clamp_volume(value: float) -> float:
     return round(max(0.0, min(1.0, float(value))), 3)
+
+
+def clamp_gain(value: float) -> float:
+    """Headphone/IEM sensitivity factor (default 1.0; typical 0.1–4.0)."""
+    return round(max(0.1, min(4.0, float(value))), 3)

@@ -36,6 +36,9 @@ class Device(BaseModel):
     connected: bool = False
     delay_ms: int = Field(default=0, ge=0, le=2000)
     volume: float = Field(default=0.8, ge=0.0, le=1.0)
+    # Headphone/IEM sensitivity calibration (silent-disco). Applied volume =
+    # clamp(preferred_level × gain). Delay stays independent of profiles.
+    gain: float = Field(default=1.0, ge=0.1, le=4.0)
     mute: bool = False
     enabled: bool = True
     # Optional WirePlumber/PipeWire node id or node.name override after connect.
@@ -51,10 +54,16 @@ class Device(BaseModel):
     def round_volume(cls, v: float) -> float:
         return round(float(v), 3)
 
+    @field_validator("gain")
+    @classmethod
+    def round_gain(cls, v: float) -> float:
+        return round(float(v), 3)
+
 
 class DevicePatch(BaseModel):
     delay_ms: Optional[int] = Field(default=None, ge=0, le=2000)
     volume: Optional[float] = Field(default=None, ge=0.0, le=1.0)
+    gain: Optional[float] = Field(default=None, ge=0.1, le=4.0)
     mute: Optional[bool] = None
     enabled: Optional[bool] = None
     name: Optional[str] = None
@@ -72,6 +81,13 @@ class DevicePatch(BaseModel):
     @field_validator("volume")
     @classmethod
     def round_volume(cls, v: Optional[float]) -> Optional[float]:
+        if v is None:
+            return None
+        return round(float(v), 3)
+
+    @field_validator("gain")
+    @classmethod
+    def round_gain(cls, v: Optional[float]) -> Optional[float]:
         if v is None:
             return None
         return round(float(v), 3)
@@ -169,6 +185,7 @@ class DeviceConfigEntry(BaseModel):
     pw_node: Optional[str] = None
     delay_ms: Optional[int] = Field(default=None, ge=0, le=2000)
     volume: Optional[float] = Field(default=None, ge=0.0, le=1.0)
+    gain: Optional[float] = Field(default=None, ge=0.1, le=4.0)
     mute: Optional[bool] = None
     listen_host: Optional[str] = None
     listen_port: Optional[int] = Field(default=None, ge=1, le=65535)
@@ -478,6 +495,118 @@ class StreamingQueueAdd(BaseModel):
     cover_url: Optional[str] = None
     duration_ms: Optional[int] = None
     activate: bool = True
+
+
+class VolumeProfile(BaseModel):
+    """Named listening preference for silent-disco style headphone outputs.
+
+    Applied sink volume = clamp(preferred_level × device.gain). Optional
+    ``output_overrides`` replace preferred_level for specific device ids
+    (still multiplied by that output's gain). Delay is never touched.
+    """
+
+    id: str
+    name: str
+    preferred_level: float = Field(default=0.8, ge=0.0, le=1.0)
+    output_overrides: dict[str, float] = Field(default_factory=dict)
+
+    @field_validator("preferred_level")
+    @classmethod
+    def round_preferred(cls, v: float) -> float:
+        return round(float(v), 3)
+
+    @field_validator("output_overrides")
+    @classmethod
+    def round_overrides(cls, v: dict[str, float]) -> dict[str, float]:
+        out: dict[str, float] = {}
+        for key, raw in (v or {}).items():
+            device_id = str(key).strip()
+            if not device_id:
+                continue
+            level = round(max(0.0, min(1.0, float(raw))), 3)
+            out[device_id] = level
+        return out
+
+
+class VolumeProfileCreate(BaseModel):
+    name: str = Field(..., min_length=1, max_length=64)
+    preferred_level: float = Field(default=0.8, ge=0.0, le=1.0)
+    output_overrides: dict[str, float] = Field(default_factory=dict)
+
+    @field_validator("name")
+    @classmethod
+    def strip_name(cls, v: str) -> str:
+        cleaned = v.strip()
+        if not cleaned:
+            raise ValueError("Profile name must be non-empty")
+        return cleaned
+
+    @field_validator("preferred_level")
+    @classmethod
+    def round_preferred(cls, v: float) -> float:
+        return round(float(v), 3)
+
+    @field_validator("output_overrides")
+    @classmethod
+    def round_overrides(cls, v: dict[str, float]) -> dict[str, float]:
+        out: dict[str, float] = {}
+        for key, raw in (v or {}).items():
+            device_id = str(key).strip()
+            if not device_id:
+                continue
+            out[device_id] = round(max(0.0, min(1.0, float(raw))), 3)
+        return out
+
+
+class VolumeProfilePatch(BaseModel):
+    name: Optional[str] = Field(default=None, min_length=1, max_length=64)
+    preferred_level: Optional[float] = Field(default=None, ge=0.0, le=1.0)
+    output_overrides: Optional[dict[str, float]] = None
+
+    @field_validator("name")
+    @classmethod
+    def strip_name(cls, v: Optional[str]) -> Optional[str]:
+        if v is None:
+            return None
+        cleaned = v.strip()
+        if not cleaned:
+            raise ValueError("Profile name must be non-empty")
+        return cleaned
+
+    @field_validator("preferred_level")
+    @classmethod
+    def round_preferred(cls, v: Optional[float]) -> Optional[float]:
+        if v is None:
+            return None
+        return round(float(v), 3)
+
+    @field_validator("output_overrides")
+    @classmethod
+    def round_overrides(
+        cls, v: Optional[dict[str, float]]
+    ) -> Optional[dict[str, float]]:
+        if v is None:
+            return None
+        out: dict[str, float] = {}
+        for key, raw in v.items():
+            device_id = str(key).strip()
+            if not device_id:
+                continue
+            out[device_id] = round(max(0.0, min(1.0, float(raw))), 3)
+        return out
+
+
+class VolumeProfilesState(BaseModel):
+    """Hub-persisted user volume preference profiles + active selection."""
+
+    profiles: list[VolumeProfile] = Field(default_factory=list)
+    active_id: Optional[str] = None
+
+
+class VolumeProfileActivePut(BaseModel):
+    """Select a profile (null clears). Selecting applies volumes to outputs."""
+
+    id: Optional[str] = None
 
 
 class WifiNetwork(BaseModel):

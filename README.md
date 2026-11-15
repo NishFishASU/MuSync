@@ -81,7 +81,11 @@ USB/PC capture needs a **USB-A sound card** — Pi 5 USB-C PD is power-only: [do
 |--------|------|---------|
 | `GET` | `/api/health` | Backend, PipeWire up?, mapped sinks, graph dry-run |
 | `GET` | `/api/devices` | List sinks (Bluetooth + optional `network_spp`) |
-| `PATCH` | `/api/devices/{id}` | Per-output `{ delay_ms?, volume?, mute?, enabled?, listen_port?, … }` |
+| `PATCH` | `/api/devices/{id}` | Per-output `{ delay_ms?, volume?, gain?, mute?, enabled?, listen_port?, … }` |
+| `GET`/`POST` | `/api/profiles` | Named listening profiles (silent-disco preferred level) |
+| `PUT` | `/api/profiles/active` | Select profile (`{ id }` or `null`) → apply preferred × gain volumes |
+| `PATCH`/`DELETE` | `/api/profiles/{id}` | Update / delete a profile (active patch re-applies) |
+| `POST` | `/api/profiles/{id}/apply` | Re-apply preferred × gain without changing selection |
 | `GET`/`POST`/`DELETE` | `/api/bluetooth/scan` | BlueZ scan status / start (`scan on`) / stop (`scan off`) |
 | `POST` | `/api/bluetooth/discover/clear` | Clear discovery list except connected remotes |
 | `POST` | `/api/bluetooth/connect` | `{ mac, name?, enable_as_output? }` — pair/connect (+ enable output) |
@@ -220,6 +224,7 @@ sudo systemctl enable --now musync
 | `MUSYNC_HOST` | `0.0.0.0` (`127.0.0.1` in `run_dev.sh`) | Bind address |
 | `MUSYNC_PORT` | `8080` | HTTP port |
 | `MUSYNC_DEVICES_CONFIG` | `config/devices.yaml` | Device profile path |
+| `MUSYNC_PROFILES_CONFIG` | `config/profiles.yaml` | User volume preference profiles |
 | `MUSYNC_MEDIA_DIR` | `media/` | Local library root |
 | `MUSYNC_WEB_DIR` | `web/build/` | Built SvelteKit static root |
 | `MUSYNC_PW_FEEDER` | `musync_feeder` | Virtual sink name for fan-out |
