@@ -8,7 +8,14 @@ from typing import Any
 
 import yaml
 
-from .models import Device, Source, SourceType
+from .models import (
+    MAX_BT_SINKS,
+    MAX_SPP_SINKS,
+    Device,
+    DeviceKind,
+    Source,
+    SourceType,
+)
 
 AUDIO_EXTENSIONS = {".wav", ".flac", ".mp3", ".ogg", ".m4a", ".aac"}
 
@@ -70,15 +77,20 @@ DEFAULT_MOCK_DEVICES: list[dict[str, Any]] = [
         "enabled": False,
     },
     {
-        "id": "sink-6",
-        "name": "Garage",
-        "mac": "AA:BB:CC:DD:EE:06",
-        "hci": "hci5",
-        "connected": False,
-        "delay_ms": 60,
-        "volume": 0.65,
-        "mute": True,
-        "enabled": False,
+        "id": "spp-1",
+        "name": "Phone SPP",
+        "kind": "network_spp",
+        "mac": "",
+        "hci": "",
+        "connected": True,
+        "delay_ms": 0,
+        "volume": 0.9,
+        "mute": False,
+        "enabled": True,
+        "listen_host": "0.0.0.0",
+        "listen_port": 1234,
+        "sample_rate": 48000,
+        "channels": 1,
     },
 ]
 
@@ -128,21 +140,36 @@ def web_root() -> Path:
 
 
 def validate_devices(devices: list[Device], *, require_min: int | None = None) -> list[Device]:
-    """Harden 2–6 BT600 profiles: unique id/mac/hci, clamp count."""
-    if len(devices) > 6:
-        raise ValueError("MuSync supports at most 6 sinks (one A2DP sink per BT600)")
+    """Harden BT600 (≤6) + SPP network sinks (≤4): unique id/mac/hci/port."""
+    bt = [d for d in devices if d.kind == DeviceKind.BLUETOOTH]
+    spp = [d for d in devices if d.kind == DeviceKind.NETWORK_SPP]
+    if len(bt) > MAX_BT_SINKS:
+        raise ValueError(
+            f"MuSync supports at most {MAX_BT_SINKS} Bluetooth sinks (one A2DP per BT600)"
+        )
+    if len(spp) > MAX_SPP_SINKS:
+        raise ValueError(f"MuSync supports at most {MAX_SPP_SINKS} SPP network sinks")
     if require_min is not None and len(devices) < require_min:
         raise ValueError(f"Expected at least {require_min} devices, got {len(devices)}")
 
     seen_ids: set[str] = set()
     seen_macs: set[str] = set()
     seen_hcis: set[str] = set()
+    seen_ports: set[int] = set()
     for d in devices:
         if not d.id.strip():
             raise ValueError("Device id must be non-empty")
         if d.id in seen_ids:
             raise ValueError(f"Duplicate device id: {d.id}")
         seen_ids.add(d.id)
+
+        if d.kind == DeviceKind.NETWORK_SPP:
+            if d.listen_port in seen_ports:
+                raise ValueError(f"Duplicate SPP listen_port: {d.listen_port}")
+            seen_ports.add(d.listen_port)
+            if not d.listen_host.strip():
+                raise ValueError(f"SPP sink {d.id} needs listen_host")
+            continue
 
         mac = d.mac.strip().upper()
         if mac:
@@ -184,8 +211,9 @@ def save_devices(devices: list[Device]) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = {
         "version": 1,
-        "max_sinks": 6,
-        "devices": [d.model_dump() for d in devices],
+        "max_sinks": MAX_BT_SINKS,
+        "max_spp_sinks": MAX_SPP_SINKS,
+        "devices": [d.model_dump(mode="json") for d in devices],
     }
     with path.open("w", encoding="utf-8") as fh:
         yaml.safe_dump(payload, fh, sort_keys=False)

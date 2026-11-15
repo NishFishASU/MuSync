@@ -1,8 +1,10 @@
-# Full 6-sink template. For first Pi demo prefer devices.pi-2sink.example.yaml.
-# One ASUS BT600 adapter (hciN) ↔ one A2DP speaker (MAC). Max 6 sinks.
+# Full template: ≤6 Bluetooth A2DP + optional SPP TCP network sinks (≤4).
+# For first Pi demo prefer devices.pi-2sink.example.yaml (+ spp-1 below).
+# One ASUS BT600 adapter (hciN) ↔ one A2DP speaker (MAC).
 # Copy to devices.yaml (or set MUSYNC_DEVICES_CONFIG) and edit.
 version: 1
 max_sinks: 6
+max_spp_sinks: 4
 devices:
   - id: sink-1
     name: Living Room
@@ -64,3 +66,16 @@ devices:
     mute: true
     enabled: false
     pw_node: ""
+  # Simple Protocol Player TCP — phone connects to Pi IP:listen_port
+  - id: spp-1
+    name: Phone SPP
+    kind: network_spp
+    connected: true
+    delay_ms: 0
+    volume: 0.9
+    mute: false
+    enabled: true
+    listen_host: "0.0.0.0"
+    listen_port: 1234
+    sample_rate: 48000
+    channels: 1

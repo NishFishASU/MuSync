@@ -26,8 +26,8 @@ def test_validate_accepts_two_to_six() -> None:
 
 def test_validate_rejects_seventh() -> None:
     devices = [_dev(i) for i in range(1, 8)]
-    # MAC/hci for 7 would be hci6 / EE:07 — still invalid by count
-    with pytest.raises(ValueError, match="at most 6"):
+    # MAC/hci for 7 would be hci6 / EE:07 — still invalid by BT count
+    with pytest.raises(ValueError, match="at most 6 Bluetooth"):
         validate_devices(devices)
 
 
