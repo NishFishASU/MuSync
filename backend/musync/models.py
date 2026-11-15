@@ -494,6 +494,8 @@ class AvrcpStatus(BaseModel):
     last_volume_sync: dict[str, float] = Field(default_factory=dict)
     last_action: Optional[str] = None
     last_error: str = ""
+    # True when BlueZ Media1.RegisterPlayer succeeded (headset Play/Pause/Next).
+    player_registered: bool = False
 
 
 class AvrcpCommandPut(BaseModel):

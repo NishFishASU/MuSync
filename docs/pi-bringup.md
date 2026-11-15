@@ -9,9 +9,14 @@ can work before this; **Spotify** and **YouTube** need the tools below.
 cd ~/MuSync && git checkout main && git pull origin main
 sudo apt update
 sudo apt install -y pipewire wireplumber pipewire-pulse pulseaudio-utils \
-  bluez mpv ffmpeg build-essential pkg-config libasound2-dev libssl-dev
+  bluez mpv ffmpeg python3-dbus python3-gi \
+  build-essential pkg-config libasound2-dev libssl-dev
 ./scripts/build_web.sh
 ```
+
+`python3-dbus` + `python3-gi` are required for Qudelix **play/pause/skip**
+(BlueZ `Media1.RegisterPlayer`). Absolute Volume still works via `busctl`/`wpctl`
+without them.
 
 ## 2. Spotify Connect (librespot)
 

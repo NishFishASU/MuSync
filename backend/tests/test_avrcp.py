@@ -100,6 +100,43 @@ def test_parse_monitor_action_tokens() -> None:
         parse_action("shuffle")
 
 
+def test_transport_state_to_mpris() -> None:
+    from musync.audio.avrcp import transport_state_to_mpris
+
+    assert transport_state_to_mpris("playing") == "Playing"
+    assert transport_state_to_mpris("paused") == "Paused"
+    assert transport_state_to_mpris("stopped") == "Stopped"
+
+
+def test_mpris_props_advertise_control() -> None:
+    """RegisterPlayer props must advertise CanPlay/CanPause/Next/Prev."""
+    mods = None
+    try:
+        import dbus
+
+        mods = dbus
+    except ImportError:
+        pytest.skip("python3-dbus not installed")
+    from musync.audio.avrcp import _build_mpris_props
+
+    props = _build_mpris_props(mods, status="Paused")
+    assert props["PlaybackStatus"] == "Paused"
+    assert bool(props["CanPlay"]) is True
+    assert bool(props["CanPause"]) is True
+    assert bool(props["CanGoNext"]) is True
+    assert bool(props["CanGoPrevious"]) is True
+    assert bool(props["CanControl"]) is True
+
+
+def test_avrcp_status_exposes_player_registered(
+    client: TestClient,
+) -> None:
+    body = client.get("/api/avrcp").json()
+    assert "player_registered" in body
+    # Mock / no BlueZ → false; field must still serialize.
+    assert body["player_registered"] is False
+
+
 def test_inject_volume_updates_slider(backend: MockAudioBackend) -> None:
     updated = backend.inject_avrcp_volume("sink-1", 0.42)
     assert updated.volume == 0.42

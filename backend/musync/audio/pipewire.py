@@ -819,18 +819,35 @@ class PipeWireBackend(AudioBackend):
     def _on_avrcp_action(self, action: AvrcpAction) -> None:
         """Headset play/pause/skip → active hub source (Spotify/YouTube/local/…)."""
         try:
-            relay_action_to_session(self._session, action)
+            transport = relay_action_to_session(self._session, action)
             log.info("AVRCP %s → active source", action.value)
+            self._publish_avrcp_transport(transport)
         except ValueError as exc:
             # Soft-fail: unavailable cue / empty queue — do not crash watcher.
             log.info("AVRCP %s soft-fail: %s", action.value, exc)
         except Exception as exc:  # noqa: BLE001
             log.debug("AVRCP action %s: %s", action, exc)
 
+    def _publish_avrcp_transport(self, transport=None) -> None:
+        """Mirror Now Playing into BlueZ MPRIS player (headset display + Status)."""
+        try:
+            t = transport if transport is not None else self._session.get_transport()
+            self._avrcp.publish_transport(
+                state=t.state.value if hasattr(t.state, "value") else str(t.state),
+                title=t.title or "",
+                artist=t.artist or "",
+                album=t.album or "",
+                position_ms=int(t.position_ms or 0),
+                duration_ms=int(t.duration_ms or 0),
+            )
+        except Exception as exc:  # noqa: BLE001
+            log.debug("AVRCP publish transport: %s", exc)
+
     def _poll_avrcp_volumes(self) -> None:
         try:
             self._sync_avrcp_targets()
             self._avrcp.poll_volumes()
+            self._publish_avrcp_transport()
         except Exception as exc:  # noqa: BLE001
             log.debug("AVRCP volume poll soft-fail: %s", exc)
 
@@ -845,13 +862,16 @@ class PipeWireBackend(AudioBackend):
             last_volume_sync=dict(snap.last_volume_sync),
             last_action=snap.last_action,
             last_error=snap.last_error,
+            player_registered=bool(snap.player_registered),
         )
 
     def relay_avrcp_command(self, action: str):
         parsed = parse_action(action)
         # Status only — apply once below (toggle/next must not fire twice).
         self._avrcp.inject_action(parsed, deliver=False)
-        return relay_action_to_session(self._session, parsed)
+        transport = relay_action_to_session(self._session, parsed)
+        self._publish_avrcp_transport(transport)
+        return transport
 
     def inject_avrcp_volume(self, device_id: str, volume: float):
         with self._lock:
@@ -2791,6 +2811,7 @@ class PipeWireBackend(AudioBackend):
             self._apply_turn_policy(rotate=False)
         self._sync_spp_listeners()
         self._sync_cast_streams()
+        self._publish_avrcp_transport(transport)
         return transport
 
     def _on_queue_auto_advance(self) -> None:

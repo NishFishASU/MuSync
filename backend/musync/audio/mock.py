@@ -954,6 +954,7 @@ class MockAudioBackend(AudioBackend):
             last_volume_sync=dict(snap.last_volume_sync),
             last_action=snap.last_action,
             last_error=snap.last_error,
+            player_registered=False,
         )
 
     def relay_avrcp_command(self, action: str):
