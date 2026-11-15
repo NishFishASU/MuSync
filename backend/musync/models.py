@@ -99,3 +99,49 @@ class Health(BaseModel):
     detail: str = ""
     mapped_sinks: int = 0
     graph_dry_run: bool = True
+
+
+class WifiNetwork(BaseModel):
+    """Saved Wi-Fi profile metadata (never includes the password)."""
+
+    ssid: str
+    saved: bool = True
+    active: bool = False
+    has_password: bool = False
+
+
+class WifiStatus(BaseModel):
+    """Current association + IPv4 addresses for SPP / LAN UI."""
+
+    backend: Literal["mock", "nmcli"]
+    connected: bool = False
+    ssid: Optional[str] = None
+    ips: list[str] = Field(default_factory=list)
+    interface: Optional[str] = None
+    detail: str = ""
+
+
+class WifiSaveRequest(BaseModel):
+    ssid: str = Field(..., min_length=1, max_length=32)
+    password: Optional[str] = Field(default=None, max_length=63)
+
+    @field_validator("ssid")
+    @classmethod
+    def strip_ssid(cls, v: str) -> str:
+        cleaned = v.strip()
+        if not cleaned:
+            raise ValueError("SSID must be non-empty")
+        return cleaned
+
+
+class WifiConnectRequest(BaseModel):
+    ssid: str = Field(..., min_length=1, max_length=32)
+    password: Optional[str] = Field(default=None, max_length=63)
+
+    @field_validator("ssid")
+    @classmethod
+    def strip_ssid(cls, v: str) -> str:
+        cleaned = v.strip()
+        if not cleaned:
+            raise ValueError("SSID must be non-empty")
+        return cleaned

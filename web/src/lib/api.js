@@ -51,6 +51,24 @@
  */
 
 /**
+ * @typedef {Object} WifiStatus
+ * @property {'mock' | 'nmcli'} backend
+ * @property {boolean} connected
+ * @property {string | null} [ssid]
+ * @property {string[]} ips
+ * @property {string | null} [interface]
+ * @property {string} [detail]
+ */
+
+/**
+ * @typedef {Object} WifiNetwork
+ * @property {string} ssid
+ * @property {boolean} saved
+ * @property {boolean} active
+ * @property {boolean} has_password
+ */
+
+/**
  * @param {string} path
  * @param {RequestInit} [options]
  */
@@ -124,6 +142,48 @@ export function setActiveSource(id) {
 	return api('/api/sources/active', {
 		method: 'PUT',
 		body: JSON.stringify({ id })
+	});
+}
+
+/** @returns {Promise<WifiStatus>} */
+export function getWifiStatus() {
+	return api('/api/wifi');
+}
+
+/** @returns {Promise<WifiNetwork[]>} */
+export function listWifiNetworks() {
+	return api('/api/wifi/networks');
+}
+
+/**
+ * @param {{ ssid: string, password?: string }} body
+ * @returns {Promise<WifiNetwork>}
+ */
+export function saveWifiNetwork(body) {
+	return api('/api/wifi/networks', {
+		method: 'POST',
+		body: JSON.stringify(body)
+	});
+}
+
+/**
+ * @param {{ ssid: string, password?: string }} body
+ * @returns {Promise<WifiStatus>}
+ */
+export function connectWifi(body) {
+	return api('/api/wifi/connect', {
+		method: 'POST',
+		body: JSON.stringify(body)
+	});
+}
+
+/**
+ * @param {string} ssid
+ * @returns {Promise<null>}
+ */
+export function forgetWifiNetwork(ssid) {
+	return api(`/api/wifi/networks/${encodeURIComponent(ssid)}`, {
+		method: 'DELETE'
 	});
 }
 

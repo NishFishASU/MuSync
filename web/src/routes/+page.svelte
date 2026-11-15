@@ -1,13 +1,18 @@
 <script>
 	import { onMount } from 'svelte';
 	import {
+		connectWifi,
 		fmtMs,
+		forgetWifiNetwork,
 		getHealth,
 		getTransport,
+		getWifiStatus,
 		listDevices,
 		listSources,
+		listWifiNetworks,
 		patchDevice,
 		putTransport,
+		saveWifiNetwork,
 		setActiveSource
 	} from '$lib/api.js';
 
@@ -19,23 +24,38 @@
 	let transport = $state(null);
 	/** @type {import('$lib/api.js').Health | null} */
 	let health = $state(null);
+	/** @type {import('$lib/api.js').WifiStatus | null} */
+	let wifi = $state(null);
+	/** @type {import('$lib/api.js').WifiNetwork[]} */
+	let wifiNetworks = $state([]);
 	/** @type {string | null} */
 	let selectedId = $state(null);
 	let scrubbing = $state(false);
 	let scrubValue = $state(0);
 	let apiError = $state('');
+	let wifiSsid = $state('');
+	let wifiPassword = $state('');
+	let wifiBusy = $state(false);
+	let wifiMessage = $state('');
 
 	/** @type {Record<string, ReturnType<typeof setTimeout>>} */
 	const patchTimers = {};
 
 	const selected = $derived(devices.find((d) => d.id === selectedId) ?? null);
 	const playing = $derived(transport?.state === 'playing');
+	const wifiIpLabel = $derived(wifi?.ips?.length ? wifi.ips.join(', ') : '—');
 	const healthLabel = $derived.by(() => {
 		if (apiError) return 'API offline';
 		if (!health) return '…';
 		const label = health.backend === 'mock' ? 'mock' : 'pipewire';
 		return `${label} · ${health.enabled_count}/${health.sink_count} sinks`;
 	});
+
+	async function refreshWifi() {
+		const [w, nets] = await Promise.all([getWifiStatus(), listWifiNetworks()]);
+		wifi = w;
+		wifiNetworks = nets;
+	}
 
 	async function refresh() {
 		const [h, d, t, s] = await Promise.all([
@@ -51,6 +71,65 @@
 		apiError = '';
 		if (!selectedId && d.length) selectedId = d[0].id;
 		if (!scrubbing) scrubValue = t.position_ms || 0;
+		await refreshWifi().catch(() => {});
+	}
+
+	async function onSaveWifi() {
+		const ssid = wifiSsid.trim();
+		if (!ssid || wifiBusy) return;
+		wifiBusy = true;
+		wifiMessage = '';
+		try {
+			const body = { ssid };
+			if (wifiPassword) body.password = wifiPassword;
+			await saveWifiNetwork(body);
+			wifiPassword = '';
+			wifiMessage = `Saved ${ssid}`;
+			await refreshWifi();
+		} catch (err) {
+			wifiMessage = err instanceof Error ? err.message : String(err);
+		} finally {
+			wifiBusy = false;
+		}
+	}
+
+	async function onJoinWifi(ssid = wifiSsid.trim()) {
+		const target = (ssid || '').trim();
+		if (!target || wifiBusy) return;
+		wifiBusy = true;
+		wifiMessage = '';
+		try {
+			const body = { ssid: target };
+			if (wifiPassword && target === wifiSsid.trim()) body.password = wifiPassword;
+			const status = await connectWifi(body);
+			wifi = status;
+			wifiPassword = '';
+			const ips = status.ips?.length ? status.ips.join(', ') : '—';
+			wifiMessage = status.connected
+				? `Joined ${status.ssid || target} · IP ${ips}`
+				: `Join requested for ${target}`;
+			await refreshWifi();
+		} catch (err) {
+			wifiMessage = err instanceof Error ? err.message : String(err);
+		} finally {
+			wifiBusy = false;
+		}
+	}
+
+	/** @param {string} ssid */
+	async function onForgetWifi(ssid) {
+		if (wifiBusy) return;
+		wifiBusy = true;
+		wifiMessage = '';
+		try {
+			await forgetWifiNetwork(ssid);
+			wifiMessage = `Forgot ${ssid}`;
+			await refreshWifi();
+		} catch (err) {
+			wifiMessage = err instanceof Error ? err.message : String(err);
+		} finally {
+			wifiBusy = false;
+		}
 	}
 
 	/**
@@ -317,6 +396,112 @@
 						</span>
 					</button>
 				</li>
+			{/each}
+		</ul>
+	</section>
+
+	<section class="panel wifi-panel" aria-labelledby="wifi-heading">
+		<div class="panel-head">
+			<h2 id="wifi-heading">Wi-Fi</h2>
+			<p class="hint">Join a phone hotspot without SSH · IP for SPP</p>
+		</div>
+
+		<div class="wifi-status" data-ok={wifi ? String(Boolean(wifi.connected)) : undefined}>
+			<p class="wifi-line">
+				<span class="wifi-label">Now</span>
+				{#if wifi?.connected}
+					{wifi.ssid || 'associated'} · {wifi.interface || 'wlan?'} · {wifi.backend}
+				{:else}
+					not associated · {wifi?.backend || '…'}
+				{/if}
+			</p>
+			<p class="wifi-line">
+				<span class="wifi-label">IP</span>
+				<code class="wifi-ip">{wifiIpLabel}</code>
+			</p>
+			{#if wifi?.detail}
+				<p class="wifi-detail">{wifi.detail}</p>
+			{/if}
+		</div>
+
+		<form
+			class="wifi-form"
+			onsubmit={(e) => {
+				e.preventDefault();
+				onJoinWifi();
+			}}
+		>
+			<label class="field">
+				<span>SSID</span>
+				<input
+					type="text"
+					name="ssid"
+					autocomplete="off"
+					maxlength="32"
+					placeholder="Phone hotspot name"
+					bind:value={wifiSsid}
+					disabled={wifiBusy}
+				/>
+			</label>
+			<label class="field">
+				<span>Password</span>
+				<input
+					type="password"
+					name="password"
+					autocomplete="new-password"
+					maxlength="63"
+					placeholder="Leave blank if already saved"
+					bind:value={wifiPassword}
+					disabled={wifiBusy}
+				/>
+			</label>
+			<div class="wifi-actions">
+				<button type="submit" class="btn" disabled={wifiBusy || !wifiSsid.trim()}>Join</button>
+				<button
+					type="button"
+					class="btn btn-ghost"
+					disabled={wifiBusy || !wifiSsid.trim()}
+					onclick={() => onSaveWifi()}
+				>
+					Save only
+				</button>
+			</div>
+		</form>
+
+		{#if wifiMessage}
+			<p class="wifi-message" role="status">{wifiMessage}</p>
+		{/if}
+
+		<ul class="wifi-list">
+			{#each wifiNetworks as n (n.ssid)}
+				<li class="wifi-row">
+					<span>
+						<span class="device-title">{n.ssid}</span>
+						<span class="device-sub">
+							{n.active ? 'active' : 'saved'}{n.has_password ? ' · key stored' : ' · open / no key'}
+						</span>
+					</span>
+					<span class="wifi-row-actions">
+						<button
+							type="button"
+							class="btn btn-small"
+							disabled={wifiBusy || n.active}
+							onclick={() => onJoinWifi(n.ssid)}
+						>
+							Join
+						</button>
+						<button
+							type="button"
+							class="btn btn-ghost btn-small"
+							disabled={wifiBusy}
+							onclick={() => onForgetWifi(n.ssid)}
+						>
+							Forget
+						</button>
+					</span>
+				</li>
+			{:else}
+				<li class="wifi-empty">No saved networks yet</li>
 			{/each}
 		</ul>
 	</section>
