@@ -38,11 +38,14 @@ Force plan-only: `MUSYNC_PW_DRY_RUN=1`.
 1. Install packages (see README).
 2. Build the SvelteKit UI FastAPI serves: `./scripts/build_web.sh` → `web/build/`  
    (or copy a laptop-built `web/build/` onto the Pi — Node is not required at runtime).
-3. `cp config/devices.pi-2sink.example.yaml config/devices.yaml`
-4. `./scripts/pair_bt600.sh hci0` then `./scripts/pair_bt600.sh hci1`
-5. Write real MACs into `devices.yaml`
-6. `./scripts/run_pi.sh` (auto-builds UI if `web/build/index.html` is missing and npm exists)
-7. UI: enable both sinks, nudge `delay_ms` until slap-back disappears, Play
+3. Stabilize BT600 HCI **before** multi-sink demos — see [bt600-realtek.md](./bt600-realtek.md)  
+   (`0b05:1d70` / RTL8761: firmware, USB2, powered hub, `reg16 -110` disconnect loops).  
+   Onboard BT → Qudelix local playback is a useful software smoke test.
+4. `cp config/devices.pi-2sink.example.yaml config/devices.yaml`
+5. `./scripts/pair_bt600.sh hci0` then `./scripts/pair_bt600.sh hci1`
+6. Write real MACs into `devices.yaml`
+7. `./scripts/run_pi.sh` (auto-builds UI if `web/build/index.html` is missing and npm exists)
+8. UI: enable both sinks, nudge `delay_ms` until slap-back disappears, Play
 
 Scale to 4 then 6 by appending sinks (unique `id` / `mac` / `hci`) — same software path.
 
