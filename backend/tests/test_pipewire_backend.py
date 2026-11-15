@@ -72,13 +72,53 @@ Audio
     assert backend.get_device("sink-1").connected is True
 
 
-def test_patch_delay_replans(backend: PipeWireBackend) -> None:
+def test_patch_delay_replans(
+    backend: PipeWireBackend, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    backend._tools["pactl"] = "/usr/bin/pactl"
+    backend._tools["wpctl"] = "/usr/bin/wpctl"
+    backend._pw_node_ids["sink-2"] = "49"
+    backend._pw_node_names["sink-2"] = "bluez_output.AA_BB_CC_DD_EE_02.1"
     updated = backend.patch_device("sink-2", DevicePatch(delay_ms=120))
     assert updated.delay_ms == 120
     plan = backend._last_plan
     assert plan is not None
     link = next(l for l in plan.links if l.device_id == "sink-2")
     assert link.delay_ms == 120
+    # Per-sink loopback command carries this sink's latency only.
+    assert any(
+        any(a.startswith("latency_msec=120") for a in cmd) for cmd in link.commands
+    )
+    assert any(
+        c[:3] == ["/usr/bin/wpctl", "set-volume", "49"] for c in link.commands
+    )
+
+
+def test_patch_bt_volume_applies_wpctl_on_that_sink(
+    backend: PipeWireBackend, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Volume PATCH is per bluez node — not a global feeder gain."""
+    monkeypatch.setattr(backend, "_env_dry_run", lambda: False)
+    backend._tools["wpctl"] = "/usr/bin/wpctl"
+    backend._pw_node_ids["sink-1"] = "48"
+    backend._pw_node_ids["sink-2"] = "49"
+    monkeypatch.setattr(backend, "refresh_sink_map", lambda: dict(backend._pw_node_ids))
+
+    calls: list[list[str]] = []
+
+    def fake_exec(args: list[str]):
+        calls.append(list(args))
+        from types import SimpleNamespace
+
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(backend, "_exec_soft", fake_exec)
+    updated = backend.patch_device("sink-2", DevicePatch(volume=0.35))
+    assert updated.volume == 0.35
+    vol_calls = [c for c in calls if c[:2] == ["/usr/bin/wpctl", "set-volume"]]
+    assert vol_calls == [["/usr/bin/wpctl", "set-volume", "49", "0.350"]]
+    # Other sink untouched.
+    assert not any(c[2] == "48" for c in vol_calls)
 
 
 def test_disable_sink_skips_link(backend: PipeWireBackend) -> None:
