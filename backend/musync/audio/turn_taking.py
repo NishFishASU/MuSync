@@ -58,6 +58,38 @@ def eligible_turn_devices(
     return ready
 
 
+def eligible_detail(
+    devices: list[Device],
+    eligible: list[Device],
+    *,
+    assignments: Optional[dict[str, str]] = None,
+) -> str:
+    """Short Queue-tab explanation of who can take a turn (or why none)."""
+    if eligible:
+        return "Ready: " + ", ".join(d.name for d in eligible)
+    enabled = [d for d in devices if d.enabled]
+    if not enabled:
+        return "No eligible sinks — enable a BT / SPP / Cast output on Outputs"
+    assigned_ids = {
+        device_id
+        for device_id, profile_id in (assignments or {}).items()
+        if profile_id
+    }
+    waiting: list[str] = []
+    for device in enabled:
+        if device_is_turn_ready(device):
+            if assigned_ids and device.id not in assigned_ids:
+                waiting.append(f"{device.name} (no profile)")
+            continue
+        if device.kind == DeviceKind.BLUETOOTH:
+            waiting.append(f"{device.name} (BT not connected)")
+        else:
+            waiting.append(f"{device.name} (not armed)")
+    if waiting:
+        return "No ready sinks — " + "; ".join(waiting)
+    return "No eligible sinks — connect BT or arm SPP/Cast"
+
+
 def next_turn_device_id(
     eligible_ids: list[str],
     current_id: Optional[str],

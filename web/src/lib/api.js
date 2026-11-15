@@ -7,13 +7,13 @@
 /**
  * SPA poll cadence (ms) — cuts idle/hidden API chatter vs prior fixed 1 Hz × 2.
  * Playing: transport 400ms, now-playing 1.5s (snappier Play→UI; client still ticks scrub).
- * Idle: transport 3s, now-playing 6s → ~0.5 req/s.
- * Hidden tab: pause until visible (0 req/s).
+ * Idle: transport 4s, now-playing 8s → ~0.375 req/s (MDAS-70 light trim).
+ * Hidden tab: pause until visible (0 req/s) via Page Visibility API.
  */
 export const SPA_POLL_TRANSPORT_PLAYING_MS = 400;
-export const SPA_POLL_TRANSPORT_IDLE_MS = 3000;
+export const SPA_POLL_TRANSPORT_IDLE_MS = 4000;
 export const SPA_POLL_NOW_PLAYING_PLAYING_MS = 1500;
-export const SPA_POLL_NOW_PLAYING_IDLE_MS = 6000;
+export const SPA_POLL_NOW_PLAYING_IDLE_MS = 8000;
 
 /**
  * @param {{ playing?: boolean, hidden?: boolean }} opts
@@ -273,6 +273,8 @@ export function spaPollRequestsPerSecond(cadence) {
  * @property {boolean} turn_taking
  * @property {string | null} [turn_device_id]
  * @property {string[]} [turn_order]
+ * @property {string[]} [turn_order_labels]
+ * @property {string} [eligible_detail]
  * @property {string} [rotation_note]
  */
 

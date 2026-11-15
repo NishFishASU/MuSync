@@ -40,10 +40,10 @@ wpctl status
 pactl list sources short | grep -i bluez
 ```
 
-6. MuSync UI → **Phone / PC hosts** → **Refresh live inputs** → **Use as input** on the S21 FE row (binds `bt_a2dp` + endpoint).
-7. Song queue → **+ Live input** (or set a row’s type to Live input + that host) → **Play**.
+6. MuSync UI → **Phone / PC hosts** → **Refresh live inputs** → phone A2DP auto-binds and **auto-queues** a `Live · {name}` row (claims pass-through into the hub feeder when the hub is idle).
+7. Or Song queue → **+ Device** / **+ Live** → **Play** if you want an explicit row without Refresh.
 8. Enabled Qudelix / USB HCI / SPP sinks receive the phone audio from the same feeder fan-out.
-9. **AVRCP on Qudelix (output):** play/pause/skip control **hub transport** (mute/unmute capture into the feeder, skip queue when applicable). That works when the phone track is the active hub **live input**. It does **not** remote-control the phone Files app / Spotify / YouTube when those apps are playing only on the phone and never enter MuSync — Android/iOS do not give the Pi that OS-level transport.
+9. **AVRCP on Qudelix (output):** play/pause/skip control **hub transport** (mute/unmute capture into the feeder, skip queue when applicable). Works when the phone track is the active hub **live input** (auto-queued or manual). Play also adopts a live session if the current cue is unavailable. It does **not** remote-control the phone Files app / Spotify / YouTube when those apps are playing only on the phone and never enter MuSync — Android/iOS do not give the Pi that OS-level transport.
 
 Manual loopback (debug without UI):
 

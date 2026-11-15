@@ -59,6 +59,7 @@ from .cast import DEFAULT_CAST_DELAY_MS, mock_nest_mini
 from .host_player import HostSpeakerPlayer
 from .turn_taking import (
     ROTATION_NOTE,
+    eligible_detail,
     eligible_turn_devices,
     mute_targets_for_turn,
     next_turn_device_id,
@@ -274,6 +275,8 @@ class MockAudioBackend(AudioBackend):
         )
         # Solo the first eligible sink when turn-taking starts (fan-out until then).
         self._apply_turn_policy(rotate=False)
+        # Seed Live · rows for mock live hosts (no autoplay — keep local demo active).
+        self._session.ensure_live_sessions(activate_idle=False)
         self._avrcp.update_targets(
             mac_by_device={
                 d.id: d.mac
@@ -774,6 +777,7 @@ class MockAudioBackend(AudioBackend):
                 devices, assignments=self._turn_assignments
             )
             order = [d.id for d in eligible]
+            labels = [d.name for d in eligible]
             if self._turn_taking and self._turn_device_id not in order and order:
                 self._turn_device_id = order[0]
             return QueueSettings(
@@ -781,6 +785,10 @@ class MockAudioBackend(AudioBackend):
                 turn_taking=self._turn_taking,
                 turn_device_id=self._turn_device_id if self._turn_taking else None,
                 turn_order=order,
+                turn_order_labels=labels,
+                eligible_detail=eligible_detail(
+                    devices, eligible, assignments=self._turn_assignments
+                ),
                 rotation_note=ROTATION_NOTE,
             )
 
@@ -827,17 +835,39 @@ class MockAudioBackend(AudioBackend):
         self._apply_turn_policy(rotate=False)
         return transport
 
+    def _sync_live_sessions(
+        self, *, autoplay: bool = True, force_activate: bool = False
+    ) -> None:
+        """Queue a Live · host row for every live capture; autoplay when idle."""
+        _touched, play_id = self._session.ensure_live_sessions(
+            activate_idle=autoplay,
+            force_activate=force_activate,
+        )
+        if (
+            (autoplay or force_activate)
+            and play_id
+            and self.get_transport().state == TransportState.STOPPED
+        ):
+            try:
+                self.set_transport(TransportPut(state=TransportState.PLAYING))
+            except ValueError:
+                pass
+
     def list_inputs(self) -> list[InputHost]:
-        return self._inputs.list_hosts()
+        hosts = self._inputs.list_hosts()
+        self._sync_live_sessions(autoplay=False)
+        return hosts
 
     def add_input(self, body: InputHostCreate) -> InputHost:
         host = self._inputs.add_host(body)
         self._session.refresh_live_availability()
+        self._sync_live_sessions(autoplay=True)
         return host
 
     def patch_input(self, host_id: str, patch: InputHostPatch) -> InputHost:
         host = self._inputs.patch_host(host_id, patch)
         self._session.refresh_live_availability()
+        self._sync_live_sessions(autoplay=True)
         return host
 
     def remove_input(self, host_id: str) -> None:
@@ -904,6 +934,7 @@ class MockAudioBackend(AudioBackend):
                 kind=HostKind.OTHER,
                 keep_name_tokens=("airplay", "shairport"),
             )
+            # BT A2DP fixture is already live on mock seed — still refresh sessions.
             if auto_bound:
                 self._session.refresh_live_availability()
 
@@ -920,13 +951,15 @@ class MockAudioBackend(AudioBackend):
             auto_note = (
                 f"; auto-bound hosts={','.join(auto_bound)}" if auto_bound else ""
             )
-            return CaptureDiscoverResponse(
-                sources=sources,
-                detail=(
-                    "mock capture — Galaxy S21 FE + USB + HDMI + AirPlay fixtures"
-                    f"{auto_note}"
-                ),
-            )
+        # Outside lock: claim live into queue/now-playing (pass-through → hub).
+        self._sync_live_sessions(autoplay=True, force_activate=True)
+        return CaptureDiscoverResponse(
+            sources=sources,
+            detail=(
+                "mock capture — Galaxy S21 FE + USB + HDMI + AirPlay fixtures"
+                f"{auto_note}"
+            ),
+        )
 
     def get_now_playing(self):
         from ..nowplaying import apply_mock_sample_metadata, build_now_playing
@@ -974,10 +1007,34 @@ class MockAudioBackend(AudioBackend):
             connected_bt_ids=self._connected_bt_ids(),
         )
 
+    def _active_cue_playable(self) -> bool:
+        transport = self.get_transport()
+        if not transport.queue_item_id:
+            return False
+        try:
+            item = next(
+                q for q in self._session.list_queue() if q.id == transport.queue_item_id
+            )
+        except StopIteration:
+            return False
+        return bool(item.available)
+
+    def _play_hub_or_live(self):
+        """Play active cue; if unavailable, adopt a live capture session (AVRCP)."""
+        if self.get_transport().state == TransportState.PAUSED and self._active_cue_playable():
+            return self.set_transport(TransportPut(state=TransportState.PLAYING))
+        try:
+            if self._active_cue_playable():
+                return self.set_transport(TransportPut(state=TransportState.PLAYING))
+        except ValueError:
+            pass
+        self._sync_live_sessions(autoplay=True)
+        return self.set_transport(TransportPut(state=TransportState.PLAYING))
+
     def _handle_avrcp_action(
         self, action: AvrcpAction, *, device_id: Optional[str] = None
     ):
-        """Promote on Play + drive transport (all hub sources)."""
+        """Promote on Play + drive transport (all hub sources, including live)."""
         resolved = self._resolve_avrcp_device_id(device_id)
 
         def _promote_if_play() -> None:
@@ -986,7 +1043,7 @@ class MockAudioBackend(AudioBackend):
 
         if action == AvrcpAction.PLAY:
             _promote_if_play()
-            return self.set_transport(TransportPut(state=TransportState.PLAYING))
+            return self._play_hub_or_live()
         if action == AvrcpAction.PAUSE:
             return self.set_transport(TransportPut(state=TransportState.PAUSED))
         if action == AvrcpAction.STOP:
@@ -996,7 +1053,7 @@ class MockAudioBackend(AudioBackend):
             if current.state == TransportState.PLAYING:
                 return self.set_transport(TransportPut(state=TransportState.PAUSED))
             _promote_if_play()
-            return self.set_transport(TransportPut(state=TransportState.PLAYING))
+            return self._play_hub_or_live()
         if action == AvrcpAction.NEXT:
             return self._session.skip_relative(+1)
         if action == AvrcpAction.PREVIOUS:

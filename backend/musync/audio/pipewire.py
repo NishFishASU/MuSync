@@ -176,6 +176,7 @@ from .cast import (
 from .source_session import SourceSession
 from .turn_taking import (
     ROTATION_NOTE,
+    eligible_detail,
     eligible_turn_devices,
     mute_targets_for_turn,
     next_turn_device_id,
@@ -311,6 +312,8 @@ class PipeWireBackend(AudioBackend):
             self._feeder_ok = True
             # Bind Galaxy S21 / Laptop demo hosts to live bluez_input / USB when present.
             self._refresh_input_host_links()
+            # Queue Live · rows for already-live capture (no autoplay at boot).
+            self._session.ensure_live_sessions(activate_idle=False)
         except Exception as exc:  # noqa: BLE001 — never block API boot
             log.warning("Startup graph plan failed: %s", exc)
 
@@ -925,12 +928,59 @@ class PipeWireBackend(AudioBackend):
             connected_bt_ids=self._connected_bt_ids(),
         )
 
+    def _active_cue_playable(self) -> bool:
+        transport = self.get_transport()
+        if not transport.queue_item_id:
+            return False
+        try:
+            item = next(
+                q for q in self._session.list_queue() if q.id == transport.queue_item_id
+            )
+        except StopIteration:
+            return False
+        return bool(item.available)
+
+    def _sync_live_sessions(
+        self, *, autoplay: bool = True, force_activate: bool = False
+    ) -> None:
+        """Ensure Live · queue rows; optionally claim idle hub into capture play."""
+        _touched, play_id = self._session.ensure_live_sessions(
+            activate_idle=autoplay,
+            force_activate=force_activate,
+        )
+        if (
+            (autoplay or force_activate)
+            and play_id
+            and self.get_transport().state == TransportState.STOPPED
+        ):
+            try:
+                self.set_transport(TransportPut(state=TransportState.PLAYING))
+            except ValueError as exc:
+                log.debug("live session autoplay: %s", exc)
+
+    def _play_hub_or_live(self):
+        """Play active cue; adopt live capture when the cue is missing/unavailable."""
+        if (
+            self.get_transport().state == TransportState.PAUSED
+            and self._active_cue_playable()
+        ):
+            return self.set_transport(TransportPut(state=TransportState.PLAYING))
+        try:
+            if self._active_cue_playable():
+                return self.set_transport(TransportPut(state=TransportState.PLAYING))
+        except ValueError:
+            pass
+        try:
+            self._refresh_input_host_links()
+        except Exception as exc:  # noqa: BLE001
+            log.debug("AVRCP live refresh: %s", exc)
+        self._sync_live_sessions(autoplay=True, force_activate=True)
+        return self.set_transport(TransportPut(state=TransportState.PLAYING))
+
     def _handle_avrcp_action(
         self, action: AvrcpAction, *, device_id: Optional[str] = None
     ):
         """Promote on Play + drive transport via backend set_transport (all sources)."""
-        from ..models import TransportPut, TransportState
-
         resolved = self._resolve_avrcp_device_id(device_id)
 
         def _promote_if_play() -> None:
@@ -939,7 +989,7 @@ class PipeWireBackend(AudioBackend):
 
         if action == AvrcpAction.PLAY:
             _promote_if_play()
-            return self.set_transport(TransportPut(state=TransportState.PLAYING))
+            return self._play_hub_or_live()
         if action == AvrcpAction.PAUSE:
             return self.set_transport(TransportPut(state=TransportState.PAUSED))
         if action == AvrcpAction.STOP:
@@ -949,7 +999,7 @@ class PipeWireBackend(AudioBackend):
             if current.state == TransportState.PLAYING:
                 return self.set_transport(TransportPut(state=TransportState.PAUSED))
             _promote_if_play()
-            return self.set_transport(TransportPut(state=TransportState.PLAYING))
+            return self._play_hub_or_live()
         if action == AvrcpAction.NEXT:
             transport = self._session.skip_relative(+1)
             self._publish_avrcp_transport(transport)
@@ -2617,6 +2667,11 @@ class PipeWireBackend(AudioBackend):
             log.debug("BT auto-bind skipped: %s", exc)
 
         self._session.refresh_live_availability()
+        # Auto-queue Live · rows when capture appears (no force — keep current cue).
+        try:
+            self._session.ensure_live_sessions(activate_idle=False)
+        except Exception as exc:  # noqa: BLE001
+            log.debug("ensure live sessions: %s", exc)
 
     # --- AudioBackend API ---
 
@@ -3213,21 +3268,47 @@ class PipeWireBackend(AudioBackend):
             self._turn_assignments = {
                 k: v for k, v in assignments.items() if v
             }
+        # SPA no longer polls listDevices every second — refresh BT connected
+        # flags here so Queue turn-order is not stuck empty after reconnect.
+        try:
+            self.refresh_sink_map()
+        except Exception as exc:  # noqa: BLE001
+            log.debug("queue settings sink map: %s", exc)
+        need_turn_apply = False
         with self._lock:
             devices = list(self._devices.values())
             eligible = eligible_turn_devices(
                 devices, assignments=self._turn_assignments
             )
             order = [d.id for d in eligible]
+            labels = [d.name for d in eligible]
             if self._turn_taking and self._turn_device_id not in order and order:
                 self._turn_device_id = order[0]
-            return QueueSettings(
+                need_turn_apply = True
+            settings = QueueSettings(
                 loop=self._session.get_loop(),
                 turn_taking=self._turn_taking,
                 turn_device_id=self._turn_device_id if self._turn_taking else None,
                 turn_order=order,
+                turn_order_labels=labels,
+                eligible_detail=eligible_detail(
+                    devices, eligible, assignments=self._turn_assignments
+                ),
                 rotation_note=ROTATION_NOTE,
             )
+        if need_turn_apply:
+            try:
+                self._apply_turn_policy(rotate=False)
+            except Exception as exc:  # noqa: BLE001
+                log.debug("queue settings turn apply: %s", exc)
+            settings = settings.model_copy(
+                update={
+                    "turn_device_id": self._turn_device_id
+                    if self._turn_taking
+                    else None
+                }
+            )
+        return settings
 
     def set_queue_settings(
         self,
@@ -3284,7 +3365,13 @@ class PipeWireBackend(AudioBackend):
                 self._refresh_input_host_links()
             except Exception as exc:  # noqa: BLE001
                 log.debug("Capture refresh failed: %s", exc)
-            return self._inputs.list_hosts()
+            hosts = self._inputs.list_hosts()
+        # Rows only — do not steal the active cue on every Inputs poll.
+        try:
+            self._session.ensure_live_sessions(activate_idle=False)
+        except Exception as exc:  # noqa: BLE001
+            log.debug("list_inputs live sessions: %s", exc)
+        return hosts
 
     def add_input(self, body: InputHostCreate) -> InputHost:
         with self._lock:
@@ -3294,7 +3381,8 @@ class PipeWireBackend(AudioBackend):
                 host = self._inputs.get_host(host.id)
             except Exception as exc:  # noqa: BLE001
                 log.debug("Capture refresh after add failed: %s", exc)
-            return host
+        self._sync_live_sessions(autoplay=True, force_activate=True)
+        return host
 
     def patch_input(self, host_id: str, patch: InputHostPatch) -> InputHost:
         with self._lock:
@@ -3306,7 +3394,8 @@ class PipeWireBackend(AudioBackend):
                 and self._session.get_transport().state == TransportState.PLAYING
             ):
                 self._start_player_process()
-            return host
+        self._sync_live_sessions(autoplay=True, force_activate=False)
+        return host
 
     def remove_input(self, host_id: str) -> None:
         with self._lock:
@@ -3325,7 +3414,7 @@ class PipeWireBackend(AudioBackend):
             )
             remotes_by_mac = {normalize_mac(r.mac): r for r in remotes if r.mac}
 
-            # Auto-bind HDMI / USB / AirPlay before building the response rows.
+            # Auto-bind HDMI / USB / AirPlay / BT A2DP before building response rows.
             auto_ids: list[str] = []
             try:
                 auto_ids.extend(self._auto_bind_hdmi_hosts(candidates))
@@ -3339,6 +3428,10 @@ class PipeWireBackend(AudioBackend):
                 auto_ids.extend(self._auto_bind_airplay_hosts(candidates))
             except Exception as exc:  # noqa: BLE001
                 log.debug("AirPlay auto-bind on discover failed: %s", exc)
+            try:
+                auto_ids.extend(self._auto_bind_bt_hosts(candidates))
+            except Exception as exc:  # noqa: BLE001
+                log.debug("BT A2DP auto-bind on discover failed: %s", exc)
 
             configured_by_name = {
                 h.name.strip().lower(): h.id for h in self._inputs.list_hosts()
@@ -3408,10 +3501,19 @@ class PipeWireBackend(AudioBackend):
             auto_note = (
                 f"; auto-bound hosts={','.join(auto_ids)}" if auto_ids else ""
             )
-            return CaptureDiscoverResponse(
+            response = CaptureDiscoverResponse(
                 sources=refreshed,
                 detail=f"{detail}; {bt_detail}{auto_note}",
             )
+        # Claim live capture into queue/now-playing so AVRCP has a hub target
+        # (phone A2DP pass-through without a manual +Device row).
+        try:
+            self._sync_live_sessions(
+                autoplay=True, force_activate=bool(auto_ids)
+            )
+        except Exception as exc:  # noqa: BLE001
+            log.debug("discover live session sync: %s", exc)
+        return response
 
     def get_now_playing(self):
         from ..nowplaying import build_now_playing
