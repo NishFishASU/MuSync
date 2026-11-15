@@ -19,11 +19,12 @@ from ..models import (
     TransportPut,
     TransportState,
 )
+from .input_registry import CAPTURE_NOTES, InputRegistry
 
 STUB_NOTES: dict[SourceType, str] = {
     SourceType.SPOTIFY: "Stub — Spotify feeder not wired yet; sink graph stays up",
     SourceType.APPLE: "Stub — Apple Music feeder not wired yet; sink graph stays up",
-    SourceType.INPUT: "Stub — phone/PC input not wired yet; sink graph stays up",
+    SourceType.INPUT: "Stub — phone/PC live input not wired yet; sink graph stays up",
 }
 
 
@@ -49,11 +50,13 @@ class SourceSession:
     def __init__(
         self,
         *,
+        inputs: Optional[InputRegistry] = None,
         on_feeder_stop: Optional[Callable[[], None]] = None,
         on_feeder_start: Optional[Callable[[], None]] = None,
         lock: Optional[threading.RLock] = None,
     ) -> None:
         self._lock = lock or threading.RLock()
+        self._inputs = inputs or InputRegistry(lock=self._lock)
         self._on_feeder_stop = on_feeder_stop
         self._on_feeder_start = on_feeder_start
         self._id_seq = itertools.count(1)
@@ -69,10 +72,15 @@ class SourceSession:
             source_id=active.source_id if active else None,
             queue_item_id=active.id if active else None,
             source_type=active.source_type if active else None,
+            input_id=active.input_id if active else None,
             title=active.title if active else None,
         )
         self._play_started_wall: Optional[float] = None
         self._play_started_pos: int = 0
+
+    @property
+    def inputs(self) -> InputRegistry:
+        return self._inputs
 
     def _next_queue_id(self) -> str:
         return f"q-{next(self._id_seq)}"
@@ -96,17 +104,20 @@ class SourceSession:
             for src in local:
                 if src.locator is None and src.path:
                     src.locator = src.path
-        return local + list(PLACEHOLDER_SOURCES)
+        # Hub stream stubs + per-host contributions (local/spotify/apple/live).
+        return local + list(PLACEHOLDER_SOURCES) + self._inputs.catalog_sources()
 
     def _seed_queue_from_locals(self) -> None:
-        """One queue item per available local catalog entry (song-level switching)."""
+        """One queue item per available hub-local catalog entry."""
         for src in self._sources:
-            if src.type != SourceType.LOCAL or not src.available:
+            # Only seed playable hub library rows (not per-host local stubs).
+            if src.type != SourceType.LOCAL or not src.available or src.input_id:
                 continue
             self._queue.append(self._item_from_source(src))
 
     def _item_from_source(self, src: Source) -> QueueItem:
-        playable = is_playable(src.type, path=src.path)
+        playable = is_playable(src.type, path=src.path) and src.available and not src.input_id
+        note = None if playable else (src.note or stub_note(src.type))
         return QueueItem(
             id=self._next_queue_id(),
             title=src.title,
@@ -114,10 +125,32 @@ class SourceSession:
             locator=src.locator or src.path or src.id,
             source_id=src.id,
             path=src.path,
-            available=playable and src.available,
-            note=None if playable else stub_note(src.type),
+            input_id=src.input_id,
+            available=playable,
+            note=note,
             duration_ms=src.duration_ms,
         )
+
+    def _require_input(self, input_id: Optional[str]) -> None:
+        if input_id:
+            self._inputs.get_host(input_id)
+
+    def _note_for_host_item(
+        self, source_type: SourceType, input_id: Optional[str]
+    ) -> Optional[str]:
+        if not input_id:
+            return stub_note(source_type)
+        host = self._inputs.get_host(input_id)
+        path_note = CAPTURE_NOTES[host.capture_path]
+        if source_type == SourceType.INPUT:
+            return f"{host.name} live via {host.capture_path.value} — {path_note}"
+        if source_type == SourceType.SPOTIFY:
+            return f"{host.name} Spotify session — {path_note}"
+        if source_type == SourceType.APPLE:
+            return f"{host.name} Apple Music session — {path_note}"
+        if source_type == SourceType.LOCAL:
+            return f"{host.name} local files — upload stub; {path_note}"
+        return path_note
 
     def _first_playable_queue_item(self) -> Optional[QueueItem]:
         for item in self._queue:
@@ -138,15 +171,31 @@ class SourceSession:
         raise KeyError(f"Unknown queue item: {item_id}")
 
     def _refresh_catalog(self) -> None:
-        placeholders = [s for s in self._sources if s.type != SourceType.LOCAL]
         local = discover_local_sources()
         if not local:
-            local = [s for s in self._sources if s.type == SourceType.LOCAL]
+            local = [
+                s
+                for s in self._sources
+                if s.type == SourceType.LOCAL and not s.input_id
+            ]
+            if not local:
+                local = [
+                    Source(
+                        id="local:demo/sample-tone",
+                        title="Sample Tone (demo)",
+                        type=SourceType.LOCAL,
+                        path=None,
+                        locator="demo/sample-tone",
+                        available=True,
+                        duration_ms=180_000,
+                        note="Virtual demo track — drop files under media/ for real paths",
+                    )
+                ]
         else:
             for src in local:
                 if src.locator is None and src.path:
                     src.locator = src.path
-        self._sources = local + placeholders
+        self._sources = local + list(PLACEHOLDER_SOURCES) + self._inputs.catalog_sources()
 
     def _tick_position(self) -> None:
         if self._transport.state != TransportState.PLAYING:
@@ -170,6 +219,7 @@ class SourceSession:
         self._transport.queue_item_id = item.id
         self._transport.source_id = item.source_id
         self._transport.source_type = item.source_type
+        self._transport.input_id = item.input_id
         self._transport.title = item.title
         self._transport.duration_ms = item.duration_ms or 0
         if reset_position:
@@ -219,6 +269,7 @@ class SourceSession:
         locator = body.locator
         path = body.path
         source_id = body.source_id
+        input_id = body.input_id
         duration_ms = body.duration_ms
         type_explicit = "source_type" in body.model_fields_set
 
@@ -235,30 +286,51 @@ class SourceSession:
                 source_id = src.id
             if duration_ms is None:
                 duration_ms = src.duration_ms
+            if input_id is None:
+                input_id = src.input_id
+
+        # Live input / host-bound streaming must name a registered phone/PC.
+        if source_type == SourceType.INPUT and not input_id:
+            hosts = self._inputs.list_hosts()
+            if not hosts:
+                raise ValueError("Register a phone/PC input host before selecting live input")
+            input_id = next((h.id for h in hosts if h.armed), hosts[0].id)
+
+        self._require_input(input_id)
 
         if title is None:
             title = {
                 SourceType.LOCAL: "Local track",
                 SourceType.SPOTIFY: "Spotify track (stub)",
                 SourceType.APPLE: "Apple Music track (stub)",
-                SourceType.INPUT: "Input source (stub)",
+                SourceType.INPUT: "Live input (stub)",
             }[source_type]
 
         if locator is None:
-            locator = {
-                SourceType.LOCAL: path or "local:unset",
-                SourceType.SPOTIFY: "spotify:track:stub",
-                SourceType.APPLE: "apple:track:stub",
-                SourceType.INPUT: "input:1",
-            }[source_type]
+            if input_id and source_type == SourceType.INPUT:
+                host = self._inputs.get_host(input_id)
+                locator = f"input:{host.id}:{host.capture_path.value}"
+            else:
+                locator = {
+                    SourceType.LOCAL: path or "local:unset",
+                    SourceType.SPOTIFY: "spotify:track:stub",
+                    SourceType.APPLE: "apple:track:stub",
+                    SourceType.INPUT: "input:unset",
+                }[source_type]
 
-        playable = is_playable(source_type, path=path)
-        note = None if playable else stub_note(source_type)
+        # Hub-local files remain the only playable path; host contributions are stubs.
+        playable = (
+            is_playable(source_type, path=path)
+            and not input_id
+            and (path is not None or (source_id or "").startswith("local:demo"))
+        )
+        note = None if playable else self._note_for_host_item(source_type, input_id)
         if (
             source_type == SourceType.LOCAL
             and path is None
             and source_id
             and source_id.startswith("local:demo")
+            and not input_id
         ):
             playable = True
             note = "Virtual demo track"
@@ -270,6 +342,7 @@ class SourceSession:
             locator=locator,
             source_id=source_id,
             path=path,
+            input_id=input_id,
             available=playable,
             note=note,
             duration_ms=duration_ms if duration_ms is not None else (180_000 if playable else None),
@@ -290,28 +363,62 @@ class SourceSession:
                 data["locator"] = src.locator or src.path or src.id
             if "path" not in updates:
                 data["path"] = src.path
+            if "input_id" not in updates:
+                data["input_id"] = src.input_id
             if src.duration_ms is not None:
                 data["duration_ms"] = src.duration_ms
 
-        data.update({k: v for k, v in updates.items() if v is not None or k in {"locator", "path", "title"}})
+        data.update(
+            {
+                k: v
+                for k, v in updates.items()
+                if v is not None or k in {"locator", "path", "title", "input_id"}
+            }
+        )
 
         source_type = SourceType(data["source_type"])
+        input_id = data.get("input_id")
+        if source_type == SourceType.INPUT and not input_id:
+            hosts = self._inputs.list_hosts()
+            if not hosts:
+                raise ValueError("Register a phone/PC input host before selecting live input")
+            input_id = next((h.id for h in hosts if h.armed), hosts[0].id)
+            data["input_id"] = input_id
+
+        self._require_input(input_id)
+
         path = data.get("path")
-        playable = is_playable(source_type, path=path)
-        if source_type == SourceType.LOCAL and path is None and (data.get("source_id") or "").startswith("local:demo"):
+        playable = (
+            is_playable(source_type, path=path)
+            and not input_id
+            and (
+                path is not None
+                or (data.get("source_id") or "").startswith("local:demo")
+            )
+        )
+        if (
+            source_type == SourceType.LOCAL
+            and path is None
+            and (data.get("source_id") or "").startswith("local:demo")
+            and not input_id
+        ):
             playable = True
         data["available"] = playable
-        data["note"] = None if playable else stub_note(source_type)
-        if source_type != SourceType.LOCAL:
-            # Clear local path when switching away from local feeder.
+        data["note"] = None if playable else self._note_for_host_item(source_type, input_id)
+        if source_type != SourceType.LOCAL or input_id:
             if "path" not in updates:
                 data["path"] = None
             if "locator" not in updates or not data.get("locator"):
-                data["locator"] = {
-                    SourceType.SPOTIFY: "spotify:track:stub",
-                    SourceType.APPLE: "apple:track:stub",
-                    SourceType.INPUT: "input:1",
-                }.get(source_type, data.get("locator"))
+                if input_id and source_type == SourceType.INPUT:
+                    host = self._inputs.get_host(input_id)
+                    data["locator"] = f"input:{host.id}:{host.capture_path.value}"
+                else:
+                    data["locator"] = {
+                        SourceType.SPOTIFY: "spotify:track:stub",
+                        SourceType.APPLE: "apple:track:stub",
+                        SourceType.INPUT: "input:unset",
+                        SourceType.LOCAL: data.get("locator") or "local:host-stub",
+                    }.get(source_type, data.get("locator"))
 
         return QueueItem.model_validate(data)
 
@@ -381,9 +488,29 @@ class SourceSession:
                     self._transport.queue_item_id = None
                     self._transport.source_id = None
                     self._transport.source_type = None
+                    self._transport.input_id = None
                     self._transport.title = None
                     self._transport.duration_ms = 0
             del item  # noqa: F841 — clarify we looked it up
+
+    def clear_input_bindings(self, host_id: str) -> None:
+        """When a host is removed, detach queue rows that pointed at it."""
+        with self._lock:
+            for i, item in enumerate(self._queue):
+                if item.input_id != host_id:
+                    continue
+                updated = item.model_copy(
+                    update={
+                        "input_id": None,
+                        "available": False,
+                        "note": f"Host {host_id} removed — re-bind a phone/PC",
+                    }
+                )
+                if updated.source_type == SourceType.INPUT:
+                    updated.locator = "input:unset"
+                self._queue[i] = updated
+                if self._transport.queue_item_id == item.id:
+                    self._bind_transport_to_item(updated, reset_position=False)
 
     def set_active_queue_item(self, item_id: str) -> Transport:
         """Activate a queue item — swap feeder only; sinks stay linked."""
@@ -417,10 +544,6 @@ class SourceSession:
             existing = next((q for q in self._queue if q.source_id == source_id), None)
             if existing is None:
                 item = self._item_from_source(src)
-                # Stubs from catalog stay unavailable.
-                if src.type not in PLAYABLE_SOURCE_TYPES:
-                    item.available = False
-                    item.note = stub_note(src.type) or src.note
                 self._queue.append(item)
             else:
                 item = existing
@@ -458,9 +581,6 @@ class SourceSession:
                 existing = next((q for q in self._queue if q.source_id == body.source_id), None)
                 if existing is None:
                     item = self._item_from_source(src)
-                    if src.type not in PLAYABLE_SOURCE_TYPES:
-                        item.available = False
-                        item.note = stub_note(src.type) or src.note
                     self._queue.append(item)
                 else:
                     item = existing

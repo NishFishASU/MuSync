@@ -6,6 +6,8 @@
 
 /** @typedef {'stopped' | 'playing' | 'paused'} TransportState */
 /** @typedef {'local' | 'spotify' | 'apple' | 'input'} SourceType */
+/** @typedef {'bt_a2dp' | 'usb' | 'network'} CapturePath */
+/** @typedef {'phone' | 'pc' | 'other'} HostKind */
 
 /**
  * @typedef {Object} Device
@@ -30,6 +32,23 @@
  * @property {number} [duration_ms]
  * @property {string} [path]
  * @property {string} [locator]
+ * @property {string | null} [input_id]
+ */
+
+/**
+ * @typedef {Object} InputHost
+ * @property {string} id
+ * @property {string} name
+ * @property {HostKind} kind
+ * @property {CapturePath} capture_path
+ * @property {boolean} armed
+ * @property {boolean} connected
+ * @property {string | null} [endpoint]
+ * @property {boolean} offers_local
+ * @property {boolean} offers_spotify
+ * @property {boolean} offers_apple
+ * @property {boolean} offers_live_input
+ * @property {string | null} [note]
  */
 
 /**
@@ -40,6 +59,7 @@
  * @property {string | null} [locator]
  * @property {string | null} [source_id]
  * @property {string | null} [path]
+ * @property {string | null} [input_id]
  * @property {boolean} available
  * @property {string | null} [note]
  * @property {number | null} [duration_ms]
@@ -53,6 +73,7 @@
  * @property {string | null} [source_id]
  * @property {string | null} [queue_item_id]
  * @property {SourceType | null} [source_type]
+ * @property {string | null} [input_id]
  * @property {string | null} [title]
  */
 
@@ -68,6 +89,8 @@
  */
 
 export const SOURCE_TYPES = /** @type {const} */ (['local', 'spotify', 'apple', 'input']);
+export const CAPTURE_PATHS = /** @type {const} */ (['bt_a2dp', 'usb', 'network']);
+export const HOST_KINDS = /** @type {const} */ (['phone', 'pc', 'other']);
 
 /**
  * @param {string} path
@@ -152,7 +175,7 @@ export function listQueue() {
 }
 
 /**
- * @param {{ title?: string, source_type?: SourceType, locator?: string, source_id?: string, path?: string }} body
+ * @param {{ title?: string, source_type?: SourceType, locator?: string, source_id?: string, path?: string, input_id?: string }} body
  * @returns {Promise<QueueItem>}
  */
 export function addQueueItem(body) {
@@ -164,7 +187,7 @@ export function addQueueItem(body) {
 
 /**
  * @param {string} id
- * @param {{ title?: string, source_type?: SourceType, locator?: string, source_id?: string, path?: string }} patch
+ * @param {{ title?: string, source_type?: SourceType, locator?: string, source_id?: string, path?: string, input_id?: string | null }} patch
  * @returns {Promise<QueueItem>}
  */
 export function patchQueueItem(id, patch) {
@@ -172,6 +195,42 @@ export function patchQueueItem(id, patch) {
 		method: 'PATCH',
 		body: JSON.stringify(patch)
 	});
+}
+
+/** @returns {Promise<InputHost[]>} */
+export function listInputs() {
+	return api('/api/inputs');
+}
+
+/**
+ * @param {{ name: string, kind?: HostKind, capture_path?: CapturePath, armed?: boolean, connected?: boolean, endpoint?: string }} body
+ * @returns {Promise<InputHost>}
+ */
+export function addInput(body) {
+	return api('/api/inputs', {
+		method: 'POST',
+		body: JSON.stringify(body)
+	});
+}
+
+/**
+ * @param {string} id
+ * @param {Partial<InputHost>} patch
+ * @returns {Promise<InputHost>}
+ */
+export function patchInput(id, patch) {
+	return api(`/api/inputs/${encodeURIComponent(id)}`, {
+		method: 'PATCH',
+		body: JSON.stringify(patch)
+	});
+}
+
+/**
+ * @param {string} id
+ * @returns {Promise<null>}
+ */
+export function deleteInput(id) {
+	return api(`/api/inputs/${encodeURIComponent(id)}`, { method: 'DELETE' });
 }
 
 /**
@@ -211,8 +270,22 @@ export function sourceTypeLabel(type) {
 		case 'apple':
 			return 'Apple Music';
 		case 'input':
-			return 'Input';
+			return 'Live input';
 		default:
 			return type || '—';
+	}
+}
+
+/** @param {CapturePath | string | null | undefined} path */
+export function capturePathLabel(path) {
+	switch (path) {
+		case 'bt_a2dp':
+			return 'BT A2DP source';
+		case 'usb':
+			return 'USB audio';
+		case 'network':
+			return 'Network / upload';
+		default:
+			return path || '—';
 	}
 }

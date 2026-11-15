@@ -10,6 +10,9 @@ from ..models import (
     Device,
     DevicePatch,
     Health,
+    InputHost,
+    InputHostCreate,
+    InputHostPatch,
     QueueItem,
     QueueItemCreate,
     QueueItemPatch,
@@ -18,6 +21,7 @@ from ..models import (
     TransportPut,
 )
 from .base import AudioBackend
+from .input_registry import InputRegistry
 from .source_session import SourceSession
 
 
@@ -36,7 +40,8 @@ class MockAudioBackend(AudioBackend):
             raise ValueError("Mock backend supports at most 6 sinks")
 
         # Feeder callbacks are no-ops: mock has no PipeWire graph to preserve.
-        self._session = SourceSession(lock=self._lock)
+        self._inputs = InputRegistry(lock=self._lock)
+        self._session = SourceSession(inputs=self._inputs, lock=self._lock)
 
     def _persist(self) -> None:
         try:
@@ -98,6 +103,19 @@ class MockAudioBackend(AudioBackend):
 
     def set_active_queue_item(self, item_id: str) -> Transport:
         return self._session.set_active_queue_item(item_id)
+
+    def list_inputs(self) -> list[InputHost]:
+        return self._inputs.list_hosts()
+
+    def add_input(self, body: InputHostCreate) -> InputHost:
+        return self._inputs.add_host(body)
+
+    def patch_input(self, host_id: str, patch: InputHostPatch) -> InputHost:
+        return self._inputs.patch_host(host_id, patch)
+
+    def remove_input(self, host_id: str) -> None:
+        self._inputs.remove_host(host_id)
+        self._session.clear_input_bindings(host_id)
 
     def health(self) -> Health:
         with self._lock:
