@@ -588,6 +588,7 @@ def test_spotify_authorize_url_when_configured(tmp_path, monkeypatch) -> None:
     assert body["ok"] is True
     assert "accounts.spotify.com/authorize" in body["url"]
     assert "8081" in body["redirect_uri"]
+    assert body.get("loopback") is True
     login = client.get("/api/streaming/spotify/login", follow_redirects=False)
     assert login.status_code in {302, 307}
     loc = login.headers.get("location") or ""
@@ -602,6 +603,69 @@ def test_spotify_authorize_url_when_configured(tmp_path, monkeypatch) -> None:
     assert "user-read-private" in scope
     assert "streaming" in scope
     assert qs.get("show_dialog", [""])[0] == "true"
+
+
+def test_spotify_connect_loopback_ignores_musync_local_host(tmp_path, monkeypatch) -> None:
+    """Pi UI via musync.local must still OAuth with 127.0.0.1 (Spotify forbids .local)."""
+    from urllib.parse import parse_qs, urlparse
+
+    from musync.app import create_app
+
+    backend = _backend(tmp_path, monkeypatch)
+    monkeypatch.setenv("MUSYNC_SPOTIFY_CLIENT_ID", "cid")
+    monkeypatch.setenv("MUSYNC_SPOTIFY_CLIENT_SECRET", "csecret")
+    monkeypatch.delenv("MUSYNC_SPOTIFY_REDIRECT_URI", raising=False)
+    monkeypatch.setenv("MUSYNC_PORT", "8080")
+    reset_streaming_service()
+    client = TestClient(create_app(audio_backend=backend), base_url="http://musync.local:8080")
+
+    res = client.get("/api/streaming/spotify/authorize-url?loopback=1")
+    assert res.status_code == 200
+    body = res.json()
+    assert body["ok"] is True
+    assert body["redirect_uri"] == (
+        "http://127.0.0.1:8080/api/streaming/spotify/callback"
+    )
+    assert "musync.local" not in body["redirect_uri"]
+
+    # Without loopback, forbidden Host is still rewritten to loopback
+    res2 = client.get("/api/streaming/spotify/authorize-url?loopback=0")
+    assert res2.json()["redirect_uri"].startswith("http://127.0.0.1:")
+
+    status = client.get("/api/streaming").json()["spotify"]
+    assert status["oauth_loopback_uri"].startswith("http://127.0.0.1:")
+    assert "librespot" in (status.get("note") or "").lower() or status.get(
+        "librespot_available"
+    ) is not None
+    assert status.get("oauth_hint")
+
+    login = client.get("/api/streaming/spotify/login?loopback=1", follow_redirects=False)
+    qs = parse_qs(urlparse(login.headers["location"]).query)
+    assert qs["redirect_uri"][0] == (
+        "http://127.0.0.1:8080/api/streaming/spotify/callback"
+    )
+
+
+def test_forbidden_oauth_host_and_request_base_helpers(monkeypatch) -> None:
+    from musync.streaming.spotify import (
+        is_forbidden_oauth_host,
+        redirect_uri_for_request_base,
+    )
+
+    monkeypatch.setenv("MUSYNC_PORT", "8080")
+    assert is_forbidden_oauth_host("musync.local") is True
+    assert is_forbidden_oauth_host("localhost") is True
+    assert is_forbidden_oauth_host("127.0.0.1") is False
+    assert is_forbidden_oauth_host("192.168.1.5") is False
+    assert redirect_uri_for_request_base(
+        "http://musync.local:8080/", force_loopback=True
+    ) == ("http://127.0.0.1:8080/api/streaming/spotify/callback")
+    assert redirect_uri_for_request_base("http://musync.local:8080/") == (
+        "http://127.0.0.1:8080/api/streaming/spotify/callback"
+    )
+    assert redirect_uri_for_request_base("http://192.168.1.5:8080/") == (
+        "http://192.168.1.5:8080/api/streaming/spotify/callback"
+    )
 
 
 def test_spotify_callback_me_403_redirects_allowlist_error(tmp_path, monkeypatch) -> None:

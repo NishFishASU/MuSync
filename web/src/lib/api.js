@@ -330,6 +330,8 @@ export function spaPollRequestsPerSecond(cadence) {
  * @property {boolean | null} [ffmpeg_available]
  * @property {string | null} [feeder]
  * @property {string | null} [redirect_uri]
+ * @property {string | null} [oauth_loopback_uri]
+ * @property {string | null} [oauth_hint]
  * @property {boolean | null} [premium_required]
  * @property {string[]} [scopes]
  * @property {string[]} [missing_scopes]
@@ -800,15 +802,18 @@ export function saveStreamingCredentials(body) {
 	});
 }
 
-/** Spotify OAuth start — same-origin link redirect (not a password form). */
-export const SPOTIFY_LOGIN_HREF = '/api/streaming/spotify/login';
+/** Spotify OAuth start — loopback redirect (127.0.0.1) so Pi musync.local UI still works. */
+export const SPOTIFY_LOGIN_HREF = '/api/streaming/spotify/login?loopback=1';
 
 /**
  * Preflight Connect Spotify — returns authorize URL or a clear missing-env error.
- * @returns {Promise<{ ok: boolean, url?: string, error?: string, redirect_uri?: string }>}
+ * Defaults to loopback=1 (127.0.0.1 callback). Pass `{ loopback: false }` for LAN Host.
+ * @param {{ loopback?: boolean }} [opts]
+ * @returns {Promise<{ ok: boolean, url?: string, error?: string, redirect_uri?: string, loopback?: boolean }>}
  */
-export function fetchSpotifyAuthorizeUrl() {
-	return api('/api/streaming/spotify/authorize-url');
+export function fetchSpotifyAuthorizeUrl(opts = {}) {
+	const loopback = opts.loopback !== false;
+	return api(`/api/streaming/spotify/authorize-url?loopback=${loopback ? '1' : '0'}`);
 }
 
 /** @returns {Promise<StreamingStatus>} */

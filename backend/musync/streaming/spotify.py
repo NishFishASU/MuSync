@@ -236,9 +236,57 @@ def default_redirect_uri() -> str:
     return normalize_spotify_redirect_uri(None)
 
 
+def is_forbidden_oauth_host(host: Optional[str]) -> bool:
+    """Spotify rejects ``localhost`` and ``*.local`` (incl. musync.local) redirects."""
+    h = (host or "").strip().lower().rstrip(".")
+    if not h:
+        return True
+    if h == "localhost" or h.endswith(".localhost"):
+        return True
+    if h == "local" or h.endswith(".local"):
+        return True
+    return False
+
+
+def redirect_uri_for_request_base(
+    base_url: str, *, force_loopback: bool = False
+) -> str:
+    """Build callback from a request base URL, rewriting forbidden hosts to loopback.
+
+    ``force_loopback=True`` always returns ``http://127.0.0.1:<port>/…`` (Pi Connect
+    from a musync.local / LAN browser tab still OAuths via loopback — same as laptop mock).
+    """
+    if force_loopback:
+        return default_redirect_uri()
+    raw = (base_url or "").strip().rstrip("/")
+    if not raw:
+        return default_redirect_uri()
+    candidate = f"{raw}{_CALLBACK_PATH}"
+    parsed = urllib.parse.urlparse(candidate)
+    if is_forbidden_oauth_host(parsed.hostname):
+        # Keep listen port from request when present; else MUSYNC_PORT / 8080.
+        port = parsed.port or api_listen_port()
+        return normalize_spotify_redirect_uri(
+            f"http://127.0.0.1:{port}{_CALLBACK_PATH}", port=port
+        )
+    for bad in (":5173", ":4173"):
+        if bad in raw:
+            return default_redirect_uri()
+    return normalize_spotify_redirect_uri(candidate)
+
+
 def _redirect_uri() -> str:
     configured = (os.environ.get("MUSYNC_SPOTIFY_REDIRECT_URI") or "").strip()
-    return normalize_spotify_redirect_uri(configured or None)
+    if not configured:
+        return default_redirect_uri()
+    fixed = normalize_spotify_redirect_uri(configured)
+    parsed = urllib.parse.urlparse(fixed)
+    if is_forbidden_oauth_host(parsed.hostname):
+        # Env accidentally set to musync.local / localhost — force loopback.
+        return normalize_spotify_redirect_uri(
+            f"http://127.0.0.1:{parsed.port or api_listen_port()}{_CALLBACK_PATH}"
+        )
+    return fixed
 
 
 def _token_path() -> Path:
@@ -341,13 +389,22 @@ class SpotifyClient:
                 "Connected but token is missing scopes for search/playback — "
                 "Streaming → Disconnect → Connect Spotify (re-consent), then search on Queue"
             )
+        elif librespot and running:
+            note = (
+                f"librespot running as {_librespot_name()!r} → {_feeder_sink()} "
+                "(Premium Connect)"
+            )
         elif librespot:
-            note = "Spotify Premium + librespot Connect → Pulse sink musync_feeder"
+            note = (
+                f"librespot on PATH ({_librespot_name()!r}) — starts on Play → "
+                f"{_feeder_sink()}"
+            )
         else:
             note = (
-                "Connected/search OK — install librespot for hub PCM "
-                "(Play needs Connect device)"
+                "Connected/search OK on any host — Pi hub PCM needs librespot on PATH "
+                "(laptop mock can use MUSYNC_STREAMING_MOCK=1 without librespot)"
             )
+        loopback = default_redirect_uri()
         return {
             "provider": "spotify",
             "configured": configured,
@@ -358,6 +415,12 @@ class SpotifyClient:
             "librespot_name": _librespot_name(),
             "feeder": _feeder_sink(),
             "redirect_uri": _redirect_uri(),
+            "oauth_loopback_uri": loopback,
+            "oauth_hint": (
+                "Connect uses loopback "
+                f"{loopback} — open the callback on the Pi (or SSH -L) at 127.0.0.1; "
+                "musync.local is UI-only. Register that URI in the Spotify Dashboard."
+            ),
             "premium_required": True,
             "scopes": sorted(self.granted_scopes()),
             "missing_scopes": missing,

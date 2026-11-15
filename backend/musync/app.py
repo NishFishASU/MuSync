@@ -520,38 +520,55 @@ def api_streaming_credentials_put(
     return StreamingCredentialsStatus.model_validate(result)
 
 
+def _spotify_loopback_requested(request: Request) -> bool:
+    """UI Connect defaults to loopback; ``?loopback=0`` uses env / LAN Host when allowed."""
+    raw = (request.query_params.get("loopback") or "1").strip().lower()
+    return raw not in {"0", "false", "no", "off"}
+
+
 def _spotify_redirect_uri(request: Request) -> str:
     """Resolve the OAuth redirect URI Spotify will call back to.
 
-    Prefer explicit ``MUSYNC_SPOTIFY_REDIRECT_URI``. Otherwise derive from the
-    request Host (Pi LAN IP or 127.0.0.1:PORT). Never use the Vite port
-    (:5173) — callback must hit the FastAPI process (default :8080, or
-    ``MUSYNC_PORT`` e.g. :8081 on Windows mock).
+    - ``?loopback=1`` (default for Connect): always host ``127.0.0.1`` (never
+      ``musync.local`` / LAN). Port from loopback env redirect or ``MUSYNC_PORT``.
+    - ``?loopback=0``: ``MUSYNC_SPOTIFY_REDIRECT_URI`` if set (forbidden hosts
+      rewritten), else request Host (forbidden → loopback).
 
-    Always normalized — never returns ``http://host:/path`` (empty port).
+    Never returns ``http://host:/path`` (empty port).
     """
     import os
+    from urllib.parse import urlparse
 
-    from .streaming.spotify import normalize_spotify_redirect_uri
+    from .streaming.spotify import (
+        _CALLBACK_PATH,
+        default_redirect_uri,
+        normalize_spotify_redirect_uri,
+        redirect_uri_for_request_base,
+        _redirect_uri as env_redirect_uri,
+    )
 
-    configured = (os.environ.get("MUSYNC_SPOTIFY_REDIRECT_URI") or "").strip()
-    if configured:
-        return normalize_spotify_redirect_uri(configured)
-    base = str(request.base_url).rstrip("/")
-    # If a reverse-proxy / Vite forwarded Host is a frontend-only port, fall
-    # back to the API default so Spotify dashboard URI stays on the API port.
-    for bad in (":5173", ":4173"):
-        if bad in base:
-            return default_redirect_uri()
-    return normalize_spotify_redirect_uri(f"{base}/api/streaming/spotify/callback")
+    if _spotify_loopback_requested(request):
+        configured = (os.environ.get("MUSYNC_SPOTIFY_REDIRECT_URI") or "").strip()
+        if configured:
+            fixed = normalize_spotify_redirect_uri(configured)
+            host = (urlparse(fixed).hostname or "").lower()
+            port = urlparse(fixed).port
+            if host in {"127.0.0.1", "::1", "[::1]"} and port:
+                return f"http://127.0.0.1:{port}{_CALLBACK_PATH}"
+        return default_redirect_uri()
+
+    if (os.environ.get("MUSYNC_SPOTIFY_REDIRECT_URI") or "").strip():
+        return env_redirect_uri()
+    return redirect_uri_for_request_base(str(request.base_url))
 
 
 @app.get("/api/streaming/spotify/login")
 def api_spotify_login(request: Request) -> RedirectResponse:
     """Link-style OAuth: redirect browser to Spotify authorize → callback → tokens.
 
-    Not a password form. Client ID/secret come from env (``~/musync.env`` /
-    ``%USERPROFILE%\\musync.env`` on Windows).
+    Defaults to **loopback** redirect (``127.0.0.1``) so Pi + musync.local UI still
+    matches the Spotify Dashboard URI used on the laptop mock. Pass ``?loopback=0``
+    to derive from Host (Pi LAN IP) when that URI is registered in the Dashboard.
     """
     from urllib.parse import quote
 
@@ -577,10 +594,10 @@ def api_spotify_login(request: Request) -> RedirectResponse:
 def api_spotify_authorize_url(request: Request) -> dict[str, str | bool]:
     """JSON helper for the Connect button — returns authorize URL or a clear error.
 
-    Prefer the same-origin ``/login`` redirect; this exists so the SPA can
-    preflight credentials and show errors without a confusing blank navigation.
+    Defaults to loopback redirect (``?loopback=1``). Pass ``loopback=0`` for LAN Host.
     """
     svc = get_streaming_service().spotify
+    redirect_uri = _spotify_redirect_uri(request)
     if not svc.configured():
         return {
             "ok": False,
@@ -589,17 +606,23 @@ def api_spotify_authorize_url(request: Request) -> dict[str, str | bool]:
                 "MUSYNC_SPOTIFY_CLIENT_SECRET in ~/musync.env "
                 "(Windows: %USERPROFILE%\\musync.env), restart, then Connect again"
             ),
-            "redirect_uri": _spotify_redirect_uri(request),
+            "redirect_uri": redirect_uri,
+            "loopback": _spotify_loopback_requested(request),
         }
-    redirect_uri = _spotify_redirect_uri(request)
     try:
         return {
             "ok": True,
             "url": svc.auth_url(redirect_uri=redirect_uri),
             "redirect_uri": redirect_uri,
+            "loopback": _spotify_loopback_requested(request),
         }
     except ValueError as exc:
-        return {"ok": False, "error": str(exc), "redirect_uri": redirect_uri}
+        return {
+            "ok": False,
+            "error": str(exc),
+            "redirect_uri": redirect_uri,
+            "loopback": _spotify_loopback_requested(request),
+        }
 
 
 @app.get("/api/streaming/spotify/callback")

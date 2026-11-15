@@ -526,6 +526,8 @@ class StreamingProviderStatus(BaseModel):
     ffmpeg_available: Optional[bool] = None
     feeder: Optional[str] = None
     redirect_uri: Optional[str] = None
+    oauth_loopback_uri: Optional[str] = None
+    oauth_hint: Optional[str] = None
     premium_required: Optional[bool] = None
     scopes: list[str] = Field(default_factory=list)
     missing_scopes: list[str] = Field(default_factory=list)
