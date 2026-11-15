@@ -3,15 +3,18 @@ r"""PipeWireBackend — Pi demo control plane via wpctl / pactl / pw-link / mpv.
 ## Fan-out graph (Phase 1)
 
 ```
-[mpv --ao=pipewire --audio-device=musync_feeder]
+[mpv local file]  OR  [bluez_input / USB capture via module-loopback]
         │
         ▼
   musync_feeder  (null/virtual sink)
         │  module-loopback latency_msec=<delay_ms>   (per enabled sink)
         ├──────────────► bluez_output.<MAC>   (hci0 / speaker 1)
         ├──────────────► bluez_output.<MAC>   (hci1 / speaker 2)
-        └──────────────► … up to 6 BT600 A2DP sinks
+        └──────────────► … up to 6 BT600 A2DP sinks (+ optional SPP TCP)
 ```
+
+Live phone input (priority): phone pairs as A2DP **source** → ``bluez_input.*``
+→ ``module-loopback`` into ``musync_feeder`` → existing sink fan-out.
 
 Volume/mute: ``wpctl set-volume|set-mute <node-id>``.
 Delay: PipeWire pulse-compat ``pactl load-module module-loopback latency_msec=N``.
@@ -32,10 +35,15 @@ pactl load-module module-loopback latency_msec=40 \
   source=musync_feeder.monitor sink=bluez_output.AA_BB_CC_DD_EE_02 \
   sink_dont_move=true source_dont_move=true
 
+# Phone as A2DP source (S21 FE → bluez_input) into the same feeder
+pactl load-module module-loopback latency_msec=20 \
+  source=bluez_input.XX_XX_XX_XX_XX_XX sink=musync_feeder \
+  sink_dont_move=true source_dont_move=true
+
 wpctl set-volume <NODE_ID> 0.75
 wpctl set-mute <NODE_ID> 0
 
-# Play into the feeder
+# Play a local file into the feeder
 mpv --no-video --ao=pipewire --audio-device=musync_feeder /path/to/track.flac
 ```
 
@@ -46,6 +54,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import subprocess
 import threading
 import time
@@ -64,12 +73,15 @@ from ..config import (
     validate_devices,
 )
 from ..models import (
+    CaptureDiscoverResponse,
+    CapturePath,
     Device,
     DeviceConfigEntry,
     DeviceDiscoverResponse,
     DeviceKind,
     DevicePatch,
     DiscoveredBluetoothSink,
+    DiscoveredCaptureSource,
     Health,
     InputHost,
     InputHostCreate,
@@ -78,21 +90,28 @@ from ..models import (
     QueueItemCreate,
     QueueItemPatch,
     Source,
+    SourceType,
     Transport,
     TransportPut,
     TransportState,
 )
 from .base import AudioBackend
-from .input_registry import InputRegistry
+from .input_registry import CAPTURE_NOTES, STUB_CAPTURE_NOTES, InputRegistry
 from .pw_tools import (
     GraphLink,
     GraphPlan,
     PwNode,
+    build_capture_loopback_commands,
     build_sink_commands,
+    classify_capture_source,
     discover_bluetooth_remotes,
     discover_nodes,
+    discover_sources,
+    find_musync_capture_ids,
     find_musync_loopback_ids,
     friendly_bluez_label,
+    is_capture_candidate,
+    match_capture_source,
     match_device_node,
     normalize_mac,
     run_cmd,
@@ -143,8 +162,11 @@ class PipeWireBackend(AudioBackend):
         }
         self._pw_node_names: dict[str, str] = {}
         self._loopback_module_ids: dict[str, str] = {}
+        self._capture_module_ids: dict[str, str] = {}
+        self._active_capture_host_id: Optional[str] = None
         self._last_plan: Optional[GraphPlan] = None
         self._discovered: list[PwNode] = []
+        self._discovered_sources: list[PwNode] = []
         self._bt_remotes_by_mac: dict = {}
         self._player_proc: Optional[subprocess.Popen[str]] = None
         self._spp_procs: dict[str, subprocess.Popen[str]] = {}
@@ -743,7 +765,31 @@ class PipeWireBackend(AudioBackend):
         self._sync_spp_listeners(only_device=only_device)
         return plan
 
+    def _unload_capture(self, host_id: Optional[str] = None) -> None:
+        """Tear down capture→feeder loopback(s)."""
+        pactl = self._tools["pactl"]
+        targets = (
+            [host_id]
+            if host_id
+            else list(self._capture_module_ids.keys())
+            or ([self._active_capture_host_id] if self._active_capture_host_id else [])
+        )
+        for hid in list(targets):
+            if not hid:
+                continue
+            mid = self._capture_module_ids.pop(hid, None)
+            if mid and pactl and not self._env_dry_run():
+                self._exec_soft([pactl, "unload-module", mid])
+            elif pactl and not self._env_dry_run():
+                proc = self._exec_soft([pactl, "list", "modules", "short"])
+                if proc and proc.stdout:
+                    for found in find_musync_capture_ids(proc.stdout, hid):
+                        self._exec_soft([pactl, "unload-module", found])
+        if host_id is None or host_id == self._active_capture_host_id:
+            self._active_capture_host_id = None
+
     def _stop_player_process(self) -> None:
+        self._unload_capture()
         if self._player_proc is None:
             return
         proc = self._player_proc
@@ -755,19 +801,7 @@ class PipeWireBackend(AudioBackend):
             except subprocess.TimeoutExpired:
                 proc.kill()
 
-    def _start_player_process(self) -> None:
-        """Play local file into the MuSync feeder. Does not touch sink loopbacks."""
-        self._stop_player_process()
-        path = self._session.active_file_path()
-        transport = self._session.get_transport()
-        if not path:
-            log.info(
-                "No local file for feeder (%s / %s) — software clock only",
-                transport.source_type,
-                transport.queue_item_id or transport.source_id,
-            )
-            return
-
+    def _start_mpv_into_feeder(self, path: str, *, position_ms: int = 0) -> None:
         if self._env_dry_run():
             log.info(
                 "Dry-run playback: mpv --ao=pipewire --audio-device=%s %s",
@@ -775,7 +809,6 @@ class PipeWireBackend(AudioBackend):
                 path,
             )
             return
-
         mpv = self._tools["mpv"]
         pw_play = self._tools["pw-play"]
         try:
@@ -786,7 +819,7 @@ class PipeWireBackend(AudioBackend):
                         "--no-video",
                         "--ao=pipewire",
                         f"--audio-device={self._feeder}",
-                        f"--start={transport.position_ms / 1000:.3f}",
+                        f"--start={position_ms / 1000:.3f}",
                         path,
                     ],
                     stdout=subprocess.DEVNULL,
@@ -805,6 +838,163 @@ class PipeWireBackend(AudioBackend):
         except OSError as exc:
             log.warning("Failed to start player: %s", exc)
             self._player_proc = None
+
+    def _start_capture_into_feeder(self, host: InputHost) -> None:
+        """Route bluez_input / USB Audio/Source into musync_feeder (fan-out untouched)."""
+        self._refresh_input_host_links()
+        host = self._inputs.get_host(host.id)
+        source_ref = (host.endpoint or "").strip()
+        if not source_ref:
+            log.warning("No capture endpoint for %s — cannot feed live input", host.id)
+            return
+
+        for cmd in self._ensure_feeder_commands():
+            if not self._env_dry_run():
+                self._exec_soft(cmd)
+
+        cmds, notes = build_capture_loopback_commands(
+            host_id=host.id,
+            feeder=self._feeder,
+            source_ref=source_ref,
+            tools=self._tools,
+        )
+        for note in notes:
+            log.info("%s", note)
+
+        if self._env_dry_run():
+            for cmd in cmds:
+                log.info("Dry-run capture: %s", " ".join(cmd))
+            self._active_capture_host_id = host.id
+            return
+
+        self._unload_capture(host.id)
+        for cmd in cmds:
+            proc = self._exec_soft(cmd)
+            if (
+                proc
+                and proc.returncode == 0
+                and len(cmd) >= 3
+                and cmd[1] == "load-module"
+                and cmd[2] == "module-loopback"
+                and proc.stdout.strip().isdigit()
+            ):
+                self._capture_module_ids[host.id] = proc.stdout.strip()
+        self._active_capture_host_id = host.id
+        log.info(
+            "Capture live: %s (%s) %s → %s",
+            host.name,
+            host.capture_path.value,
+            source_ref,
+            self._feeder,
+        )
+
+    def _start_player_process(self) -> None:
+        """Start feeder: local mpv, network upload file, or BT/USB capture loopback.
+
+        Does not tear down sink loopbacks / SPP listens.
+        """
+        self._stop_player_process()
+        transport = self._session.get_transport()
+
+        if transport.source_type == SourceType.INPUT and transport.input_id:
+            try:
+                host = self._inputs.get_host(transport.input_id)
+            except KeyError:
+                log.warning("Active input host missing: %s", transport.input_id)
+                return
+            if host.capture_path in {CapturePath.BT_A2DP, CapturePath.USB}:
+                self._start_capture_into_feeder(host)
+                return
+            if host.capture_path == CapturePath.NETWORK and host.endpoint:
+                path = Path(host.endpoint)
+                if path.is_file():
+                    self._start_mpv_into_feeder(
+                        str(path), position_ms=transport.position_ms
+                    )
+                    return
+                log.info(
+                    "Network capture endpoint not a file yet: %s", host.endpoint
+                )
+                return
+
+        path = self._session.active_file_path()
+        if not path:
+            log.info(
+                "No local file for feeder (%s / %s) — software clock only",
+                transport.source_type,
+                transport.queue_item_id or transport.source_id,
+            )
+            return
+        self._start_mpv_into_feeder(path, position_ms=transport.position_ms)
+
+    def _refresh_input_host_links(self) -> None:
+        """Match registered hosts to live PipeWire sources; update connected/endpoint."""
+        nodes, detail = discover_sources(
+            wpctl=self._tools["wpctl"],
+            pw_cli=self._tools["pw-cli"],
+        )
+        candidates = [n for n in nodes if is_capture_candidate(n)]
+        self._discovered_sources = candidates
+        log.debug("Capture discovery: %s (%d candidates)", detail, len(candidates))
+
+        for host in self._inputs.list_hosts():
+            if host.capture_path == CapturePath.NETWORK:
+                # File upload path — connected when endpoint file exists.
+                ep = host.endpoint or ""
+                live = bool(ep and Path(ep).is_file())
+                if host.connected != live:
+                    self._inputs.patch_host(
+                        host.id,
+                        InputHostPatch(
+                            connected=live,
+                            note=(
+                                CAPTURE_NOTES[CapturePath.NETWORK]
+                                if live
+                                else STUB_CAPTURE_NOTES[CapturePath.NETWORK]
+                            ),
+                        ),
+                    )
+                continue
+
+            prefer = host.capture_path.value
+            match = match_capture_source(
+                endpoint=host.endpoint or "",
+                name=host.name,
+                nodes=candidates,
+                prefer_path=prefer,
+            )
+            if match:
+                source_ref = match.name or match.id
+                self._inputs.patch_host(
+                    host.id,
+                    InputHostPatch(
+                        connected=True,
+                        endpoint=source_ref,
+                        note=CAPTURE_NOTES[host.capture_path],
+                    ),
+                )
+            elif host.endpoint and any(
+                host.endpoint in n.name or n.id == host.endpoint for n in candidates
+            ):
+                self._inputs.patch_host(
+                    host.id,
+                    InputHostPatch(
+                        connected=True,
+                        note=CAPTURE_NOTES[host.capture_path],
+                    ),
+                )
+            else:
+                # Keep explicit endpoint but mark disconnected if not visible.
+                if host.connected:
+                    self._inputs.patch_host(
+                        host.id,
+                        InputHostPatch(
+                            connected=False,
+                            note=STUB_CAPTURE_NOTES[host.capture_path],
+                        ),
+                    )
+
+        self._session.refresh_live_availability()
 
     # --- AudioBackend API ---
 
@@ -946,17 +1136,102 @@ class PipeWireBackend(AudioBackend):
         return transport
 
     def list_inputs(self) -> list[InputHost]:
-        return self._inputs.list_hosts()
+        with self._lock:
+            try:
+                self._refresh_input_host_links()
+            except Exception as exc:  # noqa: BLE001
+                log.debug("Capture refresh failed: %s", exc)
+            return self._inputs.list_hosts()
 
     def add_input(self, body: InputHostCreate) -> InputHost:
-        return self._inputs.add_host(body)
+        with self._lock:
+            host = self._inputs.add_host(body)
+            try:
+                self._refresh_input_host_links()
+                host = self._inputs.get_host(host.id)
+            except Exception as exc:  # noqa: BLE001
+                log.debug("Capture refresh after add failed: %s", exc)
+            return host
 
     def patch_input(self, host_id: str, patch: InputHostPatch) -> InputHost:
-        return self._inputs.patch_host(host_id, patch)
+        with self._lock:
+            host = self._inputs.patch_host(host_id, patch)
+            self._session.refresh_live_availability()
+            # If this host is actively capturing and endpoint/path changed, restart.
+            if (
+                self._active_capture_host_id == host_id
+                and self._session.get_transport().state == TransportState.PLAYING
+            ):
+                self._start_player_process()
+            return host
 
     def remove_input(self, host_id: str) -> None:
-        self._inputs.remove_host(host_id)
-        self._session.clear_input_bindings(host_id)
+        with self._lock:
+            if self._active_capture_host_id == host_id:
+                self._unload_capture(host_id)
+            self._inputs.remove_host(host_id)
+            self._session.clear_input_bindings(host_id)
+            self._session.refresh_live_availability()
+
+    def discover_capture_sources(self) -> CaptureDiscoverResponse:
+        with self._lock:
+            nodes, detail = discover_sources(
+                wpctl=self._tools["wpctl"],
+                pw_cli=self._tools["pw-cli"],
+            )
+            candidates = [n for n in nodes if is_capture_candidate(n)]
+            self._discovered_sources = candidates
+            remotes, bt_detail = discover_bluetooth_remotes(
+                bluetoothctl=self._tools["bluetoothctl"],
+            )
+            remotes_by_mac = {normalize_mac(r.mac): r for r in remotes if r.mac}
+
+            configured_by_name = {
+                h.name.strip().lower(): h.id for h in self._inputs.list_hosts()
+            }
+            configured_by_ep = {
+                (h.endpoint or "").strip(): h.id
+                for h in self._inputs.list_hosts()
+                if h.endpoint
+            }
+
+            rows: list[DiscoveredCaptureSource] = []
+            for node in candidates:
+                path = CapturePath(classify_capture_source(node))
+                label = node.description.strip() if node.description else ""
+                label = re.sub(r"\[vol:[^\]]*\]", "", label).strip() if label else ""
+                if not label or label.lower().startswith("bluez"):
+                    if node.mac and remotes_by_mac.get(normalize_mac(node.mac)):
+                        label = remotes_by_mac[normalize_mac(node.mac)].name
+                    elif node.mac:
+                        label = f"BT {normalize_mac(node.mac)}"
+                    else:
+                        label = node.name
+                cfg = configured_by_name.get(label.lower()) or configured_by_ep.get(
+                    node.name
+                )
+                rows.append(
+                    DiscoveredCaptureSource(
+                        name=label,
+                        pw_node=node.id,
+                        pw_name=node.name,
+                        mac=normalize_mac(node.mac) if node.mac else "",
+                        capture_path=path,
+                        connected=True,
+                        configured_id=cfg,
+                    )
+                )
+
+            # Auto-link hosts after discovery so UI list_inputs shows live.
+            try:
+                self._refresh_input_host_links()
+            except Exception as exc:  # noqa: BLE001
+                log.debug("Capture auto-link failed: %s", exc)
+
+            return CaptureDiscoverResponse(
+                sources=rows,
+                detail=f"{detail}; {bt_detail}",
+            )
 
     def health(self) -> Health:
         with self._lock:

@@ -113,24 +113,40 @@ def test_queue_source_type_switch(client: TestClient) -> None:
     hosts = client.get("/api/inputs")
     assert hosts.status_code == 200
     assert len(hosts.json()) >= 1
-    host_id = hosts.json()[0]["id"]
+    live = next(h for h in hosts.json() if h.get("connected"))
+    waiting = next(h for h in hosts.json() if not h.get("connected"))
 
+    # Waiting (non-live) host cannot play.
     created = client.post(
         "/api/queue",
-        json={"source_type": "input", "input_id": host_id, "title": "USB-from-PC stub"},
+        json={
+            "source_type": "input",
+            "input_id": waiting["id"],
+            "title": "USB-from-PC waiting",
+        },
     )
     assert created.status_code == 201
-    assert created.json()["source_type"] == "input"
-    assert created.json()["input_id"] == host_id
-
+    assert created.json()["available"] is False
     active = client.put("/api/queue/active", json={"id": created.json()["id"]})
     assert active.status_code == 200
-    assert active.json()["source_type"] == "input"
-    assert active.json()["input_id"] == host_id
-
-    # Stub cannot play
     denied = client.put("/api/transport", json={"state": "playing"})
     assert denied.status_code == 400
+
+    # Live S21 FE BT A2DP host can play (mock feeder clock).
+    live_q = client.post(
+        "/api/queue",
+        json={
+            "source_type": "input",
+            "input_id": live["id"],
+            "title": "S21 FE live",
+        },
+    )
+    assert live_q.status_code == 201
+    assert live_q.json()["available"] is True
+    client.put("/api/queue/active", json={"id": live_q.json()["id"]})
+    played = client.put("/api/transport", json={"state": "playing"})
+    assert played.status_code == 200
+    assert played.json()["state"] == "playing"
 
     # Devices still listed (sinks not torn down)
     devices = client.get("/api/devices")

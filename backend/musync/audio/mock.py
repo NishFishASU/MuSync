@@ -16,13 +16,17 @@ from ..config import (
     validate_devices,
 )
 from ..models import (
+    CaptureDiscoverResponse,
+    CapturePath,
     Device,
     DeviceConfigEntry,
     DeviceDiscoverResponse,
     DeviceKind,
     DevicePatch,
     DiscoveredBluetoothSink,
+    DiscoveredCaptureSource,
     Health,
+    HostKind,
     InputHost,
     InputHostCreate,
     InputHostPatch,
@@ -56,8 +60,53 @@ _MOCK_DISCOVERED = [
     ),
 ]
 from .base import AudioBackend
-from .input_registry import InputRegistry
+from .input_registry import InputRegistry, CAPTURE_NOTES
 from .source_session import SourceSession
+
+# Laptop/dev: S21 FE appears as a live bluez_input so UI can pick playable live input.
+_MOCK_CAPTURE_SOURCES = [
+    DiscoveredCaptureSource(
+        name="Galaxy S21 FE",
+        pw_node="61",
+        pw_name="bluez_input.AA_BB_CC_DD_EE_21",
+        mac="AA:BB:CC:DD:EE:21",
+        capture_path=CapturePath.BT_A2DP,
+        connected=True,
+    ),
+    DiscoveredCaptureSource(
+        name="USB Audio CODEC",
+        pw_node="62",
+        pw_name="alsa_input.usb-Generic_USB_Audio-00",
+        mac="",
+        capture_path=CapturePath.USB,
+        connected=True,
+    ),
+]
+
+
+def _mock_live_hosts() -> list[InputHost]:
+    return [
+        InputHost(
+            id="input-1",
+            name="Galaxy S21 FE",
+            kind=HostKind.PHONE,
+            capture_path=CapturePath.BT_A2DP,
+            armed=True,
+            connected=True,
+            endpoint="bluez_input.AA_BB_CC_DD_EE_21",
+            note=CAPTURE_NOTES[CapturePath.BT_A2DP],
+        ),
+        InputHost(
+            id="input-2",
+            name="Laptop (USB)",
+            kind=HostKind.PC,
+            capture_path=CapturePath.USB,
+            armed=False,
+            connected=False,
+            endpoint=None,
+            note="Waiting for USB Audio/Source on the Pi",
+        ),
+    ]
 
 
 class MockAudioBackend(AudioBackend):
@@ -76,7 +125,8 @@ class MockAudioBackend(AudioBackend):
         self._config_detail = "mock"
 
         # Feeder callbacks are no-ops: mock has no PipeWire graph to preserve.
-        self._inputs = InputRegistry(lock=self._lock)
+        # Seed S21 FE as live BT A2DP so Play works for live input on laptop.
+        self._inputs = InputRegistry(hosts=_mock_live_hosts(), lock=self._lock)
         self._session = SourceSession(inputs=self._inputs, lock=self._lock)
 
     def _persist(self) -> None:
@@ -205,14 +255,36 @@ class MockAudioBackend(AudioBackend):
         return self._inputs.list_hosts()
 
     def add_input(self, body: InputHostCreate) -> InputHost:
-        return self._inputs.add_host(body)
+        host = self._inputs.add_host(body)
+        self._session.refresh_live_availability()
+        return host
 
     def patch_input(self, host_id: str, patch: InputHostPatch) -> InputHost:
-        return self._inputs.patch_host(host_id, patch)
+        host = self._inputs.patch_host(host_id, patch)
+        self._session.refresh_live_availability()
+        return host
 
     def remove_input(self, host_id: str) -> None:
         self._inputs.remove_host(host_id)
         self._session.clear_input_bindings(host_id)
+        self._session.refresh_live_availability()
+
+    def discover_capture_sources(self) -> CaptureDiscoverResponse:
+        with self._lock:
+            configured = {h.name.strip().lower(): h.id for h in self._inputs.list_hosts()}
+            also_ep = {
+                (h.endpoint or "").strip(): h.id
+                for h in self._inputs.list_hosts()
+                if h.endpoint
+            }
+            sources: list[DiscoveredCaptureSource] = []
+            for item in _MOCK_CAPTURE_SOURCES:
+                cfg = configured.get(item.name.lower()) or also_ep.get(item.pw_name)
+                sources.append(item.model_copy(update={"configured_id": cfg}))
+            return CaptureDiscoverResponse(
+                sources=sources,
+                detail="mock capture — Galaxy S21 FE bluez_input + USB Audio fixtures",
+            )
 
     def health(self) -> Health:
         with self._lock:

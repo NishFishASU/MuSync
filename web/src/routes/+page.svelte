@@ -11,6 +11,7 @@
 		deleteInput,
 		deleteQueueItem,
 		discoverDevices,
+		discoverInputs,
 		fmtMs,
 		forgetWifiNetwork,
 		getHealth,
@@ -29,7 +30,8 @@
 		saveWifiNetwork,
 		setActiveQueueItem,
 		setActiveSource,
-		sourceTypeLabel
+		sourceTypeLabel,
+		uploadInputFile
 	} from '$lib/api.js';
 
 	/** @type {import('$lib/api.js').Device[]} */
@@ -62,7 +64,13 @@
 	/** @type {import('$lib/api.js').HostKind} */
 	let newHostKind = $state('phone');
 	/** @type {import('$lib/api.js').CapturePath} */
-	let newHostPath = $state('network');
+	let newHostPath = $state('bt_a2dp');
+
+	/** @type {import('$lib/api.js').DiscoveredCaptureSource[]} */
+	let discoveredCapture = $state([]);
+	let captureDetail = $state('');
+	let captureBusy = $state(false);
+	let captureMessage = $state('');
 
 	/** @type {import('$lib/api.js').DiscoveredBluetoothSink[]} */
 	let discoveredBt = $state([]);
@@ -91,13 +99,10 @@
 	const playing = $derived(transport?.state === 'playing');
 	const wifiIpLabel = $derived(wifi?.ips?.length ? wifi.ips.join(', ') : '—');
 	const activeQueueId = $derived(transport?.queue_item_id ?? null);
-	const activeIsStub = $derived(
-		Boolean(
-			transport &&
-				(transport.source_type !== 'local' ||
-					(transport.input_id && transport.source_type === 'local'))
-		)
-	);
+	const activeQueueItem = $derived(queue.find((q) => q.id === activeQueueId) ?? null);
+	/** Play disabled only when the active cue is not ready (stubs / unbound live). */
+	const activeIsStub = $derived(Boolean(activeQueueItem && !activeQueueItem.available));
+	const liveHosts = $derived(inputs.filter((h) => h.connected && h.endpoint));
 
 	/**
 	 * @param {import('$lib/api.js').Transport} t
@@ -260,6 +265,7 @@
 		await refreshDiscovery().catch((err) => {
 			setupMessage = err instanceof Error ? err.message : String(err);
 		});
+		await refreshCaptureDiscovery().catch(() => {});
 	}
 
 	/** @param {string} name */
@@ -420,7 +426,7 @@
 			const hostId =
 				sourceType === 'local'
 					? undefined
-					: inputs.find((h) => h.armed)?.id || inputs[0]?.id;
+					: liveHosts[0]?.id || inputs.find((h) => h.armed)?.id || inputs[0]?.id;
 			const item = await addQueueItem({
 				source_type: sourceType,
 				input_id: hostId,
@@ -429,12 +435,104 @@
 						? 'Spotify from phone/PC (stub)'
 						: sourceType === 'apple'
 							? 'Apple Music from phone/PC (stub)'
-							: 'Live input cue (stub)'
+							: liveHosts.length
+								? `Live · ${hostName(hostId || '')}`
+								: 'Live input cue'
 			});
 			queue = [...queue, item];
-			sourceError = item.note || `${sourceTypeLabel(sourceType)} stub added — bind a host anytime`;
+			if (!item.available) {
+				sourceError = item.note || `${sourceTypeLabel(sourceType)} stub — bind a live host`;
+			} else {
+				sourceError = '';
+			}
 		} catch (err) {
 			sourceError = err instanceof Error ? err.message : String(err);
+		}
+	}
+
+	async function refreshCaptureDiscovery() {
+		captureBusy = true;
+		captureMessage = '';
+		try {
+			const res = await discoverInputs();
+			discoveredCapture = res.sources || [];
+			captureDetail = res.detail || '';
+			inputs = await listInputs();
+			sources = await listSources();
+			queue = await listQueue();
+			captureMessage = discoveredCapture.length
+				? `${discoveredCapture.length} live source${discoveredCapture.length === 1 ? '' : 's'}`
+				: 'No bluez_input / USB sources yet — pair phone as A2DP source';
+		} catch (err) {
+			captureMessage = err instanceof Error ? err.message : String(err);
+		} finally {
+			captureBusy = false;
+		}
+	}
+
+	/**
+	 * Bind a discovered PipeWire source onto a registered host (or create one).
+	 * @param {import('$lib/api.js').DiscoveredCaptureSource} src
+	 */
+	async function bindCaptureSource(src) {
+		try {
+			sourceError = '';
+			const endpoint = src.pw_name || src.pw_node || '';
+			const path = /** @type {import('$lib/api.js').CapturePath} */ (
+				src.capture_path || 'bt_a2dp'
+			);
+			let host = inputs.find((h) => h.id === src.configured_id) ||
+				inputs.find((h) => h.name === src.name) ||
+				inputs.find((h) => h.capture_path === path && !h.connected);
+			if (host) {
+				host = await patchInput(host.id, {
+					name: src.name,
+					capture_path: path,
+					endpoint,
+					connected: true,
+					armed: true
+				});
+				inputs = inputs.map((h) => (h.id === host.id ? host : h));
+			} else if (inputs.length < 4) {
+				host = await addInput({
+					name: src.name,
+					kind: 'phone',
+					capture_path: path,
+					endpoint,
+					connected: true,
+					armed: true
+				});
+				inputs = [...inputs, host];
+			} else {
+				throw new Error('Already at 4 hosts — remove one before binding');
+			}
+			sources = await listSources();
+			queue = await listQueue();
+			captureMessage = `Bound ${src.name} → ${endpoint}`;
+		} catch (err) {
+			sourceError = err instanceof Error ? err.message : String(err);
+		}
+	}
+
+	/**
+	 * @param {string} hostId
+	 * @param {Event} e
+	 */
+	async function onHostUpload(hostId, e) {
+		const input = /** @type {HTMLInputElement} */ (e.currentTarget);
+		const file = input.files?.[0];
+		if (!file) return;
+		try {
+			sourceError = '';
+			const updated = await uploadInputFile(hostId, file);
+			inputs = inputs.map((h) => (h.id === hostId ? updated : h));
+			sources = await listSources();
+			queue = await listQueue();
+			captureMessage = `Uploaded ${file.name} → feeder for ${updated.name}`;
+		} catch (err) {
+			sourceError = err instanceof Error ? err.message : String(err);
+		} finally {
+			input.value = '';
 		}
 	}
 
@@ -450,6 +548,7 @@
 			inputs = [...inputs, host];
 			sources = await listSources();
 			newHostName = '';
+			await refreshCaptureDiscovery().catch(() => {});
 		} catch (err) {
 			sourceError = err instanceof Error ? err.message : String(err);
 		}
@@ -562,8 +661,12 @@
 		</div>
 		{#if activeIsStub}
 			<p class="stub-banner" role="status">
-				Active song is a {sourceTypeLabel(transport?.source_type)} stub — sink graph stays up; local
-				playback resumes when you switch the song back to Local.
+				Active song is not playable yet
+				{#if transport?.source_type === 'input'}
+					— bind a live bluez_input / USB / upload on a Phone/PC host, then Play.
+				{:else}
+					— sink graph stays up; switch the song to Local or a live input.
+				{/if}
 			</p>
 		{/if}
 		{#if sourceError}
@@ -919,8 +1022,47 @@
 	<section class="panel inputs-panel" aria-labelledby="inputs-heading">
 		<div class="panel-head">
 			<h2 id="inputs-heading">Phone / PC hosts</h2>
-			<p class="hint">Up to 4 · each can offer local, Spotify, Apple, or live capture</p>
+			<p class="hint">
+				Up to 4 · BT A2DP source (bluez_input) → feeder · {liveHosts.length} live
+			</p>
 		</div>
+		<div class="stub-actions">
+			<button
+				type="button"
+				class="btn btn-ghost btn-small"
+				disabled={captureBusy}
+				onclick={() => refreshCaptureDiscovery()}
+			>
+				{captureBusy ? 'Scanning…' : 'Refresh live inputs'}
+			</button>
+			{#if captureMessage}
+				<span class="hint">{captureMessage}</span>
+			{/if}
+		</div>
+		{#if discoveredCapture.length}
+			<ul class="queue-list discovery-list">
+				{#each discoveredCapture as src (src.pw_name || src.name)}
+					<li class="queue-row host-row">
+						<div class="queue-main">
+							<span class="source-title">{src.name}</span>
+							<span class="source-sub">
+								{capturePathLabel(src.capture_path || 'bt_a2dp')} · {src.pw_name || src.pw_node}
+								{#if src.mac}
+									· {src.mac}
+								{/if}
+							</span>
+						</div>
+						<button
+							type="button"
+							class="btn btn-small"
+							onclick={() => bindCaptureSource(src)}
+						>
+							{src.configured_id ? 'Re-bind' : 'Use as input'}
+						</button>
+					</li>
+				{/each}
+			</ul>
+		{/if}
 		<form
 			class="host-form"
 			onsubmit={(e) => {
@@ -930,7 +1072,7 @@
 		>
 			<input
 				type="text"
-				placeholder="Name (e.g. iPhone)"
+				placeholder="Name (e.g. S21 FE)"
 				bind:value={newHostName}
 				aria-label="Host name"
 				maxlength="64"
@@ -992,8 +1134,19 @@
 						<span>Armed</span>
 					</label>
 					<span class="status-pill {host.connected ? 'linked' : 'missing'}">
-						{host.connected ? 'linked' : 'stub'}
+						{host.connected ? 'live' : 'waiting'}
 					</span>
+					{#if host.capture_path === 'network'}
+						<label class="btn btn-ghost btn-small upload-btn">
+							Upload
+							<input
+								type="file"
+								accept="audio/*,.wav,.flac,.mp3,.ogg"
+								class="sr-only"
+								onchange={(e) => onHostUpload(host.id, e)}
+							/>
+						</label>
+					{/if}
 					<button
 						type="button"
 						class="btn btn-ghost btn-small"
@@ -1004,9 +1157,12 @@
 					</button>
 				</li>
 			{:else}
-				<li class="empty-group">No phone/PC hosts yet — register one above</li>
+				<li class="empty-group">No phone/PC hosts yet — register one or bind a discovered source</li>
 			{/each}
 		</ul>
+		{#if captureDetail}
+			<p class="hint muted">{captureDetail}</p>
+		{/if}
 	</section>
 
 	<section class="panel queue-panel" aria-labelledby="queue-heading">
@@ -1022,7 +1178,7 @@
 				+ Host Apple
 			</button>
 			<button type="button" class="btn btn-ghost btn-small" onclick={() => addStubSong('input')}>
-				+ Live input
+				+ Live input{liveHosts.length ? ` (${liveHosts[0].name})` : ''}
 			</button>
 		</div>
 		<ul class="queue-list">
@@ -1054,7 +1210,11 @@
 							}}
 						>
 							{#each SOURCE_TYPES as t}
-								<option value={t}>{sourceTypeLabel(t)}{t === 'local' ? '' : ' (stub)'}</option>
+								<option value={t}
+									>{sourceTypeLabel(t)}{t === 'local' || (t === 'input' && liveHosts.length)
+										? ''
+										: ' (stub)'}</option
+								>
 							{/each}
 						</select>
 					</label>
@@ -1093,7 +1253,7 @@
 	<section class="panel sources-panel" aria-labelledby="sources-heading">
 		<div class="panel-head">
 			<h2 id="sources-heading">Source catalog</h2>
-			<p class="hint">Hub local files · per-host Spotify / Apple / live stubs</p>
+			<p class="hint">Hub local files · live BT/USB/upload when linked · Spotify/Apple stubs</p>
 		</div>
 		{#each SOURCE_TYPES as type}
 			<div class="source-group">

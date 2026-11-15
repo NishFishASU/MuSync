@@ -58,9 +58,12 @@ def test_catalog_has_typed_stubs(tmp_path, monkeypatch) -> None:
     assert SourceType.SPOTIFY in types
     assert SourceType.APPLE in types
     assert SourceType.INPUT in types
-    stubs = [s for s in sources if s.type != SourceType.LOCAL]
-    assert stubs and all(not s.available for s in stubs)
-    assert all(s.type.value in {"spotify", "apple", "input"} for s in stubs)
+    non_local = [s for s in sources if s.type != SourceType.LOCAL]
+    assert non_local
+    assert all(s.type.value in {"spotify", "apple", "input"} for s in non_local)
+    # Spotify/Apple remain stubs; live BT input may be available on mock.
+    assert all(not s.available for s in non_local if s.type != SourceType.INPUT)
+    assert any(s.available for s in non_local if s.type == SourceType.INPUT)
 
 
 def test_queue_seeded_and_source_type_switch(tmp_path, monkeypatch) -> None:
