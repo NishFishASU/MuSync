@@ -71,14 +71,18 @@ export MUSYNC_BACKEND=pipewire
 
 1. Open `http://<Pi-IP>:8080`
 2. Device setup → enable Qudelix + Phone SPP → Save
-3. **Streaming** → **Connect Spotify** (same-origin link → Spotify authorize →
+3. **Streaming** → paste Client ID/Secret (+ redirect URI) → **Save to musync.env**
+   (API stores `~/musync.env`, returns masked status only — never raw secrets).
+   Short Dashboard / Google Cloud guides are on that panel.
+4. **Connect Spotify** (same-origin link → Spotify authorize →
    `/api/streaming/spotify/callback` → tokens). MuSync never asks for your
-   Spotify password; Client ID/Secret stay in `~/musync.env`.
-4. **Queue** → search a track → **Queue & play**
-5. Confirm audio on Qudelix / SPP (`Simple Protocol Player` → Pi IP:port)
+   Spotify password.
+5. **Queue** → search a track → **Queue & play**
+6. Confirm audio on Qudelix / SPP (`Simple Protocol Player` → Pi IP:port)
 
-If the UI says **not configured**, credentials are missing from the process env —
-fill `~/musync.env`, restart `run_pi.sh`, then use **Connect Spotify** again.
+If the UI says **not configured**, credentials are missing — use the Streaming
+form or edit `~/musync.env`, then **Connect Spotify** again. Empty keys soft-fail
+(local / AirPlay / YouTube-without-key still work).
 
 ### Pi test checklist
 
@@ -150,6 +154,7 @@ export MUSYNC_STREAMING_MOCK=1
 | Method | Path | Purpose |
 |--------|------|---------|
 | `GET` | `/api/streaming` | Spotify + AirPlay status (no secrets) |
+| `GET`/`PUT` | `/api/streaming/credentials` | Masked keys → `~/musync.env` (secrets never raw) |
 | `GET` | `/api/streaming/spotify/login` | Start OAuth redirect |
 | `GET` | `/api/streaming/spotify/authorize-url` | JSON preflight (url or error) |
 | `GET` | `/api/streaming/spotify/callback` | OAuth return |
@@ -165,6 +170,6 @@ export MUSYNC_STREAMING_MOCK=1
 - **Queue search 400 “Invalid limit”** — Spotify **Development Mode** apps allow at most **10** results per `/v1/search` request (limit 15–50 returns this misleading error). MuSync clamps to 10 by default; set `MUSYNC_SPOTIFY_SEARCH_MAX=50` only if the app has Extended Quota Mode.
 - **No Connect device** — install librespot; check `MUSYNC_LIBRESPOT_NAME` matches; ensure PipeWire/Pulse is up and `musync_feeder` exists (`./scripts/run_pi.sh` + Play once).
 - **OAuth redirect mismatch** — redirect URI in the Spotify dashboard must equal `MUSYNC_SPOTIFY_REDIRECT_URI` (API port `:8080` / `:8081`, never Vite `:5173`).
-- **Connect does nothing / credentials missing** — fill `%USERPROFILE%\musync.env` or `config/streaming.local.env`, restart the API; Connect shows a clear error when Client ID/Secret are unset.
+- **Connect does nothing / credentials missing** — use Streaming → Save to musync.env, or fill `%USERPROFILE%\musync.env` / `config/streaming.local.env`; Connect shows a clear error when Client ID/Secret are unset.
 - **Duplicate feeders** — fixed by idempotent feeder purge on startup (see `docs/pi-pipewire.md`).
 - **AirPlay silent** — confirm shairport Source in `wpctl status`, Refresh inputs, Play the AirPlay live host, then AirPlay *to* the Pi (see [airplay-receive.md](./airplay-receive.md)).

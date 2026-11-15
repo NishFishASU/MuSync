@@ -107,6 +107,7 @@ USB/PC capture needs a **USB-A sound card** — Pi 5 USB-C PD is power-only: [do
 | `PUT` | `/api/queue/active` | `{ id }` — play this queue item (feeder swap only) |
 | `DELETE` | `/api/queue/{id}` | Remove a queue item |
 | `GET` | `/api/streaming` | Spotify + AirPlay + YouTube status (no secrets) |
+| `GET`/`PUT` | `/api/streaming/credentials` | Masked Spotify/YouTube keys → `~/musync.env` (never raw secrets) |
 | `GET` | `/api/streaming/spotify/login` | Start Spotify OAuth |
 | `GET` | `/api/streaming/search` | `?provider=spotify\|youtube&q=` |
 | `POST` | `/api/streaming/queue` | Queue a searched Spotify/YouTube track (`activate` optional) |

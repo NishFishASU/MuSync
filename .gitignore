@@ -23,6 +23,10 @@ config/spotify_tokens.json
 config/librespot-cache/
 config/cover-cache/
 config/streaming.local.env
+# Never commit live streaming secrets (UI writes ~/musync.env outside the repo;
+# also ignore accidental copies inside the tree).
+musync.env
+**/musync.env
 config/apple-keys/
 *.p8
 media/library/
