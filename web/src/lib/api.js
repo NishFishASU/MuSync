@@ -37,12 +37,33 @@
  * @property {string} name
  * @property {number} preferred_level
  * @property {Record<string, number>} [output_overrides]
+ * @property {number} [sensitivity]
+ */
+
+/**
+ * @typedef {Object} UserDeviceVolume
+ * @property {string} user_id
+ * @property {string} device_id
+ * @property {number} volume
+ * @property {string} [updated_at]
  */
 
 /**
  * @typedef {Object} VolumeProfilesState
  * @property {VolumeProfile[]} profiles
  * @property {string | null} active_id
+ * @property {Record<string, string>} [assignments]
+ * @property {UserDeviceVolume[]} [volumes]
+ * @property {Record<string, number>} [device_gains]
+ */
+
+/**
+ * @typedef {Object} DeviceUserAssignResult
+ * @property {VolumeProfilesState} state
+ * @property {Device | null} [device]
+ * @property {number | null} [suggested_volume]
+ * @property {boolean} [applied]
+ * @property {string} [detail]
  */
 
 /**
@@ -451,6 +472,19 @@ export function applyProfile(id) {
 	return api(`/api/profiles/${encodeURIComponent(id)}/apply`, {
 		method: 'POST',
 		body: '{}'
+	});
+}
+
+/**
+ * Assign (or clear) which listening profile/user owns an output device.
+ * Presets volume via learned S_u × G_d when possible.
+ * @param {{ device_id: string, profile_id: string | null, apply_suggested?: boolean }} body
+ * @returns {Promise<DeviceUserAssignResult>}
+ */
+export function assignDeviceUser(body) {
+	return api('/api/profiles/assignments', {
+		method: 'PUT',
+		body: JSON.stringify(body)
 	});
 }
 

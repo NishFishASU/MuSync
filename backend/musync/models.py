@@ -500,19 +500,31 @@ class StreamingQueueAdd(BaseModel):
 class VolumeProfile(BaseModel):
     """Named listening preference for silent-disco style headphone outputs.
 
-    Applied sink volume = clamp(preferred_level × device.gain). Optional
-    ``output_overrides`` replace preferred_level for specific device ids
-    (still multiplied by that output's gain). Delay is never touched.
+    Explicit apply (#27 UI): sink volume = clamp(preferred_level × Device.gain).
+    Optional ``output_overrides`` replace preferred_level for specific device
+    ids (still × Device.gain). Delay is never touched.
+
+    Learned latents (not UI controls):
+    - ``sensitivity`` S_u — per-person loudness preference
+    - device gains G_d live on ``VolumeProfilesState.device_gains``
+    Suggested volume ≈ clamp(S_u × G_d); cross-infers across users/devices.
     """
 
     id: str
     name: str
     preferred_level: float = Field(default=0.8, ge=0.0, le=1.0)
     output_overrides: dict[str, float] = Field(default_factory=dict)
+    # Learned S_u (1.0 = average). Updated by the hub from volume observations.
+    sensitivity: float = Field(default=1.0, ge=0.05, le=20.0)
 
     @field_validator("preferred_level")
     @classmethod
     def round_preferred(cls, v: float) -> float:
+        return round(float(v), 3)
+
+    @field_validator("sensitivity")
+    @classmethod
+    def round_sensitivity(cls, v: float) -> float:
         return round(float(v), 3)
 
     @field_validator("output_overrides")
@@ -597,16 +609,67 @@ class VolumeProfilePatch(BaseModel):
 
 
 class VolumeProfilesState(BaseModel):
-    """Hub-persisted user volume preference profiles + active selection."""
+    """Hub-persisted user volume preference profiles + active selection.
+
+    ``assignments`` maps output device id → profile (user) id currently on that
+    headphone/IEM. ``volumes`` is the latest observed volume per user×device.
+    ``device_gains`` is the learned per-device relative loudness G_d (latent;
+    distinct from the explicit headphone-calibration ``Device.gain`` slider).
+    """
 
     profiles: list[VolumeProfile] = Field(default_factory=list)
     active_id: Optional[str] = None
+    assignments: dict[str, str] = Field(default_factory=dict)
+    volumes: list["UserDeviceVolume"] = Field(default_factory=list)
+    device_gains: dict[str, float] = Field(default_factory=dict)
 
 
 class VolumeProfileActivePut(BaseModel):
     """Select a profile (null clears). Selecting applies volumes to outputs."""
 
     id: Optional[str] = None
+
+
+class DeviceUserAssign(BaseModel):
+    """Assign (or clear) which listening profile/user owns an output device."""
+
+    device_id: str = Field(..., min_length=1, max_length=64)
+    profile_id: Optional[str] = None
+    # When true, apply a sensitivity-suggested volume if this user has no
+    # observation for the device yet (or always re-suggest when forced).
+    apply_suggested: bool = True
+
+    @field_validator("device_id")
+    @classmethod
+    def strip_device(cls, v: str) -> str:
+        cleaned = v.strip()
+        if not cleaned:
+            raise ValueError("device_id must be non-empty")
+        return cleaned
+
+
+class DeviceUserAssignResult(BaseModel):
+    """Result of assigning a user to an output (optional volume apply)."""
+
+    state: VolumeProfilesState
+    device: Optional[Device] = None
+    suggested_volume: Optional[float] = None
+    applied: bool = False
+    detail: str = ""
+
+
+class UserDeviceVolume(BaseModel):
+    """One persisted (user, device) → volume observation."""
+
+    user_id: str
+    device_id: str
+    volume: float = Field(ge=0.0, le=1.0)
+    updated_at: str = ""
+
+    @field_validator("volume")
+    @classmethod
+    def round_volume(cls, v: float) -> float:
+        return round(float(v), 3)
 
 
 class WifiNetwork(BaseModel):

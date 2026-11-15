@@ -17,6 +17,7 @@ env/
 .DS_Store
 config/devices.yaml
 config/profiles.yaml
+config/user_volumes.sqlite
 config/pipewire-graph.plan.sh
 config/spotify_tokens.json
 config/librespot-cache/

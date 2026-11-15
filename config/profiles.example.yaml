@@ -1,18 +1,29 @@
 # Named user volume preference profiles (silent-disco style).
 # Copy to profiles.yaml (or set MUSYNC_PROFILES_CONFIG). Gitignored at runtime.
 #
-# Applied sink volume = clamp(preferred_level × device.gain).
+# Explicit apply (#27 UI): volume = clamp(preferred_level × Device.gain).
 # Optional output_overrides replace preferred_level for a specific sink id
-# (still multiplied by that output's gain). Delay is never touched.
+# (still × that output's Device.gain). Delay is never touched.
+#
+# Learned latents (not UI sliders) live mostly in SQLite
+# (config/user_volumes.sqlite / MUSYNC_VOLUME_DB):
+#   v_{u,d} ≈ S_u · G_d
+#   S_u = profile.sensitivity (relative loudness preference)
+#   G_d = per-device relative loudness (distinct from Device.gain calibration)
+# Assign a user per output; volumes they set update S_u / G_d. Cross-infer
+# presets a new device when another user already anchored its G_d.
 version: 1
 active_id: null
+assignments: {}
 profiles:
   - id: user-nish
     name: Nish
     preferred_level: 0.75
+    sensitivity: 1.0
     output_overrides: {}
   - id: user-guest
     name: Guest (quiet)
     preferred_level: 0.45
+    sensitivity: 1.0
     output_overrides:
       spp-1: 0.55
