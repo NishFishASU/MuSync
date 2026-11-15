@@ -520,11 +520,13 @@ def api_spotify_logout() -> StreamingStatus:
 def api_streaming_search(
     provider: str = Query(..., description="spotify, apple, or youtube"),
     q: str = Query(..., min_length=1),
-    limit: int = Query(15, ge=1, le=25),
+    limit: int = Query(15, ge=1, le=50),
 ) -> StreamingSearchResponse:
     """Search Spotify/Apple/YouTube. Always returns 400 with a real message — never bare 500."""
     p = (provider or "").strip().lower()
     svc = get_streaming_service()
+    # Spotify Web API rejects out-of-range / non-integer limit strings ("Invalid limit").
+    safe_limit = max(1, min(int(limit), 50))
     if p == "spotify" and not svc.spotify.configured():
         raise ValueError(
             "Spotify not configured — copy config/streaming.env.example to ~/musync.env, "
@@ -546,7 +548,7 @@ def api_streaming_search(
             "./scripts/run_pi.sh (see docs/youtube.md)"
         )
     try:
-        return svc.search(provider, q, limit=limit)
+        return svc.search(provider, q, limit=safe_limit)
     except ValueError:
         raise
     except Exception as exc:  # noqa: BLE001 — surface provider failures in the UI

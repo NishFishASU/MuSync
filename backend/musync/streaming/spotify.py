@@ -65,6 +65,15 @@ def _search_market() -> str:
     return "US"
 
 
+def _clamp_search_limit(limit: Any) -> str:
+    """Spotify /search ``limit`` must be an integer string in 1..50 (else 400 Invalid limit)."""
+    try:
+        n = int(limit)  # noqa: try float/str/"15"
+    except (TypeError, ValueError):
+        n = 15
+    return str(max(1, min(n, 50)))
+
+
 def _client_id() -> str:
     return (os.environ.get("MUSYNC_SPOTIFY_CLIENT_ID") or "").strip()
 
@@ -313,7 +322,8 @@ class SpotifyClient:
             params={
                 "q": q,
                 "type": "track",
-                "limit": max(1, min(limit, 25)),
+                # Spotify requires limit as an integer query value in 1..50.
+                "limit": _clamp_search_limit(limit),
                 "market": _search_market(),
             },
         )
@@ -735,6 +745,11 @@ class SpotifyClient:
                 f"({detail})"
             )
         if path.startswith("/search"):
+            if "invalid limit" in detail_l:
+                return (
+                    "Spotify search rejected limit — MuSync sends limit as an integer "
+                    f"string from 1–50. ({detail})"
+                )
             return f"Spotify search failed ({status}): {detail}"
         if status == 403:
             return (
