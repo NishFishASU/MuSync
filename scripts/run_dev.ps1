@@ -20,8 +20,9 @@ if (-not (Test-Path "$env:MUSYNC_WEB_DIR\index.html")) {
 
 Write-Host "MuSync mock (Windows)"
 Write-Host "  listen:  http://$($env:MUSYNC_HOST):$($env:MUSYNC_PORT)"
-Write-Host "  Spotify redirect (dashboard): http://127.0.0.1:$($env:MUSYNC_PORT)/api/streaming/spotify/callback"
+Write-Host "  Spotify Dashboard: register BOTH 127.0.0.1:8080 and :8081 (not localhost / musync.local)"
+Write-Host "  Spotify redirect (this run): http://127.0.0.1:$($env:MUSYNC_PORT)/api/streaming/spotify/callback"
 Write-Host "  env file: $env:USERPROFILE\musync.env  or  $Root\config\streaming.local.env"
-Write-Host "  Tip: use API port $($env:MUSYNC_PORT) in Spotify Dashboard — not Vite :5173."
+Write-Host "  Tip: Pi default is :8080; set `$env:MUSYNC_PORT=8081 when 8080 is taken (EDB). Not Vite :5173."
 
 python -m musync

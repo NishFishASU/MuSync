@@ -152,18 +152,26 @@ def _field_status(key: str, *, plaintext: bool = False) -> dict[str, Any]:
 
 def credentials_status() -> dict[str, Any]:
     """Masked credential snapshot for the Streaming UI (no raw secrets)."""
+    from .spotify import default_redirect_uri
+
     path = musync_env_path()
     spotify_id = _env_get("MUSYNC_SPOTIFY_CLIENT_ID")
     spotify_secret = _env_get("MUSYNC_SPOTIFY_CLIENT_SECRET")
     yt_key = _env_get("MUSYNC_YOUTUBE_API_KEY")
+    redirect = _field_status("MUSYNC_SPOTIFY_REDIRECT_URI", plaintext=True)
+    # Prefill Pi/laptop default (127.0.0.1:8080 via MUSYNC_PORT) when unset.
+    if not redirect.get("value"):
+        redirect = {
+            "set": False,
+            "masked": "",
+            "value": default_redirect_uri(),
+        }
     return {
         "env_path": str(path),
         "env_exists": path.is_file(),
         "spotify_client_id": _field_status("MUSYNC_SPOTIFY_CLIENT_ID"),
         "spotify_client_secret": _field_status("MUSYNC_SPOTIFY_CLIENT_SECRET"),
-        "spotify_redirect_uri": _field_status(
-            "MUSYNC_SPOTIFY_REDIRECT_URI", plaintext=True
-        ),
+        "spotify_redirect_uri": redirect,
         "youtube_api_key": _field_status("MUSYNC_YOUTUBE_API_KEY"),
         "spotify_configured": bool(spotify_id and spotify_secret),
         "youtube_configured": bool(yt_key),

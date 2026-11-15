@@ -68,6 +68,7 @@ docs/spp-network-sink.md              # phone as SPP TCP *output*
 docs/cast-nest-mini.md                # Nest Mini / Chromecast Cast *output*
 docs/phone-bt-source-vs-spp-sink.md   # phone as BT A2DP *source* vs SPP sink
 docs/wifi-join.md                     # phone hotspot join (nmcli)
+docs/mdns.md                          # musync.local UI advertise (not Spotify OAuth)
 docs/volume-profiles.md               # silent-disco preferred × gain + S_u × G_d learning
 backend/musync/wifi/       # nmcli on Pi; mock on laptop
 scripts/build_web.sh  run_dev.sh  run_pi.sh  pair_hci.sh  (pair_bt600.sh → alias)
@@ -118,7 +119,8 @@ USB/PC capture needs a **USB-A sound card** — Pi 5 USB-C PD is power-only: [do
 | `GET` | `/api/inputs/discover` | Live PipeWire sources (`bluez_input` / USB / HDMI / AirPlay) for host binding |
 | `POST` | `/api/inputs/{id}/upload` | Network path: upload file that plays into the feeder |
 | `PATCH`/`DELETE` | `/api/inputs/{id}` | Arm / bind endpoint / remove host |
-| `GET` | `/api/wifi` | Wi-Fi status + IPv4 (for SPP / LAN) |
+| `GET` | `/api/wifi` | Wi-Fi status + IPv4 (for SPP / LAN) + `mdns_hostname` hint |
+| `GET` | `/api/mdns` | `musync.local` UI advertise status (not for Spotify redirects) |
 | `GET`/`POST`/`DELETE` | `/api/wifi/networks` | List / pre-save / forget SSIDs (no passwords returned) |
 | `POST` | `/api/wifi/connect` | Join SSID (`password` optional if saved) |
 
@@ -186,10 +188,12 @@ export MUSYNC_BACKEND=pipewire
 cp /path/to/track.flac media/
 cp /path/to/clip.mp4 media/   # optional — audio → musync_feeder; muted preview in UI
 ./scripts/run_pi.sh   # clears stray ffmpeg on SPP ports; prints READY/MISSING preflight
-# UI: http://<pi-lan-ip>:8080
+# UI: http://musync.local:8080  (mDNS) or http://<pi-lan-ip>:8080
 ```
 
 Missing or broken `devices.yaml` is fine — MuSync boots with **Phone SPP** defaults.
+
+**mDNS:** the hub advertises **`musync.local`** for UI LAN discovery ([docs/mdns.md](docs/mdns.md)). Spotify OAuth cannot use `.local` / `localhost` — register both `127.0.0.1:8080` and `:8081` callbacks ([docs/spotify-apple.md](docs/spotify-apple.md)).
 
 **Demo day:** short Qudelix + Phone SPP checklist → **[docs/demo-checklist.md](docs/demo-checklist.md)**.
 

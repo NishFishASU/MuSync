@@ -115,7 +115,12 @@ def _client_secret() -> str:
 
 
 def default_redirect_uri() -> str:
-    """Default callback URL using MUSYNC_PORT (8080, or 8081 if you override the port)."""
+    """Default OAuth callback: ``http://127.0.0.1:<MUSYNC_PORT>/…``.
+
+    Pi + laptop default port is **8080**. Override ``MUSYNC_PORT=8081`` on a
+    laptop when 8080 is taken (e.g. EDB Postgres). Always ``127.0.0.1`` —
+    Spotify forbids ``localhost`` and ``musync.local``.
+    """
     port = (os.environ.get("MUSYNC_PORT") or "8080").strip() or "8080"
     return f"http://127.0.0.1:{port}/api/streaming/spotify/callback"
 
@@ -715,9 +720,9 @@ class SpotifyClient:
         combined = f"{err} {desc} {body_text}".lower()
         if "redirect_uri" in combined:
             return (
-                "Spotify redirect URI mismatch — Dashboard redirect must equal the API "
-                "callback (e.g. http://127.0.0.1:8081/api/streaming/spotify/callback when "
-                "MUSYNC_PORT=8081), not Vite :5173. "
+                "Spotify redirect URI mismatch — Dashboard must list the API callback "
+                "(register both http://127.0.0.1:8080/... and :8081/...; set env to the "
+                "port you run). Use 127.0.0.1 — not localhost, musync.local, or Vite :5173. "
                 f"Spotify said: {desc or body_text or resp.status_code}"
             )
         if err in {"invalid_client", "invalid_client_id"} or "invalid_client" in combined:

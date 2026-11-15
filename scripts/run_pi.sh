@@ -8,6 +8,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 export PYTHONPATH="${ROOT}/backend${PYTHONPATH:+:$PYTHONPATH}"
 export MUSYNC_BACKEND="${MUSYNC_BACKEND:-pipewire}"
 export MUSYNC_HOST="${MUSYNC_HOST:-0.0.0.0}"
+# Pi default API port is always 8080 (laptop may override to 8081 — see run_dev).
 export MUSYNC_PORT="${MUSYNC_PORT:-8080}"
 export MUSYNC_DEVICES_CONFIG="${MUSYNC_DEVICES_CONFIG:-$ROOT/config/devices.yaml}"
 export MUSYNC_MEDIA_DIR="${MUSYNC_MEDIA_DIR:-$ROOT/media}"
@@ -15,6 +16,9 @@ export MUSYNC_WEB_DIR="${MUSYNC_WEB_DIR:-$ROOT/web/build}"
 # Set MUSYNC_PW_DRY_RUN=1 to plan-only (no pactl/wpctl mutations).
 # Unset / 0 for live graph on a real Pi session.
 export MUSYNC_PW_FEEDER="${MUSYNC_PW_FEEDER:-musync_feeder}"
+# Spotify OAuth default: 127.0.0.1:8080 (Spotify forbids localhost / musync.local).
+# Dashboard should also list :8081 for laptop override; Pi keeps 8080.
+export MUSYNC_SPOTIFY_REDIRECT_URI="${MUSYNC_SPOTIFY_REDIRECT_URI:-http://127.0.0.1:8080/api/streaming/spotify/callback}"
 
 cd "$ROOT"
 
@@ -43,10 +47,12 @@ echo "MuSync Pi launcher"
 echo "  backend:  $MUSYNC_BACKEND"
 echo "  python:   $PY"
 echo "  listen:   http://${MUSYNC_HOST}:${MUSYNC_PORT}"
+echo "  ui mDNS:  http://musync.local:${MUSYNC_PORT}  (UI only — Spotify OAuth uses 127.0.0.1, not .local)"
 echo "  devices:  $MUSYNC_DEVICES_CONFIG"
 echo "  media:    $MUSYNC_MEDIA_DIR"
 echo "  web:      $MUSYNC_WEB_DIR"
 echo "  feeder:   $MUSYNC_PW_FEEDER"
+echo "  Spotify redirect (Pi default): ${MUSYNC_SPOTIFY_REDIRECT_URI}"
 if [[ -n "${MUSYNC_SPOTIFY_CLIENT_ID:-}" && -n "${MUSYNC_SPOTIFY_CLIENT_SECRET:-}" ]]; then
   echo "  spotify:  credentials present → use Connect Spotify in UI (OAuth redirect)"
 else
@@ -188,13 +194,15 @@ echo
 echo "Qudelix + SPP via web UI:"
 echo "  1) Pair Qudelix (./scripts/pair_hci.sh hci0 or bluetoothctl)"
 echo "  2) ./scripts/run_pi.sh  (this script — uses .venv, clears stray ffmpeg)"
-echo "  3) Open http://<Pi-IP>:8080 → Device setup"
+echo "  3) Open http://musync.local:${MUSYNC_PORT} (or http://<Pi-IP>:${MUSYNC_PORT}) → Device setup"
 echo "     - Refresh → enable BT by name (Qudelix) — no MAC typing"
 echo "     - enable Phone SPP → Save sinks"
 echo "  4) Play hub-local; phone SPP app → Pi IP:port (not 0.0.0.0), s16le"
+echo "  Spotify: Dashboard needs 127.0.0.1:8080 and :8081 callbacks (not musync.local) — docs/spotify-apple.md"
 echo "  Checklist: docs/demo-checklist.md"
 echo
 echo "After boot, curl http://127.0.0.1:${MUSYNC_PORT}/api/health — look for READY=… MISSING=…"
+echo "  mDNS:     curl http://127.0.0.1:${MUSYNC_PORT}/api/mdns"
 echo
 
 exec "$PY" -m musync

@@ -56,7 +56,8 @@ automate wifi-connect; treat it as an optional OS-level bootstrap:
 2. Deploy MuSync, build UI (`./scripts/build_web.sh`), run `./scripts/run_pi.sh`
    (or systemd). First bring-up can use Ethernet or a pre-saved home SSID.
 3. On a phone/laptop already on the Pi’s current network, open
-   `http://<pi-ip>:8080` → **Wi-Fi** panel.
+   `http://musync.local:8080` (mDNS) or `http://<pi-ip>:8080` → **Wi-Fi** panel.
+   (`musync.local` is UI-only — Spotify redirects stay on `127.0.0.1`; see [mdns.md](mdns.md).)
 4. Enter **SSID / network name** (home router **or** phone hotspot) + password.
 5. **Save only** (optional) → **Join**.
 6. Confirm **Pi IP** updates (home LAN, or often `192.168.43.x` / `172.20.x` on hotspots).

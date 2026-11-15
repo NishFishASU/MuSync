@@ -25,7 +25,8 @@ fi
 
 echo "MuSync mock"
 echo "  listen:   http://${MUSYNC_HOST}:${MUSYNC_PORT}"
-echo "  Spotify redirect (dashboard): http://127.0.0.1:${MUSYNC_PORT}/api/streaming/spotify/callback"
+echo "  Spotify Dashboard: register BOTH 127.0.0.1:8080 and :8081 callbacks (not localhost / musync.local)"
+echo "  Spotify redirect (this run): http://127.0.0.1:${MUSYNC_PORT}/api/streaming/spotify/callback"
 if [[ -n "${MUSYNC_SPOTIFY_CLIENT_ID:-}" && -n "${MUSYNC_SPOTIFY_CLIENT_SECRET:-}" ]]; then
   echo "  spotify:  credentials present → Connect Spotify in UI"
 else

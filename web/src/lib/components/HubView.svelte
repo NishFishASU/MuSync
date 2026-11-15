@@ -2615,9 +2615,14 @@
 								</li>
 								<li>Copy <em>Client ID</em> and <em>Client Secret</em> into the fields above</li>
 								<li>
-									Redirect URI (exact match):
-									<code>http://&lt;Pi-IP&gt;:8080/api/streaming/spotify/callback</code>
-									(laptop mock: <code>127.0.0.1</code> + API port, not Vite :5173)
+									Dashboard redirect URIs (register <em>both</em>; Spotify forbids
+									<code>localhost</code> / <code>musync.local</code>):
+									<code>http://127.0.0.1:8080/api/streaming/spotify/callback</code>
+									and
+									<code>http://127.0.0.1:8081/api/streaming/spotify/callback</code>.
+									Set env to the API port you run (not Vite :5173). UI may use
+									<code>http://musync.local:8080</code> — OAuth still needs
+									<code>127.0.0.1</code> or Pi IP.
 								</li>
 								<li>Save here → <strong>Connect Spotify</strong> below → search on Queue</li>
 							</ol>
