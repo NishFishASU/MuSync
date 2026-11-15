@@ -154,6 +154,8 @@ Persist MAC ↔ `hciN` in `config/devices.yaml` (see `config/devices.pi-2sink.ex
 
 4. Keep MuSync on **mock** or onboard-only until HCI stays up for a full track; do not debug delay/volume while adapters reset.
 
+**Vendor driver / dead stick:** ASUS’s Windows/Linux vendor module for this dongle has been observed **failing to build on kernel 6.18** — stick with in-tree `btusb` + `firmware-realtek` on Pi OS rather than chasing the vendor tarball. If the same stick also shows **Windows Code 31** (device failed to start) on a PC, treat it as a **bad/failing BT600** and replace it; software workarounds will not help.
+
 ## Related
 
 - Fan-out / feeder graph: [pi-pipewire.md](./pi-pipewire.md)
