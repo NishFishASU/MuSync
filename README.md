@@ -73,7 +73,7 @@ Phone **input** (S21 FE → `bluez_input` → feeder): [docs/phone-bt-source-vs-
 USB / PC capture (ALSA auto-detect → feeder): [docs/usb-pc-capture.md](docs/usb-pc-capture.md).  
 HDMI / capture card → feeder: [docs/hdmi-capture.md](docs/hdmi-capture.md).  
 SPP phone **sink**: enable Phone SPP in Device setup, connect Simple Protocol Player to Pi IP:port — [docs/spp-network-sink.md](docs/spp-network-sink.md).  
-**Spotify** (OAuth Connect link in UI → librespot → `musync_feeder`) + **Apple Music** (best-effort search/AirPlay): [docs/spotify-apple.md](docs/spotify-apple.md) · env template `config/streaming.env.example` → `~/musync.env` (auto-loaded by `run_pi.sh`).  
+**Spotify** (OAuth Connect → librespot → `musync_feeder`) + **AirPlay receive** (shairport-sync → feeder): [docs/spotify-apple.md](docs/spotify-apple.md), [docs/airplay-receive.md](docs/airplay-receive.md) · env template `config/streaming.env.example` → `~/musync.env` (auto-loaded by `run_pi.sh`).  
 USB/PC capture needs a **USB-A sound card** — Pi 5 USB-C PD is power-only: [docs/usb-pc-capture.md](docs/usb-pc-capture.md).
 
 ## API (minimum)
@@ -94,18 +94,18 @@ USB/PC capture needs a **USB-A sound card** — Pi 5 USB-C PD is power-only: [do
 | `GET`/`PUT` | `/api/transport` | `{ state, position_ms, source_id?, queue_item_id?, title/artist/album/cover_url? }` |
 | `GET` | `/api/now-playing` | Unified now-playing (title, artist, album, cover) |
 | `GET` | `/api/now-playing/cover` | Embedded local cover bytes |
-| `GET` | `/api/sources` | Catalog: `local` + Spotify/Apple hub rows + input hosts |
+| `GET` | `/api/sources` | Catalog: `local` + Spotify/AirPlay hub rows + input hosts |
 | `PUT` | `/api/sources/active` | `{ id }` — activate catalog entry (feeder swap only) |
 | `GET`/`POST` | `/api/queue` | Song queue; each item has `source_type` + optional `input_id` |
 | `PATCH` | `/api/queue/{id}` | Switch `source_type` / bind phone-PC host without tearing down sinks |
 | `PUT` | `/api/queue/active` | `{ id }` — play this queue item (feeder swap only) |
 | `DELETE` | `/api/queue/{id}` | Remove a queue item |
-| `GET` | `/api/streaming` | Spotify/Apple auth status (no secrets) |
+| `GET` | `/api/streaming` | Spotify + AirPlay status (no secrets) |
 | `GET` | `/api/streaming/spotify/login` | Start Spotify OAuth |
-| `GET` | `/api/streaming/search` | `?provider=spotify\|apple&q=` |
-| `POST` | `/api/streaming/queue` | Queue a searched track (`activate` optional) |
-| `GET`/`POST` | `/api/inputs` | Register ≤4 hosts (`capture_path`: `bt_a2dp`\|`usb`\|`hdmi`\|`network`) |
-| `GET` | `/api/inputs/discover` | Live PipeWire sources (`bluez_input` / USB / HDMI) for host binding |
+| `GET` | `/api/streaming/search` | `?provider=spotify&q=` |
+| `POST` | `/api/streaming/queue` | Queue a searched Spotify track (`activate` optional) |
+| `GET`/`POST` | `/api/inputs` | Register ≤4 hosts (`capture_path`: `bt_a2dp`\|`usb`\|`hdmi`\|`airplay`\|`network`) |
+| `GET` | `/api/inputs/discover` | Live PipeWire sources (`bluez_input` / USB / HDMI / AirPlay) for host binding |
 | `POST` | `/api/inputs/{id}/upload` | Network path: upload file that plays into the feeder |
 | `PATCH`/`DELETE` | `/api/inputs/{id}` | Arm / bind endpoint / remove host |
 | `GET` | `/api/wifi` | Wi-Fi status + IPv4 (for SPP / LAN) |

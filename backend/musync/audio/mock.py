@@ -123,7 +123,7 @@ from .base import AudioBackend
 from .input_registry import InputRegistry, CAPTURE_NOTES
 from .source_session import SourceSession
 
-# Laptop/dev: S21 FE + USB + HDMI fixtures so UI can pick playable live input.
+# Laptop/dev: S21 FE + USB + HDMI + AirPlay fixtures for live input UI.
 _MOCK_CAPTURE_SOURCES = [
     DiscoveredCaptureSource(
         name="Galaxy S21 FE",
@@ -147,6 +147,14 @@ _MOCK_CAPTURE_SOURCES = [
         pw_name="alsa_input.usb-MACROSILICON_HDMI-00",
         mac="",
         capture_path=CapturePath.HDMI,
+        connected=True,
+    ),
+    DiscoveredCaptureSource(
+        name="AirPlay / shairport-sync",
+        pw_node="64",
+        pw_name="shairport-sync",
+        mac="",
+        capture_path=CapturePath.AIRPLAY,
         connected=True,
     ),
 ]
@@ -183,6 +191,16 @@ def _mock_live_hosts() -> list[InputHost]:
             connected=True,
             endpoint="alsa_input.usb-MACROSILICON_HDMI-00",
             note=CAPTURE_NOTES[CapturePath.HDMI],
+        ),
+        InputHost(
+            id="input-4",
+            name="AirPlay Receive",
+            kind=HostKind.OTHER,
+            capture_path=CapturePath.AIRPLAY,
+            armed=True,
+            connected=True,
+            endpoint="shairport-sync",
+            note=CAPTURE_NOTES[CapturePath.AIRPLAY],
         ),
     ]
 
@@ -685,7 +703,7 @@ class MockAudioBackend(AudioBackend):
                     )
                     auto_bound.append(waiting.id)
 
-            # Prefer auto-detect: bind USB / HDMI fixtures onto waiting hosts.
+            # Prefer auto-detect: bind USB / HDMI / AirPlay fixtures onto waiting hosts.
             _auto_bind_fixture(
                 CapturePath.USB, kind=HostKind.PC, keep_name_tokens=("laptop", "usb")
             )
@@ -693,6 +711,11 @@ class MockAudioBackend(AudioBackend):
                 CapturePath.HDMI,
                 kind=HostKind.OTHER,
                 keep_name_tokens=("hdmi", "capture"),
+            )
+            _auto_bind_fixture(
+                CapturePath.AIRPLAY,
+                kind=HostKind.OTHER,
+                keep_name_tokens=("airplay", "shairport"),
             )
             if auto_bound:
                 self._session.refresh_live_availability()
@@ -713,7 +736,7 @@ class MockAudioBackend(AudioBackend):
             return CaptureDiscoverResponse(
                 sources=sources,
                 detail=(
-                    "mock capture — Galaxy S21 FE + USB Audio + HDMI Capture fixtures"
+                    "mock capture — Galaxy S21 FE + USB + HDMI + AirPlay fixtures"
                     f"{auto_note}"
                 ),
             )
@@ -751,6 +774,6 @@ class MockAudioBackend(AudioBackend):
                 mapped_sinks=0,
                 graph_dry_run=True,
                 spotify_ready=stream.spotify.authenticated,
-                apple_ready=stream.apple.authenticated,
+                apple_ready=stream.airplay.configured,
                 detail=detail,
             )

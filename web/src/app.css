@@ -793,6 +793,14 @@ body {
 	font-size: 0.78rem;
 }
 
+.airplay-setup {
+	margin: 0.15rem 0 0;
+	padding-left: 1.15rem;
+	display: flex;
+	flex-direction: column;
+	gap: 0.2rem;
+}
+
 .stream-search {
 	display: flex;
 	flex-wrap: wrap;

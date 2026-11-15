@@ -1352,18 +1352,38 @@ class PipeWireBackend(AudioBackend):
                 return
             raise
 
+    def _resolve_airplay_source_ref(self) -> Optional[str]:
+        """Prefer a live AirPlay input host endpoint, else MUSYNC_AIRPLAY_SOURCE."""
+        from ..streaming import get_streaming_service
+
+        for host in self._inputs.list_hosts():
+            if (
+                host.capture_path == CapturePath.AIRPLAY
+                and host.connected
+                and host.endpoint
+            ):
+                return host.endpoint
+        env_src = get_streaming_service().apple_airplay_source()
+        if env_src:
+            return env_src
+        # Last resort: classify any discovered shairport source.
+        for node in self._discovered_sources:
+            if classify_capture_source(node) == CapturePath.AIRPLAY.value:
+                return node.name or node.id
+        return None
+
     def _start_apple_into_feeder(self) -> None:
-        """Best-effort: loop shairport/AirPlay PipeWire source into musync_feeder."""
+        """Loop AirPlay/shairport PipeWire source into musync_feeder (no MusicKit)."""
         from ..streaming import get_streaming_service
 
         svc = get_streaming_service()
-        source_ref = svc.apple_airplay_source()
+        source_ref = self._resolve_airplay_source_ref()
         if not source_ref:
             raise ValueError(svc.apple_play_note())
         self._ensure_feeder()
-        # Reuse capture loopback path with a synthetic host id.
+        host_id = "airplay-receive"
         cmds, notes = build_capture_loopback_commands(
-            host_id="apple-airplay",
+            host_id=host_id,
             feeder=self._feeder,
             source_ref=source_ref,
             tools=self._tools,
@@ -1372,10 +1392,10 @@ class PipeWireBackend(AudioBackend):
             log.info("%s", note)
         if self._env_dry_run():
             for cmd in cmds:
-                log.info("Dry-run Apple AirPlay capture: %s", " ".join(cmd))
-            self._active_capture_host_id = "apple-airplay"
+                log.info("Dry-run AirPlay capture: %s", " ".join(cmd))
+            self._active_capture_host_id = host_id
             return
-        self._unload_capture("apple-airplay")
+        self._unload_capture(host_id)
         for cmd in cmds:
             proc = self._exec_soft(cmd)
             if (
@@ -1386,12 +1406,12 @@ class PipeWireBackend(AudioBackend):
                 and cmd[2] == "module-loopback"
                 and proc.stdout.strip().isdigit()
             ):
-                self._capture_module_ids["apple-airplay"] = proc.stdout.strip()
-        self._active_capture_host_id = "apple-airplay"
-        log.info("Apple AirPlay capture %s → %s", source_ref, self._feeder)
+                self._capture_module_ids[host_id] = proc.stdout.strip()
+        self._active_capture_host_id = host_id
+        log.info("AirPlay capture %s → %s", source_ref, self._feeder)
 
     def _start_player_process(self) -> None:
-        """Start feeder: local mpv, streaming, network upload, or BT/USB capture.
+        """Start feeder: local mpv, streaming, network upload, or capture.
 
         Does not tear down sink loopbacks / SPP listens.
         """
@@ -1405,7 +1425,7 @@ class PipeWireBackend(AudioBackend):
             return
 
         if transport.source_type == SourceType.APPLE:
-            # Honest DRM limits — raise so UI shows AirPlay / MusicKit guidance.
+            # AirPlay receive only — MusicKit catalog search removed.
             self._start_apple_into_feeder()
             return
 
@@ -1419,6 +1439,7 @@ class PipeWireBackend(AudioBackend):
                 CapturePath.BT_A2DP,
                 CapturePath.USB,
                 CapturePath.HDMI,
+                CapturePath.AIRPLAY,
             }:
                 self._start_capture_into_feeder(host)
                 return
@@ -1618,6 +1639,87 @@ class PipeWireBackend(AudioBackend):
             bound.append(created.id)
         return bound
 
+    def _auto_bind_airplay_hosts(self, candidates: list[PwNode]) -> list[str]:
+        """Bind unbound shairport-sync / AirPlay sources onto AirPlay hosts."""
+        from ..streaming import get_streaming_service
+
+        airplay_nodes = [
+            n
+            for n in candidates
+            if classify_capture_source(n) == CapturePath.AIRPLAY.value
+        ]
+        env_src = get_streaming_service().apple_airplay_source()
+        if not airplay_nodes and env_src:
+            # Synthetic node from env when PipeWire discovery hasn't listed it yet.
+            airplay_nodes = [
+                PwNode(
+                    id=f"airplay:{env_src}",
+                    name=env_src,
+                    description="AirPlay / shairport-sync",
+                    mac="",
+                )
+            ]
+        if not airplay_nodes:
+            return []
+
+        bound: list[str] = []
+        used_endpoints = {
+            (h.endpoint or "").strip()
+            for h in self._inputs.list_hosts()
+            if h.capture_path == CapturePath.AIRPLAY and h.endpoint
+        }
+
+        for node in airplay_nodes:
+            source_ref = node.name or node.id
+            if source_ref in used_endpoints:
+                continue
+            waiting = next(
+                (
+                    h
+                    for h in self._inputs.list_hosts()
+                    if h.capture_path == CapturePath.AIRPLAY
+                    and not (h.connected and h.endpoint)
+                ),
+                None,
+            )
+            label = (node.description or "").strip() or node.name
+            if waiting:
+                keep = "airplay" in waiting.name.lower() or "shairport" in waiting.name.lower()
+                patch_kwargs: dict = {
+                    "capture_path": CapturePath.AIRPLAY,
+                    "connected": True,
+                    "endpoint": source_ref,
+                    "armed": True,
+                    "kind": HostKind.OTHER,
+                    "note": CAPTURE_NOTES[CapturePath.AIRPLAY],
+                }
+                if label and not keep:
+                    patch_kwargs["name"] = label
+                self._inputs.patch_host(waiting.id, InputHostPatch(**patch_kwargs))
+                used_endpoints.add(source_ref)
+                bound.append(waiting.id)
+                continue
+            if any(
+                (h.endpoint or "") == source_ref for h in self._inputs.list_hosts()
+            ):
+                continue
+            if len(self._inputs.list_hosts()) >= MAX_INPUT_HOSTS:
+                break
+            created = self._inputs.add_host(
+                InputHostCreate(
+                    name=label or "AirPlay Receive",
+                    kind=HostKind.OTHER,
+                    capture_path=CapturePath.AIRPLAY,
+                    armed=True,
+                    connected=True,
+                    endpoint=source_ref,
+                    note=CAPTURE_NOTES[CapturePath.AIRPLAY],
+                )
+            )
+            used_endpoints.add(source_ref)
+            bound.append(created.id)
+        return bound
+
     def _auto_bind_bt_hosts(self, candidates: list[PwNode]) -> list[str]:
         """Bind unbound bluez_input sources onto phone BT A2DP hosts (e.g. Galaxy S21)."""
         bt_nodes = [
@@ -1751,7 +1853,7 @@ class PipeWireBackend(AudioBackend):
                         ),
                     )
 
-        # Prefer auto-detect: claim USB / HDMI / BT A2DP without manual bind.
+        # Prefer auto-detect: claim USB / HDMI / AirPlay / BT A2DP without manual bind.
         try:
             self._auto_bind_hdmi_hosts(candidates)
         except Exception as exc:  # noqa: BLE001
@@ -1760,6 +1862,10 @@ class PipeWireBackend(AudioBackend):
             self._auto_bind_usb_hosts(candidates)
         except Exception as exc:  # noqa: BLE001
             log.debug("USB auto-bind skipped: %s", exc)
+        try:
+            self._auto_bind_airplay_hosts(candidates)
+        except Exception as exc:  # noqa: BLE001
+            log.debug("AirPlay auto-bind skipped: %s", exc)
         try:
             self._auto_bind_bt_hosts(candidates)
         except Exception as exc:  # noqa: BLE001
@@ -2245,7 +2351,7 @@ class PipeWireBackend(AudioBackend):
             )
             remotes_by_mac = {normalize_mac(r.mac): r for r in remotes if r.mac}
 
-            # Auto-bind HDMI / USB before building the response rows.
+            # Auto-bind HDMI / USB / AirPlay before building the response rows.
             auto_ids: list[str] = []
             try:
                 auto_ids.extend(self._auto_bind_hdmi_hosts(candidates))
@@ -2255,6 +2361,10 @@ class PipeWireBackend(AudioBackend):
                 auto_ids.extend(self._auto_bind_usb_hosts(candidates))
             except Exception as exc:  # noqa: BLE001
                 log.debug("USB auto-bind on discover failed: %s", exc)
+            try:
+                auto_ids.extend(self._auto_bind_airplay_hosts(candidates))
+            except Exception as exc:  # noqa: BLE001
+                log.debug("AirPlay auto-bind on discover failed: %s", exc)
 
             configured_by_name = {
                 h.name.strip().lower(): h.id for h in self._inputs.list_hosts()
@@ -2404,7 +2514,7 @@ class PipeWireBackend(AudioBackend):
                 mapped_sinks=mapped,
                 graph_dry_run=dry,
                 spotify_ready=stream.spotify.authenticated,
-                apple_ready=stream.apple.authenticated,
+                apple_ready=stream.airplay.configured,
                 detail=(
                     f"{detail}; mapped={mapped}/{len(devices)}; "
                     f"planned_links={links}; dry_run={dry}; "

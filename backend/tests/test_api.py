@@ -113,7 +113,13 @@ def test_queue_source_type_switch(client: TestClient) -> None:
     assert hosts.status_code == 200
     assert len(hosts.json()) >= 1
     live = next(h for h in hosts.json() if h.get("connected"))
-    # Create an unbound waiting host (mock seeds BT+USB as live).
+    # Mock seeds 4 live hosts (at max) — free a slot before adding a waiting host.
+    hdmi = next(
+        (h for h in hosts.json() if h.get("capture_path") == "hdmi"),
+        None,
+    )
+    if hdmi:
+        client.delete(f"/api/inputs/{hdmi['id']}")
     waiting_res = client.post(
         "/api/inputs",
         json={

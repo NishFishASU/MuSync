@@ -394,13 +394,33 @@ def looks_like_hdmi_capture(text: str) -> bool:
     return any(m in hay for m in _HDMI_CAPTURE_MARKERS)
 
 
+_AIRPLAY_MARKERS = (
+    "shairport",
+    "shairport-sync",
+    "airplay",
+    "raop",
+    "raop-sink",
+)
+
+
+def looks_like_airplay(text: str) -> bool:
+    """True when PipeWire labels describe a shairport-sync / AirPlay receive source."""
+    hay = (text or "").lower()
+    if not hay:
+        return False
+    return any(m in hay for m in _AIRPLAY_MARKERS)
+
+
 def classify_capture_source(node: PwNode) -> str:
-    """Return capture_path value: bt_a2dp | hdmi | usb | network (fallback)."""
+    """Return capture_path value: bt_a2dp | airplay | hdmi | usb | network."""
     hay = f"{node.name} {node.description}".lower()
     if "bluez_input" in hay or "bluez_source" in hay or (
         node.mac and "bluez" in hay
     ):
         return "bt_a2dp"
+    # AirPlay / shairport before HDMI/USB — not a capture card.
+    if looks_like_airplay(hay):
+        return "airplay"
     # HDMI / capture cards before generic USB — many are USB UAC dongles.
     if looks_like_hdmi_capture(hay) or node.id.startswith("alsa:hdmi:"):
         return "hdmi"
@@ -421,11 +441,13 @@ def classify_capture_source(node: PwNode) -> str:
 
 
 def is_capture_candidate(node: PwNode) -> bool:
-    """Filter monitor/virtual sources; keep BT / USB / HDMI capture inputs."""
+    """Filter monitor/virtual sources; keep BT / USB / HDMI / AirPlay inputs."""
     hay = f"{node.name} {node.description}".lower()
     if "musync_feeder" in hay or ".monitor" in hay:
         return False
     if "bluez_input" in hay or "bluez_source" in hay:
+        return True
+    if looks_like_airplay(hay):
         return True
     if looks_like_hdmi_capture(hay) or node.id.startswith("alsa:hdmi:"):
         return True
@@ -749,6 +771,8 @@ def match_capture_source(
             aliases.extend(["usb", "audio", "codec", "headset"])
         if "hdmi" in want_name or "capture" in want_name:
             aliases.extend(["hdmi", "capture", "ms2109", "macrosilicon", "elgato"])
+        if "airplay" in want_name or "shairport" in want_name:
+            aliases.extend(["airplay", "shairport", "raop"])
         for n in nodes:
             hay = f"{n.description} {n.name}".lower()
             if any(a in hay for a in aliases):

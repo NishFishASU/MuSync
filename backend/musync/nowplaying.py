@@ -32,9 +32,9 @@ STREAMING_SAMPLES: dict[SourceType, dict[str, str]] = {
         "cover_url": MOCK_COVER_PATH,
     },
     SourceType.APPLE: {
-        "title": "Mock Apple Song",
-        "artist": "MuSync MusicKit",
-        "album": "Streaming Mock",
+        "title": "AirPlay",
+        "artist": "AirPlay receive",
+        "album": "shairport-sync → musync_feeder",
         "cover_url": MOCK_COVER_PATH,
     },
 }
@@ -102,23 +102,21 @@ def build_now_playing(session: "SourceSession") -> NowPlaying:
         except Exception as exc:  # noqa: BLE001
             log.debug("spotify now-playing enrich: %s", exc)
 
-    # Apple MusicKit catalog metadata.
-    if source_type == SourceType.APPLE and locator:
+    # AirPlay receive (SourceType.APPLE) — no MusicKit catalog.
+    if source_type == SourceType.APPLE:
         try:
             from .streaming import get_streaming_service
 
-            meta = get_streaming_service().apple.track_metadata(locator)
-            if meta:
-                title = title or meta.title
-                artist = artist or meta.artist
-                album = album or meta.album
-                if meta.cover_url:
-                    cover_url = meta.cover_url
-                    has_cover = True
-            if not get_streaming_service().apple_playable():
-                note = note or get_streaming_service().apple_play_note()
+            svc = get_streaming_service()
+            title = title or "AirPlay"
+            artist = artist or "AirPlay receive"
+            album = album or "shairport-sync → musync_feeder"
+            if not svc.apple_playable():
+                note = note or svc.apple_play_note()
+            else:
+                note = note or "AirPlay → musync_feeder"
         except Exception as exc:  # noqa: BLE001
-            log.debug("apple now-playing enrich: %s", exc)
+            log.debug("airplay now-playing enrich: %s", exc)
 
     # Live input / BT AVRCP best-effort: host name + capture path.
     if source_type == SourceType.INPUT:

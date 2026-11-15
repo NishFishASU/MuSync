@@ -380,10 +380,39 @@ def api_delete_input(host_id: str) -> Response:
     return Response(status_code=204)
 
 
+def _streaming_status_with_airplay() -> StreamingStatus:
+    """Spotify + AirPlay status; enrich AirPlay from live input hosts when possible."""
+    from .audio.input_registry import host_is_live
+    from .models import CapturePath
+
+    discovered = None
+    live = False
+    host_name = None
+    try:
+        for host in backend.list_inputs():
+            if host.capture_path != CapturePath.AIRPLAY:
+                continue
+            if host_is_live(host):
+                discovered = host.endpoint
+                live = True
+                host_name = host.name
+                break
+            if host.endpoint and not discovered:
+                discovered = host.endpoint
+                host_name = host.name
+    except Exception:  # noqa: BLE001
+        pass
+    return get_streaming_service().status(
+        airplay_discovered=discovered,
+        airplay_live=live,
+        airplay_host_name=host_name,
+    )
+
+
 @app.get("/api/streaming", response_model=StreamingStatus)
 def api_streaming_status() -> StreamingStatus:
-    """Spotify / Apple auth + capability status (secrets never returned)."""
-    return get_streaming_service().status()
+    """Spotify auth + AirPlay receive status (secrets never returned)."""
+    return _streaming_status_with_airplay()
 
 
 def _spotify_redirect_uri(request: Request) -> str:
@@ -513,16 +542,16 @@ def api_spotify_logout() -> StreamingStatus:
             backend._session.refresh_live_availability()  # type: ignore[attr-defined]
         except Exception:  # noqa: BLE001
             pass
-    return get_streaming_service().status()
+    return _streaming_status_with_airplay()
 
 
 @app.get("/api/streaming/search", response_model=StreamingSearchResponse)
 def api_streaming_search(
-    provider: str = Query(..., description="spotify or apple"),
+    provider: str = Query(..., description="spotify"),
     q: str = Query(..., min_length=1),
     limit: int = Query(15, ge=1, le=25),
 ) -> StreamingSearchResponse:
-    """Search Spotify/Apple. Always returns 400 with a real message — never bare 500."""
+    """Search Spotify. Always returns 400 with a real message — never bare 500."""
     p = (provider or "").strip().lower()
     svc = get_streaming_service()
     if p == "spotify" and not svc.spotify.configured():
@@ -533,25 +562,24 @@ def api_streaming_search(
         )
     if p == "spotify" and not svc.spotify.authenticated():
         raise ValueError("Connect Spotify first (Streaming tab), then search from Queue")
-    if p in {"apple", "apple_music", "music"} and not svc.apple.configured():
-        raise ValueError(
-            "Apple Music not configured — set MUSYNC_APPLE_TEAM_ID, "
-            "MUSYNC_APPLE_KEY_ID, MUSYNC_APPLE_PRIVATE_KEY_PATH in ~/musync.env "
-            "(search only; hub PCM needs AirPlay — docs/spotify-apple.md)"
-        )
     try:
         return svc.search(provider, q, limit=limit)
     except ValueError:
         raise
     except Exception as exc:  # noqa: BLE001 — surface provider failures in the UI
-        label = "Spotify" if p == "spotify" else "Apple Music" if p.startswith("apple") else "Streaming"
+        label = "Spotify" if p == "spotify" else "Streaming"
         raise ValueError(f"{label} search failed: {exc}") from exc
 
 
 @app.post("/api/streaming/queue", response_model=QueueItem, status_code=201)
 def api_streaming_queue_add(body: StreamingQueueAdd) -> QueueItem:
-    """Add a searched track to the hub queue and optionally activate it."""
-    source_type = SourceType.SPOTIFY if body.provider == "spotify" else SourceType.APPLE
+    """Add a searched Spotify track to the hub queue and optionally activate it."""
+    if body.provider != "spotify":
+        raise ValueError(
+            "Only Spotify search queue is supported — use AirPlay live input "
+            "for Apple devices (docs/airplay-receive.md)"
+        )
+    source_type = SourceType.SPOTIFY
     # Keep title clean; artist/album/cover live on dedicated fields for now-playing.
     title = body.title or body.uri
     item = backend.add_queue_item(

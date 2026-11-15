@@ -220,11 +220,12 @@ class MediaKind(str, Enum):
 
 
 class CapturePath(str, Enum):
-    """How a phone/PC / HDMI capture feeds the Pi."""
+    """How a phone/PC / HDMI / AirPlay capture feeds the Pi."""
 
     BT_A2DP = "bt_a2dp"  # device as A2DP source → bluez_input → feeder
     USB = "usb"  # USB audio interface / UAC from PC → feeder
     HDMI = "hdmi"  # HDMI / capture-card ALSA → PipeWire → feeder
+    AIRPLAY = "airplay"  # shairport-sync AirPlay receive → PipeWire → feeder
     NETWORK = "network"  # uploaded file / network path played into feeder
 
 
@@ -448,7 +449,7 @@ class Health(BaseModel):
 
 
 class StreamingProviderStatus(BaseModel):
-    provider: Literal["spotify", "apple"]
+    provider: Literal["spotify"]
     configured: bool = False
     authenticated: bool = False
     display_name: Optional[str] = None
@@ -458,21 +459,31 @@ class StreamingProviderStatus(BaseModel):
     feeder: Optional[str] = None
     redirect_uri: Optional[str] = None
     premium_required: Optional[bool] = None
-    user_token_set: Optional[bool] = None
-    airplay_source: Optional[str] = None
-    playback_mode: Optional[str] = None
     limits: list[str] = Field(default_factory=list)
+    note: str = ""
+
+
+class AirplayStatus(BaseModel):
+    """AirPlay receive (shairport-sync) → musync_feeder — not Apple MusicKit."""
+
+    provider: Literal["airplay"] = "airplay"
+    configured: bool = False
+    receiving: bool = False
+    source: Optional[str] = None
+    receiver_name: Optional[str] = None
+    shairport_available: Optional[bool] = None
+    setup: list[str] = Field(default_factory=list)
     note: str = ""
 
 
 class StreamingStatus(BaseModel):
     spotify: StreamingProviderStatus
-    apple: StreamingProviderStatus
+    airplay: AirplayStatus
     mock_playback: bool = False
 
 
 class StreamingSearchHit(BaseModel):
-    provider: Literal["spotify", "apple"]
+    provider: Literal["spotify"]
     id: str
     uri: str
     title: str
@@ -483,7 +494,7 @@ class StreamingSearchHit(BaseModel):
 
 
 class StreamingSearchResponse(BaseModel):
-    provider: Literal["spotify", "apple"]
+    provider: Literal["spotify"]
     query: str
     hits: list[StreamingSearchHit] = Field(default_factory=list)
 
@@ -491,7 +502,7 @@ class StreamingSearchResponse(BaseModel):
 class StreamingQueueAdd(BaseModel):
     """Add a searched streaming track to the song queue (hub, no host binding)."""
 
-    provider: Literal["spotify", "apple"]
+    provider: Literal["spotify"]
     uri: str
     title: Optional[str] = None
     artist: Optional[str] = None
