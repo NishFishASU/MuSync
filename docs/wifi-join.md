@@ -28,11 +28,26 @@ text before it reaches logs/clients.
 
 | Method | Path | Purpose |
 |--------|------|---------|
-| `GET` | `/api/wifi` | Status: SSID, IPv4 list (for SPP), interface, backend |
+| `GET` | `/api/wifi` | Status: SSID, IPv4 list, `lan_url` (`http://PI_IP:PORT`), `port`, interface, backend |
+| `GET` | `/api/wifi/lan-qr.svg` | SVG QR encoding the same LAN URL (Wi‑Fi card + print/scan) |
 | `GET` | `/api/wifi/networks` | Saved profiles (no passwords) |
 | `POST` | `/api/wifi/networks` | Pre-save `{ "ssid", "password?" }` |
 | `POST` | `/api/wifi/connect` | Join `{ "ssid", "password?" }` |
 | `DELETE` | `/api/wifi/networks/{ssid}` | Forget a saved profile |
+
+### LAN URL card + Pi HDMI banner
+
+The **Wi‑Fi** panel shows a large **LAN URL** (`http://<Pi-IP>:8080`) and a scannable QR
+(same payload as `GET /api/wifi/lan-qr.svg`).
+
+On Pi boot, `./scripts/run_pi.sh` (and `deploy/systemd/musync.service` `ExecStartPre`)
+prints a console/HDMI banner with that URL plus a **printable ASCII QR** so a phone can
+open the hub without typing an IP:
+
+```bash
+python -m musync.lan_banner          # stdout
+python -m musync.lan_banner --console  # also /dev/console + /dev/tty1
+```
 
 ### Laptop / cloud
 
@@ -56,7 +71,8 @@ automate wifi-connect; treat it as an optional OS-level bootstrap:
 2. Deploy MuSync, build UI (`./scripts/build_web.sh`), run `./scripts/run_pi.sh`
    (or systemd). First bring-up can use Ethernet or a pre-saved home SSID.
 3. On a phone/laptop already on the Pi’s current network, open
-   `http://musync.local:8080` (mDNS) or `http://<pi-ip>:8080` → **Wi-Fi** panel.
+   `http://musync.local:8080` (mDNS) or `http://<pi-ip>:8080` → **Wi-Fi** panel
+   (or scan the HDMI boot QR / in-app QR for the same LAN URL).
    (`musync.local` is UI-only — Spotify redirects stay on `127.0.0.1`; see [mdns.md](mdns.md).)
 4. Enter **SSID / network name** (home router **or** phone hotspot) + password.
 5. **Save only** (optional) → **Join**.

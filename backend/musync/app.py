@@ -16,6 +16,7 @@ from fastapi.staticfiles import StaticFiles
 from . import __version__
 from .audio import AudioBackend, create_backend
 from .config import media_library_path, resolve_media_file, web_root
+from .lan_url import enrich_wifi_status, lan_ui_url, svg_qr
 from .mdns import get_mdns_status, start_hub_mdns, stop_hub_mdns
 from .streaming.spotify import default_redirect_uri
 from .models import (
@@ -736,14 +737,45 @@ def api_mdns_status() -> MdnsStatus:
     return MdnsStatus.model_validate(get_mdns_status().as_dict())
 
 
-@app.get("/api/wifi", response_model=WifiStatus)
-def api_wifi_status() -> WifiStatus:
-    """Current Wi-Fi association and IPv4 addresses (for SPP / LAN access)."""
+def _wifi_status_enriched() -> WifiStatus:
+    """Wi‑Fi status plus ``lan_url`` / ``port`` / mDNS hostname hint."""
     status = wifi_backend.status()
     mdns = get_mdns_status()
     if mdns.hostname:
         status.mdns_hostname = mdns.hostname
-    return status
+    return enrich_wifi_status(status)
+
+
+@app.get("/api/wifi", response_model=WifiStatus)
+def api_wifi_status() -> WifiStatus:
+    """Current Wi-Fi association and IPv4 addresses (for SPP / LAN access)."""
+    return _wifi_status_enriched()
+
+
+@app.get("/api/wifi/lan-qr.svg")
+def api_wifi_lan_qr() -> Response:
+    """SVG QR for ``http://PI_IP:PORT`` — same payload as the Wi‑Fi URL card / HDMI banner."""
+    status = _wifi_status_enriched()
+    url = status.lan_url or lan_ui_url(status.ips)
+    if not url:
+        raise HTTPException(
+            status_code=404,
+            detail="No LAN IP yet — join Wi‑Fi first, then reload the QR",
+        )
+    try:
+        markup = svg_qr(url)
+    except ImportError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="QR support missing — pip install qrcode",
+        ) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return Response(
+        content=markup,
+        media_type="image/svg+xml",
+        headers={"Cache-Control": "no-store"},
+    )
 
 
 @app.get("/api/wifi/networks", response_model=list[WifiNetwork])
@@ -761,7 +793,11 @@ def api_wifi_save_network(body: WifiSaveRequest) -> WifiNetwork:
 @app.post("/api/wifi/connect", response_model=WifiStatus)
 def api_wifi_connect(body: WifiConnectRequest) -> WifiStatus:
     """Join a network; omit password when the profile was pre-saved."""
-    return wifi_backend.connect(body.ssid, body.password)
+    status = wifi_backend.connect(body.ssid, body.password)
+    mdns = get_mdns_status()
+    if mdns.hostname:
+        status.mdns_hostname = mdns.hostname
+    return enrich_wifi_status(status)
 
 
 @app.delete("/api/wifi/networks/{ssid}", status_code=204)

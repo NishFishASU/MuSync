@@ -416,6 +416,9 @@ export function spaPollRequestsPerSecond(cadence) {
  * @property {string[]} ips
  * @property {string | null} [interface]
  * @property {string} [detail]
+ * @property {string | null} [mdns_hostname]
+ * @property {number} [port]
+ * @property {string | null} [lan_url]
  */
 
 /**

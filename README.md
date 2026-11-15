@@ -37,7 +37,7 @@ cd web && npm install && npm run dev   # terminal 2 — Vite on :5173
 
 Open the UI on a phone or PC on the same network (bind `MUSYNC_HOST=0.0.0.0` if needed).
 
-Wi-Fi join — home network or phone hotspot (pre-save SSID, join, show IP for SPP): [docs/wifi-join.md](docs/wifi-join.md).
+Wi-Fi join — home network or phone hotspot (pre-save SSID, join, big LAN URL + QR for SPP/UI): [docs/wifi-join.md](docs/wifi-join.md).
 
 ### Tests
 
@@ -119,7 +119,8 @@ USB/PC capture needs a **USB-A sound card** — Pi 5 USB-C PD is power-only: [do
 | `GET` | `/api/inputs/discover` | Live PipeWire sources (`bluez_input` / USB / HDMI / AirPlay) for host binding |
 | `POST` | `/api/inputs/{id}/upload` | Network path: upload file that plays into the feeder |
 | `PATCH`/`DELETE` | `/api/inputs/{id}` | Arm / bind endpoint / remove host |
-| `GET` | `/api/wifi` | Wi-Fi status + IPv4 (for SPP / LAN) + `mdns_hostname` hint |
+| `GET` | `/api/wifi` | Wi-Fi status + IPv4 + `lan_url` (`http://PI_IP:PORT`) + `mdns_hostname` |
+| `GET` | `/api/wifi/lan-qr.svg` | SVG QR for the LAN UI URL (Wi‑Fi card / print) |
 | `GET` | `/api/mdns` | `musync.local` UI advertise status (not for Spotify redirects) |
 | `GET`/`POST`/`DELETE` | `/api/wifi/networks` | List / pre-save / forget SSIDs (no passwords returned) |
 | `POST` | `/api/wifi/connect` | Join SSID (`password` optional if saved) |

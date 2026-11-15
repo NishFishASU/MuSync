@@ -16,7 +16,6 @@ Per-sink delay/volume apply on the ffmpeg ``-af`` chain. Optional Cast
 from __future__ import annotations
 
 import logging
-import socket
 import subprocess
 import time
 from dataclasses import dataclass
@@ -92,25 +91,9 @@ def cast_ffmpeg_listen_url(device: Device) -> str:
 
 def guess_lan_ipv4() -> str:
     """Best-effort primary LAN IPv4 for Cast clients (not loopback)."""
-    try:
-        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        try:
-            sock.connect(("8.8.8.8", 80))
-            ip = sock.getsockname()[0]
-        finally:
-            sock.close()
-        if ip and not ip.startswith("127."):
-            return ip
-    except OSError:
-        pass
-    try:
-        for info in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET):
-            ip = info[4][0]
-            if ip and not ip.startswith("127."):
-                return ip
-    except OSError:
-        pass
-    return ""
+    from ..lan_url import guess_lan_ipv4 as _guess
+
+    return _guess()
 
 
 def free_cast_listen_port(port: int, *, settle_s: float = 0.2) -> str:
