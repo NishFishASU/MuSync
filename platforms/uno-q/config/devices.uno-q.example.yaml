@@ -1,0 +1,41 @@
+# Uno Q hub starter — 1 BT sink first, optional second USB HCI later.
+#
+#   cp platforms/uno-q/config/devices.uno-q.example.yaml config/devices.yaml
+#   # set MAC from bluetoothctl after headless BT audio is configured
+#   export MUSYNC_DEVICES_CONFIG="$PWD/config/devices.yaml"
+#   export MUSYNC_PLATFORM=uno-q
+#   export MUSYNC_BACKEND=mock   # then pipewire / uno_q once the port lands
+#   ./platforms/uno-q/scripts/run_uno_q.sh
+#
+# Do not assume 6× HCI. Prove sink-1, then enable sink-2 only with a measured
+# USB dongle. SPP is stretch on Uno Q — left disabled here.
+# See docs/uno-q-hub.md.
+version: 1
+max_sinks: 2
+max_spp_sinks: 0
+devices:
+  # Onboard BlueZ A2DP speaker (or first USB HCI once mapped)
+  - id: sink-1
+    name: UnoQ Speaker
+    mac: "REPLACE_WITH_SPEAKER_MAC"
+    hci: hci0
+    connected: false
+    delay_ms: 0
+    volume: 0.85
+    gain: 1.0
+    mute: false
+    enabled: true
+    pw_node: ""
+
+  # Optional USB BT dongle — keep disabled until single-sink sync works
+  - id: sink-2
+    name: USB Dongle Speaker
+    mac: "REPLACE_WITH_SPEAKER_B_MAC"
+    hci: hci1
+    connected: false
+    delay_ms: 40
+    volume: 0.85
+    gain: 1.0
+    mute: false
+    enabled: false
+    pw_node: ""

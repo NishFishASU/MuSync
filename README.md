@@ -68,6 +68,8 @@ docs/spp-network-sink.md              # phone as SPP TCP *output*
 docs/phone-bt-source-vs-spp-sink.md   # phone as BT A2DP *source* vs SPP sink
 docs/wifi-join.md                     # phone hotspot join (nmcli)
 docs/volume-profiles.md               # silent-disco preferred × gain + S_u × G_d learning
+docs/uno-q-hub.md                     # dual-target: Uno Q as parallel full hub (scaffold)
+platforms/uno-q/                      # Uno Q host Debian stubs (audio backend, config, scripts)
 backend/musync/wifi/       # nmcli on Pi; mock on laptop
 scripts/build_web.sh  run_dev.sh  run_pi.sh  pair_hci.sh  (pair_bt600.sh → alias)
 ```
@@ -77,7 +79,8 @@ USB / PC capture (ALSA auto-detect → feeder): [docs/usb-pc-capture.md](docs/us
 HDMI / capture card → feeder: [docs/hdmi-capture.md](docs/hdmi-capture.md).  
 SPP phone **sink**: enable Phone SPP in Device setup, connect Simple Protocol Player to Pi IP:port — [docs/spp-network-sink.md](docs/spp-network-sink.md).  
 **Spotify** (OAuth Connect → librespot → `musync_feeder`) + **AirPlay receive** (shairport-sync → feeder) + **YouTube** (Data API search + yt-dlp → ffmpeg → feeder): [docs/spotify-apple.md](docs/spotify-apple.md), [docs/airplay-receive.md](docs/airplay-receive.md), [docs/youtube.md](docs/youtube.md) · env template `config/streaming.env.example` → `~/musync.env` (auto-loaded by `run_pi.sh`).  
-USB/PC capture needs a **USB-A sound card** — Pi 5 USB-C PD is power-only: [docs/usb-pc-capture.md](docs/usb-pc-capture.md).
+USB/PC capture needs a **USB-A sound card** — Pi 5 USB-C PD is power-only: [docs/usb-pc-capture.md](docs/usb-pc-capture.md).  
+**Arduino Uno Q** as a **parallel full hub** (API + BT dongles + synced outs; not Grove-only): [docs/uno-q-hub.md](docs/uno-q-hub.md) · stubs in `platforms/uno-q/`. Pi 5 remains the primary proven PipeWire target.
 
 ## API (minimum)
 
@@ -246,8 +249,9 @@ sudo systemctl enable --now musync
 
 ## Out of scope (this MVP)
 
-Lip-sync picture path (HDMI video display), HDMI-local UI, Uno Q / Grove, wired outs, guided clap calibration.
-(Local video + HDMI/capture **audio** → feeder are supported; picture stays local to the capture/display path.)
+Lip-sync picture path (HDMI video display), HDMI-local UI, Grove physical controls, wired outs, guided clap calibration.
+(Local video + HDMI/capture **audio** → feeder are supported; picture stays local to the capture/display path.)  
+Uno Q **full hub** port is scaffolded under `platforms/uno-q/` / [docs/uno-q-hub.md](docs/uno-q-hub.md) — not required for the Pi demo path.
 
 ## License
 
