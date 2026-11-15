@@ -127,6 +127,8 @@
 	let btScanning = $state(false);
 	let btScanBusy = $state(false);
 	let btConnectBusy = $state('');
+	/** Preferred HCI for next Connect (empty = auto). */
+	let preferredHci = $state('');
 	/** @type {ReturnType<typeof setInterval> | null} */
 	let btScanPoll = null;
 
@@ -276,6 +278,21 @@
 	});
 
 	const healthyAdapterCount = $derived(btAdapters.filter((a) => a.healthy !== false).length);
+	const usedHcis = $derived(
+		new Set(
+			devices
+				.filter((d) => d.kind === 'bluetooth' && d.hci)
+				.map((d) => String(d.hci).toLowerCase())
+		)
+	);
+	const freeHealthyAdapters = $derived(
+		btAdapters.filter(
+			(a) => a.healthy !== false && !usedHcis.has(String(a.hci).toLowerCase())
+		)
+	);
+	const hasUsbAdapters = $derived(
+		btAdapters.some((a) => a.onboard === false || a.bus === 'usb')
+	);
 
 	/** @param {import('$lib/api.js').Device} d */
 	function sinkStatusLabel(d) {
@@ -493,11 +510,17 @@
 		btConnectBusy = bt.mac;
 		setupMessage = '';
 		try {
-			const res = await connectBluetooth({
+			/** @type {{ mac: string, name?: string, hci?: string, enable_as_output?: boolean }} */
+			const body = {
 				mac: bt.mac,
 				name: bt.name,
 				enable_as_output: true
-			});
+			};
+			const want = preferredHci.trim().toLowerCase();
+			if (want && freeHealthyAdapters.some((a) => a.hci === want)) {
+				body.hci = want;
+			}
+			const res = await connectBluetooth(body);
 			if (res.bluetooth) applyBtRows(res.bluetooth);
 			applyAdapterStatus(res);
 			if (res.ok) {
@@ -508,6 +531,9 @@
 				if (res.device?.id) selectedId = res.device.id;
 				health = await getHealth().catch(() => health);
 				if (res.soft_warn && !res.device) btSoftWarn = res.soft_warn;
+				if (res.device?.hci && preferredHci === res.device.hci) {
+					preferredHci = '';
+				}
 			} else {
 				setupMessage = res.detail || `Connect failed for ${bt.name}`;
 				if (res.soft_warn) btSoftWarn = res.soft_warn;
@@ -1594,9 +1620,11 @@
 			{#if btAdapters.length}
 				<ul class="adapter-list" aria-label="Bluetooth adapters">
 					{#each btAdapters as adapter (adapter.hci)}
+						{@const used = usedHcis.has(String(adapter.hci).toLowerCase())}
 						<li
 							class="adapter-chip"
 							class:adapter-dead={adapter.healthy === false}
+							class:adapter-used={used && adapter.healthy !== false}
 							title={adapter.detail || adapter.name || adapter.hci}
 						>
 							<span class="adapter-hci">{adapter.hci}</span>
@@ -1605,12 +1633,47 @@
 							{:else}
 								<span class="adapter-tag">USB</span>
 							{/if}
-							<span class="status-pill {adapter.healthy === false ? 'missing' : 'linked'}">
-								{adapter.healthy === false ? 'dead' : adapter.powered === false ? 'off' : 'ready'}
+							{#if adapter.usb_id}
+								<span class="adapter-usb">{adapter.usb_id}</span>
+							{/if}
+							<span
+								class="status-pill {adapter.healthy === false
+									? 'missing'
+									: used
+										? 'warn'
+										: 'linked'}"
+							>
+								{adapter.healthy === false
+									? 'dead'
+									: used
+										? 'in use'
+										: adapter.powered === false
+											? 'off'
+											: 'ready'}
 							</span>
 						</li>
 					{/each}
 				</ul>
+				{#if freeHealthyAdapters.length > 1}
+					<label class="adapter-assign">
+						<span class="adapter-assign-label">Assign HCI on Connect</span>
+						<select bind:value={preferredHci} class="adapter-select">
+							<option value="">Auto (onboard first)</option>
+							{#each freeHealthyAdapters as a (a.hci)}
+								<option value={a.hci}>
+									{a.hci}{a.onboard ? ' · onboard' : ' · USB'}{a.usb_id
+										? ` · ${a.usb_id}`
+										: ''}
+								</option>
+							{/each}
+						</select>
+					</label>
+				{/if}
+				{#if hasUsbAdapters}
+					<p class="hint adapter-untested">
+						USB HCI path is soft-fail ready — multi-dongle A2DP is untested without hardware.
+					</p>
+				{/if}
 			{:else}
 				<p class="hint adapter-empty">
 					Adapters appear when BlueZ is up — onboard alone is fine (1 A2DP sink).

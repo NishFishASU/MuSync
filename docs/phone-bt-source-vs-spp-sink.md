@@ -9,7 +9,7 @@ Two different phone roles on MuSync — do not confuse them.
 
 ```
                     ┌── BT A2DP SOURCE (this doc) ──┐
- Phone media ──────► bluez_input ──► musync_feeder ─┼──► Qudelix / BT600 sinks
+ Phone media ──────► bluez_input ──► musync_feeder ─┼──► Qudelix / USB HCI sinks
                                                     └──► SPP TCP ──► other phone (SPP sink)
 ```
 
@@ -18,7 +18,7 @@ Two different phone roles on MuSync — do not confuse them.
 Goal: S21 FE shows up as `bluez_input…` on the Pi, MuSync routes it into the feeder, and enabled sinks hear the phone.
 
 1. On the Pi, ensure PipeWire + bluetooth are up (`wpctl status`, `bluetoothctl`).
-2. Put the S21 FE next to the Pi. Prefer pairing on an adapter that is **not** fully occupied by A2DP **sinks** (onboard `hci` or a spare BT600). Using all six BT600s as outbound sinks leaves no radio for inbound A2DP — then use USB or SPP instead.
+2. Put the S21 FE next to the Pi. Prefer pairing on an adapter that is **not** fully occupied by A2DP **sinks** (onboard `hci` or a spare USB HCI). Using all six HCI adapters as outbound sinks leaves no radio for inbound A2DP — then use USB or SPP instead.
 3. From the Pi:
 
 ```bash
@@ -42,7 +42,7 @@ pactl list sources short | grep -i bluez
 
 6. MuSync UI → **Phone / PC hosts** → **Refresh live inputs** → **Use as input** on the S21 FE row (binds `bt_a2dp` + endpoint).
 7. Song queue → **+ Live input** (or set a row’s type to Live input + that host) → **Play**.
-8. Enabled Qudelix / BT600 / SPP sinks receive the phone audio from the same feeder fan-out.
+8. Enabled Qudelix / USB HCI / SPP sinks receive the phone audio from the same feeder fan-out.
 
 Manual loopback (debug without UI):
 

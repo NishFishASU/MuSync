@@ -163,12 +163,12 @@ def web_root() -> Path:
 
 
 def validate_devices(devices: list[Device], *, require_min: int | None = None) -> list[Device]:
-    """Harden BT600 (≤6) + SPP network sinks (≤4): unique id/mac/hci/port."""
+    """Harden BlueZ HCI BT (≤6) + SPP network sinks (≤4): unique id/mac/hci/port."""
     bt = [d for d in devices if d.kind == DeviceKind.BLUETOOTH]
     spp = [d for d in devices if d.kind == DeviceKind.NETWORK_SPP]
     if len(bt) > MAX_BT_SINKS:
         raise ValueError(
-            f"MuSync supports at most {MAX_BT_SINKS} Bluetooth sinks (one A2DP per BT600)"
+            f"MuSync supports at most {MAX_BT_SINKS} Bluetooth sinks (one A2DP per HCI)"
         )
     if len(spp) > MAX_SPP_SINKS:
         raise ValueError(f"MuSync supports at most {MAX_SPP_SINKS} SPP network sinks")

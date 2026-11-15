@@ -835,7 +835,7 @@ class BtRemote:
 
 @dataclass
 class BtAdapter:
-    """One BlueZ HCI controller (onboard Pi BT or USB BT600)."""
+    """One BlueZ HCI controller (onboard Pi BT or any USB HCI dongle)."""
 
     hci: str
     mac: str = ""
@@ -843,10 +843,12 @@ class BtAdapter:
     powered: bool = False
     healthy: bool = True
     onboard: bool = False
+    bus: str = ""
+    usb_id: str = ""
     detail: str = ""
 
 
-# Short timeouts so a dead RTL8761 / BT600 cannot stall the API or reconnect loop.
+# Short timeouts so a hung / unhealthy USB HCI cannot stall the API or reconnect loop.
 BT_ADAPTER_PROBE_TIMEOUT_S = 1.5
 BT_CONNECT_SOFT_TIMEOUT_S = 3.5
 BT_PAIR_SOFT_TIMEOUT_S = 6.0
@@ -918,6 +920,66 @@ def adapter_sysfs_onboard(hci: str) -> bool:
     return any(tok in low for tok in ("serial", "uart", "platform", "soc"))
 
 
+def adapter_sysfs_bus(hci: str) -> str:
+    """Return ``usb`` / ``uart`` / ``\"\"`` from sysfs device path (chip-agnostic)."""
+    import os
+
+    base = f"/sys/class/bluetooth/{hci}"
+    try:
+        device = os.path.realpath(os.path.join(base, "device"))
+    except OSError:
+        return ""
+    low = device.lower()
+    if "/usb" in low:
+        return "usb"
+    if any(tok in low for tok in ("serial", "uart", "platform", "soc")):
+        return "uart"
+    return ""
+
+
+def adapter_sysfs_usb_id(hci: str) -> str:
+    """Return ``idVendor:idProduct`` for a USB HCI, else empty (generic BlueZ)."""
+    import os
+
+    base = f"/sys/class/bluetooth/{hci}"
+    try:
+        path = os.path.realpath(os.path.join(base, "device"))
+    except OSError:
+        return ""
+    for _ in range(10):
+        vendor_path = os.path.join(path, "idVendor")
+        product_path = os.path.join(path, "idProduct")
+        if os.path.isfile(vendor_path) and os.path.isfile(product_path):
+            try:
+                with open(vendor_path, encoding="utf-8") as vf:
+                    vendor = vf.read().strip().lower()
+                with open(product_path, encoding="utf-8") as pf:
+                    product = pf.read().strip().lower()
+            except OSError:
+                return ""
+            if vendor and product:
+                return f"{vendor}:{product}"
+            return ""
+        parent = os.path.dirname(path)
+        if not parent or parent == path:
+            break
+        path = parent
+    return ""
+
+
+def enrich_adapter_sysfs(adapter: BtAdapter) -> BtAdapter:
+    """Fill onboard/bus/usb_id from sysfs without probing BlueZ."""
+    if not adapter.bus:
+        adapter.bus = adapter_sysfs_bus(adapter.hci)
+    if not adapter.onboard:
+        adapter.onboard = adapter.bus == "uart" or (
+            adapter.bus != "usb" and adapter_sysfs_onboard(adapter.hci)
+        )
+    if adapter.bus == "usb" and not adapter.usb_id:
+        adapter.usb_id = adapter_sysfs_usb_id(adapter.hci)
+    return adapter
+
+
 def parse_bluetoothctl_show(text: str) -> dict[str, str]:
     """Best-effort parse of ``bluetoothctl show`` / ``show <mac>``."""
     info: dict[str, str] = {}
@@ -936,10 +998,11 @@ def discover_bluetooth_adapters(
     probe: bool = True,
     probe_timeout: float = BT_ADAPTER_PROBE_TIMEOUT_S,
 ) -> tuple[list[BtAdapter], str]:
-    """List HCI adapters; soft-mark unresponsive BT600s without blocking long.
+    """List HCI adapters; soft-mark unresponsive USB dongles without blocking long.
 
     Never raises. Dead USB sticks that hang ``show`` are marked ``healthy=False``
-    after a short timeout so reconnect/connect can skip them.
+    after a short timeout so reconnect/connect can skip them. Chip-agnostic —
+    any BlueZ HCI (onboard or USB) is inventoried the same way.
     """
     adapters: list[BtAdapter] = []
     if bluetoothctl:
@@ -958,11 +1021,12 @@ def discover_bluetooth_adapters(
                 return [], detail
             for hci in sys_hcis:
                 adapters.append(
-                    BtAdapter(
-                        hci=hci,
-                        onboard=adapter_sysfs_onboard(hci),
-                        healthy=False,
-                        detail="listed via sysfs only",
+                    enrich_adapter_sysfs(
+                        BtAdapter(
+                            hci=hci,
+                            healthy=False,
+                            detail="listed via sysfs only",
+                        )
                     )
                 )
             return adapters, f"{detail}; sysfs → {len(adapters)} hci"
@@ -971,11 +1035,12 @@ def discover_bluetooth_adapters(
         # No bluetoothctl or empty list — try sysfs alone.
         for hci in list_sysfs_bluetooth_hcis():
             adapters.append(
-                BtAdapter(
-                    hci=hci,
-                    onboard=adapter_sysfs_onboard(hci),
-                    healthy=bool(bluetoothctl),
-                    detail="sysfs" if not bluetoothctl else "hci present",
+                enrich_adapter_sysfs(
+                    BtAdapter(
+                        hci=hci,
+                        healthy=bool(bluetoothctl),
+                        detail="sysfs" if not bluetoothctl else "hci present",
+                    )
                 )
             )
         if not adapters:
@@ -985,8 +1050,7 @@ def discover_bluetooth_adapters(
 
     # Enrich powered / healthy with a hard short timeout per adapter.
     for adapter in adapters:
-        if not adapter.onboard:
-            adapter.onboard = adapter_sysfs_onboard(adapter.hci)
+        enrich_adapter_sysfs(adapter)
         if not probe or not bluetoothctl:
             continue
         try:
@@ -999,7 +1063,9 @@ def discover_bluetooth_adapters(
         except subprocess.TimeoutExpired:
             adapter.healthy = False
             adapter.powered = False
-            adapter.detail = f"probe timeout {probe_timeout:.1f}s — skip (dead BT600?)"
+            adapter.detail = (
+                f"probe timeout {probe_timeout:.1f}s — skip (unhealthy USB HCI?)"
+            )
             log.warning("BT adapter %s probe timed out — treating as dead", adapter.hci)
             continue
         except OSError as exc:
@@ -1020,13 +1086,17 @@ def discover_bluetooth_adapters(
         if name:
             adapter.name = name
         adapter.healthy = True
-        adapter.detail = "powered" if adapter.powered else "present (powered off)"
+        bus_note = f" · {adapter.usb_id}" if adapter.usb_id else ""
+        adapter.detail = (
+            ("powered" if adapter.powered else "present (powered off)") + bus_note
+        )
 
     healthy_n = sum(1 for a in adapters if a.healthy)
     onboard_n = sum(1 for a in adapters if a.onboard)
+    usb_n = sum(1 for a in adapters if a.bus == "usb")
     return (
         adapters,
-        f"adapters={len(adapters)} healthy={healthy_n} onboard={onboard_n}",
+        f"adapters={len(adapters)} healthy={healthy_n} onboard={onboard_n} usb={usb_n}",
     )
 
 
@@ -1088,7 +1158,7 @@ def pick_free_adapter(
         for a in healthy:
             if a.hci == want and a.hci not in used_hcis:
                 return a
-    # Prefer free onboard first (known-good Qudelix path), then USB BT600s.
+    # Prefer free onboard first (known-good Qudelix path), then USB HCI dongles.
     ordered = sorted(
         healthy,
         key=lambda a: (0 if a.onboard else 1, int(re.sub(r"\D", "", a.hci) or "99")),
@@ -1106,13 +1176,13 @@ def adapter_capacity_note(adapters: list[BtAdapter]) -> str:
     if n == 0:
         return (
             "No healthy Bluetooth adapters — BT outputs stay MISSING; "
-            "onboard / BT600 soft-fail (API stays up)"
+            "unhealthy USB HCI soft-fail (API stays up)"
         )
     if n == 1:
         label = "onboard" if healthy[0].onboard else healthy[0].hci
         return (
             f"Only 1 healthy adapter ({label}) — one A2DP sink max; "
-            "extra BT600s soft-fail until plugged / healthy"
+            "extra USB HCI dongles soft-fail until plugged / healthy"
         )
     return f"{n} healthy adapters · up to {min(n, 6)} A2DP sinks"
 
@@ -1233,7 +1303,7 @@ def bluetoothctl_pair(
 ) -> tuple[bool, str]:
     """Best-effort ``bluetoothctl pair <mac>`` before connect.
 
-    Short default timeout — a hung BT600 must not block the API.
+    Short default timeout — a hung USB HCI must not block the API.
     """
     if not bluetoothctl:
         return False, "bluetoothctl missing"
@@ -1268,7 +1338,7 @@ def bluetoothctl_connect(
 
     Returns ``(ok, detail)``. Already-connected remotes usually succeed quickly.
     Never raises — demo path prefers MISSING over a hung API. Default timeout is
-    short so dead BT600 dongles cannot stall multi-sink reconnect.
+    short so unhealthy USB HCI dongles cannot stall multi-sink reconnect.
     """
     if not bluetoothctl:
         return False, "bluetoothctl missing"

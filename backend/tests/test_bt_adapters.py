@@ -12,6 +12,7 @@ from musync.audio.mock import MockAudioBackend
 from musync.audio.pw_tools import (
     BT_CONNECT_SOFT_TIMEOUT_S,
     adapter_capacity_note,
+    enrich_adapter_sysfs,
     parse_bluetoothctl_list,
     pick_free_adapter,
     BtAdapter,
@@ -33,9 +34,16 @@ def test_parse_bluetoothctl_list_onboard_and_usb() -> None:
 
 def test_pick_free_adapter_prefers_onboard_then_skips_dead() -> None:
     adapters = [
-        BtAdapter(hci="hci0", mac="AA:00", healthy=True, onboard=True),
-        BtAdapter(hci="hci1", mac="BB:00", healthy=False, onboard=False, detail="timeout"),
-        BtAdapter(hci="hci2", mac="CC:00", healthy=True, onboard=False),
+        BtAdapter(hci="hci0", mac="AA:00", healthy=True, onboard=True, bus="uart"),
+        BtAdapter(
+            hci="hci1",
+            mac="BB:00",
+            healthy=False,
+            onboard=False,
+            bus="usb",
+            detail="timeout",
+        ),
+        BtAdapter(hci="hci2", mac="CC:00", healthy=True, onboard=False, bus="usb"),
     ]
     first = pick_free_adapter(adapters, used_hcis=set())
     assert first is not None and first.hci == "hci0"
@@ -45,10 +53,45 @@ def test_pick_free_adapter_prefers_onboard_then_skips_dead() -> None:
     assert none is None
     note = adapter_capacity_note(adapters)
     assert "2 healthy" in note
+    assert "BT600" not in note
+
+
+def test_pick_free_adapter_honors_preferred_hci() -> None:
+    adapters = [
+        BtAdapter(hci="hci0", mac="AA:00", healthy=True, onboard=True, bus="uart"),
+        BtAdapter(hci="hci1", mac="BB:00", healthy=True, onboard=False, bus="usb"),
+        BtAdapter(hci="hci2", mac="CC:00", healthy=True, onboard=False, bus="usb"),
+    ]
+    picked = pick_free_adapter(adapters, used_hcis=set(), preferred_hci="hci2")
+    assert picked is not None and picked.hci == "hci2"
+    # Preferred already used → fall back to free onboard.
+    fallback = pick_free_adapter(adapters, used_hcis={"hci2"}, preferred_hci="hci2")
+    assert fallback is not None and fallback.hci == "hci0"
 
 
 def test_connect_timeout_is_short_for_dead_dongles() -> None:
     assert BT_CONNECT_SOFT_TIMEOUT_S <= 5.0
+
+
+def test_enrich_adapter_sysfs_noop_off_pi() -> None:
+    """Off-Pi / no sysfs: enrich leaves bus empty and does not raise."""
+    a = BtAdapter(hci="hci9", mac="DE:AD")
+    enrich_adapter_sysfs(a)
+    assert a.hci == "hci9"
+    # Without /sys/class/bluetooth/hci9, bus stays empty (or uart/usb if present).
+    assert a.bus in {"", "usb", "uart"}
+
+
+def test_capacity_note_is_chip_agnostic() -> None:
+    zero = adapter_capacity_note([])
+    assert "USB HCI" in zero
+    assert "BT600" not in zero
+    one = adapter_capacity_note(
+        [BtAdapter(hci="hci0", healthy=True, onboard=True, bus="uart")]
+    )
+    assert "one A2DP" in one
+    assert "USB HCI" in one
+    assert "BT600" not in one
 
 
 @pytest.fixture
@@ -75,14 +118,16 @@ def client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> TestClient:
             powered=True,
             healthy=True,
             onboard=True,
+            bus="uart",
         ),
         BluetoothAdapter(
             hci="hci1",
             mac="00:11:22:33:44:01",
-            name="BT600 dead",
+            name="USB HCI dead",
             powered=False,
             healthy=False,
             onboard=False,
+            bus="usb",
             detail="probe timeout",
         ),
     ]
@@ -97,7 +142,9 @@ def test_scan_reports_adapters_and_soft_warn(client: TestClient) -> None:
     assert body["adapter_capacity"] == 1
     assert any(a["hci"] == "hci0" and a["onboard"] for a in body["adapters"])
     assert any(a["hci"] == "hci1" and a["healthy"] is False for a in body["adapters"])
+    assert any(a["hci"] == "hci1" and a.get("bus") == "usb" for a in body["adapters"])
     assert "Only 1 healthy adapter" in body["soft_warn"]
+    assert "BT600" not in body["soft_warn"]
 
 
 def test_second_output_soft_fails_with_one_adapter(client: TestClient) -> None:
@@ -131,6 +178,71 @@ def test_second_output_soft_fails_with_one_adapter(client: TestClient) -> None:
     devices = client.get("/api/devices").json()
     bt = [d for d in devices if d["kind"] == "bluetooth"]
     assert len(bt) == 1
+
+
+def test_preferred_hci_assignable_when_healthy(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MUSYNC_DEVICES_CONFIG", str(tmp_path / "devices.yaml"))
+    monkeypatch.setenv("MUSYNC_MEDIA_DIR", str(tmp_path / "media"))
+    backend = MockAudioBackend(
+        devices=[
+            Device(
+                id="spp-1",
+                name="Phone SPP",
+                kind=DeviceKind.NETWORK_SPP,
+                enabled=True,
+                listen_port=1234,
+            )
+        ]
+    )
+    backend._bt_adapters = [
+        BluetoothAdapter(
+            hci="hci0",
+            mac="00:11:22:33:44:00",
+            name="Pi onboard",
+            powered=True,
+            healthy=True,
+            onboard=True,
+            bus="uart",
+        ),
+        BluetoothAdapter(
+            hci="hci1",
+            mac="00:11:22:33:44:01",
+            name="USB HCI",
+            powered=True,
+            healthy=True,
+            onboard=False,
+            bus="usb",
+            usb_id="0b05:1d70",
+        ),
+    ]
+    app_module.backend = backend
+    client = TestClient(app_module.app)
+
+    res = client.post(
+        "/api/bluetooth/connect",
+        json={
+            "mac": "AA:BB:CC:DD:EE:77",
+            "name": "Qudelix-5K",
+            "hci": "hci1",
+            "enable_as_output": True,
+        },
+    )
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body["ok"] is True
+    assert body["device"] is not None
+    assert body["device"]["hci"] == "hci1"
+    # Onboard remains free for a second sink.
+    second = client.post(
+        "/api/bluetooth/connect",
+        json={
+            "mac": "AA:BB:CC:DD:EE:88",
+            "name": "Speaker 2",
+            "enable_as_output": True,
+        },
+    )
+    assert second.status_code == 200, second.text
+    assert second.json()["device"]["hci"] == "hci0"
 
 
 def test_health_includes_adapter_counts(client: TestClient) -> None:
