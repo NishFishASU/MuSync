@@ -75,9 +75,11 @@ Unhealthy USB HCI sticks are soft-skipped (short BlueZ timeouts) so they never b
 
 ```bash
 pactl load-module module-null-sink sink_name=musync_feeder \
-  sink_properties=device.description=MuSync_Feeder
+  rate=48000 channels=2 \
+  sink_properties=device.description=MuSync_Feeder node.latency=512/48000
 
-pactl load-module module-loopback latency_msec=40 \
+pactl load-module module-loopback latency_msec=40 max_latency_msec=40 \
+  adjust_time=0 \
   source=musync_feeder.monitor sink=bluez_output.AA_BB_CC_DD_EE_02 \
   sink_dont_move=true source_dont_move=true
 

@@ -64,6 +64,7 @@
 		setActiveQueueItem,
 		setActiveSource,
 		sourceTypeLabel,
+		spaPollCadence,
 		startBluetoothScan,
 		stopBluetoothScan,
 		uploadInputFile
@@ -171,7 +172,7 @@
 	/** @type {Record<string, ReturnType<typeof setTimeout>>} */
 	const patchTimers = {};
 
-	/** Last server position sample — UI interpolates between 1s polls while playing. */
+	/** Last server position sample — UI interpolates between transport polls while playing. */
 	let clockAnchorMs = 0;
 	let clockAnchorAt = 0;
 
@@ -1295,10 +1296,83 @@
 
 	onMount(() => {
 		let cancelled = false;
-		/** @type {ReturnType<typeof setInterval> | undefined} */
-		let pollTimer;
+		/** @type {ReturnType<typeof setTimeout> | undefined} */
+		let transportTimer;
+		/** @type {ReturnType<typeof setTimeout> | undefined} */
+		let nowPlayingTimer;
 		/** @type {ReturnType<typeof setInterval> | undefined} */
 		let tickTimer;
+
+		function clearAdaptivePolls() {
+			clearTimeout(transportTimer);
+			clearTimeout(nowPlayingTimer);
+			transportTimer = undefined;
+			nowPlayingTimer = undefined;
+		}
+
+		function scheduleAdaptivePolls() {
+			clearAdaptivePolls();
+			const cadence = spaPollCadence({
+				playing: transport?.state === 'playing',
+				hidden: document.hidden
+			});
+			if (cadence.paused) return;
+
+			const pollTransport = async () => {
+				if (cancelled || document.hidden) return;
+				try {
+					applyTransport(await getTransport());
+				} catch (err) {
+					console.error(err);
+				}
+				if (cancelled || document.hidden) return;
+				const next = spaPollCadence({
+					playing: transport?.state === 'playing',
+					hidden: document.hidden
+				});
+				if (!next.paused) {
+					transportTimer = setTimeout(pollTransport, next.transportMs);
+				}
+			};
+
+			const pollNowPlaying = async () => {
+				if (cancelled || document.hidden) return;
+				try {
+					nowPlaying = await getNowPlaying().catch(() => nowPlaying);
+				} catch (err) {
+					console.error(err);
+				}
+				if (cancelled || document.hidden) return;
+				const next = spaPollCadence({
+					playing: transport?.state === 'playing',
+					hidden: document.hidden
+				});
+				if (!next.paused) {
+					nowPlayingTimer = setTimeout(pollNowPlaying, next.nowPlayingMs);
+				}
+			};
+
+			transportTimer = setTimeout(pollTransport, cadence.transportMs);
+			nowPlayingTimer = setTimeout(pollNowPlaying, cadence.nowPlayingMs);
+		}
+
+		function onVisibility() {
+			if (cancelled) return;
+			if (document.hidden) {
+				clearAdaptivePolls();
+				return;
+			}
+			// Immediate catch-up when the tab becomes visible again.
+			getTransport()
+				.then(applyTransport)
+				.catch(() => {});
+			getNowPlaying()
+				.then((np) => {
+					nowPlaying = np;
+				})
+				.catch(() => {});
+			scheduleAdaptivePolls();
+		}
 
 		refresh()
 			.then(() => {
@@ -1312,15 +1386,8 @@
 					streamMessage = `Spotify auth failed: ${params.get('detail') || 'error'}`;
 					history.replaceState({}, '', window.location.pathname);
 				}
-				// Server clock (~1 Hz); UI interpolates between samples while playing.
-				pollTimer = setInterval(async () => {
-					try {
-						applyTransport(await getTransport());
-						nowPlaying = await getNowPlaying().catch(() => nowPlaying);
-					} catch (err) {
-						console.error(err);
-					}
-				}, 1000);
+				scheduleAdaptivePolls();
+				document.addEventListener('visibilitychange', onVisibility);
 				tickTimer = setInterval(() => {
 					if (!scrubbing && transport?.state === 'playing') {
 						scrubValue = displayedPositionMs();
@@ -1334,8 +1401,9 @@
 
 		return () => {
 			cancelled = true;
-			clearInterval(pollTimer);
+			clearAdaptivePolls();
 			clearInterval(tickTimer);
+			document.removeEventListener('visibilitychange', onVisibility);
 			stopBtScanPoll();
 			for (const t of Object.values(patchTimers)) clearTimeout(t);
 		};
