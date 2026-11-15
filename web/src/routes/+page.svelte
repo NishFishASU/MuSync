@@ -6,6 +6,7 @@
 		SOURCE_TYPES,
 		addInput,
 		addQueueItem,
+		addStreamingTrack,
 		capturePathLabel,
 		connectWifi,
 		deleteInput,
@@ -15,6 +16,7 @@
 		fmtMs,
 		forgetWifiNetwork,
 		getHealth,
+		getStreamingStatus,
 		getTransport,
 		getWifiStatus,
 		listDevices,
@@ -22,12 +24,14 @@
 		listQueue,
 		listSources,
 		listWifiNetworks,
+		logoutSpotify,
 		patchDevice,
 		patchInput,
 		patchQueueItem,
 		putDevicesConfig,
 		putTransport,
 		saveWifiNetwork,
+		searchStreaming,
 		setActiveQueueItem,
 		setActiveSource,
 		sourceTypeLabel,
@@ -87,6 +91,16 @@
 	let setupMessage = $state('');
 	let setupDetail = $state('');
 	let setupConfigOk = $state(true);
+
+	/** @type {import('$lib/api.js').StreamingStatus | null} */
+	let streaming = $state(null);
+	/** @type {'spotify' | 'apple'} */
+	let streamProvider = $state('spotify');
+	let streamQuery = $state('');
+	/** @type {import('$lib/api.js').StreamingSearchHit[]} */
+	let streamHits = $state([]);
+	let streamBusy = $state(false);
+	let streamMessage = $state('');
 
 	/** @type {Record<string, ReturnType<typeof setTimeout>>} */
 	const patchTimers = {};
@@ -245,19 +259,21 @@
 	}
 
 	async function refresh() {
-		const [h, d, t, s, q, i] = await Promise.all([
+		const [h, d, t, s, q, i, st] = await Promise.all([
 			getHealth(),
 			listDevices(),
 			getTransport(),
 			listSources(),
 			listQueue(),
-			listInputs()
+			listInputs(),
+			getStreamingStatus().catch(() => null)
 		]);
 		health = h;
 		devices = d;
 		sources = s;
 		queue = q;
 		inputs = i;
+		if (st) streaming = st;
 		apiError = '';
 		if (!selectedId && d.length) selectedId = d[0].id;
 		applyTransport(t);
@@ -266,6 +282,71 @@
 			setupMessage = err instanceof Error ? err.message : String(err);
 		});
 		await refreshCaptureDiscovery().catch(() => {});
+	}
+
+	async function refreshStreaming() {
+		streaming = await getStreamingStatus();
+	}
+
+	async function onStreamSearch() {
+		const q = streamQuery.trim();
+		if (!q || streamBusy) return;
+		streamBusy = true;
+		streamMessage = '';
+		try {
+			const res = await searchStreaming(streamProvider, q);
+			streamHits = res.hits || [];
+			streamMessage = streamHits.length
+				? `${streamHits.length} result${streamHits.length === 1 ? '' : 's'}`
+				: 'No tracks found';
+		} catch (err) {
+			streamHits = [];
+			streamMessage = err instanceof Error ? err.message : String(err);
+		} finally {
+			streamBusy = false;
+		}
+	}
+
+	/** @param {import('$lib/api.js').StreamingSearchHit} hit */
+	async function onQueueStreamHit(hit) {
+		if (streamBusy) return;
+		streamBusy = true;
+		streamMessage = '';
+		try {
+			const item = await addStreamingTrack({
+				provider: hit.provider,
+				uri: hit.uri,
+				title: hit.title,
+				artist: hit.artist,
+				duration_ms: hit.duration_ms ?? undefined,
+				activate: true
+			});
+			queue = await listQueue();
+			applyTransport(await getTransport());
+			sources = await listSources();
+			streamMessage = item.available
+				? `Queued ${hit.title} — press Play`
+				: item.note || `Queued ${hit.title} (not playable yet)`;
+			sourceError = item.available ? '' : item.note || '';
+		} catch (err) {
+			streamMessage = err instanceof Error ? err.message : String(err);
+		} finally {
+			streamBusy = false;
+		}
+	}
+
+	async function onSpotifyLogout() {
+		streamBusy = true;
+		try {
+			streaming = await logoutSpotify();
+			queue = await listQueue();
+			sources = await listSources();
+			streamMessage = 'Spotify disconnected';
+		} catch (err) {
+			streamMessage = err instanceof Error ? err.message : String(err);
+		} finally {
+			streamBusy = false;
+		}
 	}
 
 	/** @param {string} name */
@@ -604,6 +685,15 @@
 		refresh()
 			.then(() => {
 				if (cancelled) return;
+				const params = new URLSearchParams(window.location.search);
+				if (params.get('spotify') === 'connected') {
+					streamMessage = 'Spotify connected';
+					refreshStreaming().catch(() => {});
+					history.replaceState({}, '', window.location.pathname);
+				} else if (params.get('spotify') === 'error') {
+					streamMessage = `Spotify auth failed: ${params.get('detail') || 'error'}`;
+					history.replaceState({}, '', window.location.pathname);
+				}
 				// Server clock (~1 Hz); UI interpolates between samples while playing.
 				pollTimer = setInterval(async () => {
 					try {
@@ -659,11 +749,13 @@
 				{/if}
 			</p>
 		</div>
-		{#if activeIsStub}
+				{#if activeIsStub}
 			<p class="stub-banner" role="status">
 				Active song is not playable yet
 				{#if transport?.source_type === 'input'}
 					— bind a live bluez_input / USB / upload on a Phone/PC host, then Play.
+				{:else if transport?.source_type === 'spotify' || transport?.source_type === 'apple'}
+					— connect/search in Streaming, or switch the song to Local.
 				{:else}
 					— sink graph stays up; switch the song to Local or a live input.
 				{/if}
@@ -1165,6 +1257,108 @@
 		{/if}
 	</section>
 
+	<section class="panel streaming-panel" aria-labelledby="streaming-heading">
+		<div class="panel-head">
+			<h2 id="streaming-heading">Streaming</h2>
+			<p class="hint">Spotify → musync_feeder · Apple limited on Linux</p>
+		</div>
+		<div class="stream-status">
+			<div class="stream-card">
+				<strong>Spotify</strong>
+				<span class="status-pill {streaming?.spotify?.authenticated ? 'linked' : 'missing'}">
+					{streaming?.spotify?.authenticated
+						? streaming.spotify.display_name || 'connected'
+						: streaming?.spotify?.configured
+							? 'not connected'
+							: 'not configured'}
+				</span>
+				{#if streaming?.spotify?.authenticated}
+					<button
+						type="button"
+						class="btn btn-ghost btn-small"
+						disabled={streamBusy}
+						onclick={() => onSpotifyLogout()}
+					>
+						Disconnect
+					</button>
+				{:else if streaming?.spotify?.configured}
+					<a class="btn btn-small" href="/api/streaming/spotify/login">Connect Spotify</a>
+				{:else}
+					<span class="muted tiny">Set MUSYNC_SPOTIFY_CLIENT_ID/SECRET — docs/spotify-apple.md</span>
+				{/if}
+				{#if streaming?.spotify?.note}
+					<p class="hint muted">{streaming.spotify.note}</p>
+				{/if}
+			</div>
+			<div class="stream-card">
+				<strong>Apple Music</strong>
+				<span class="status-pill {streaming?.apple?.authenticated ? 'linked' : 'missing'}">
+					{streaming?.apple?.authenticated
+						? streaming.apple.playback_mode === 'airplay_capture'
+							? 'search + AirPlay'
+							: 'search only'
+						: 'not configured'}
+				</span>
+				{#if streaming?.apple?.note}
+					<p class="hint muted">{streaming.apple.note}</p>
+				{/if}
+			</div>
+		</div>
+		<form
+			class="stream-search"
+			onsubmit={(e) => {
+				e.preventDefault();
+				onStreamSearch();
+			}}
+		>
+			<label class="type-select">
+				<span class="sr-only">Provider</span>
+				<select
+					bind:value={streamProvider}
+					aria-label="Streaming provider"
+				>
+					<option value="spotify">Spotify</option>
+					<option value="apple">Apple Music</option>
+				</select>
+			</label>
+			<input
+				type="search"
+				placeholder="Search tracks"
+				bind:value={streamQuery}
+				aria-label="Search tracks"
+			/>
+			<button type="submit" class="btn btn-small" disabled={streamBusy || !streamQuery.trim()}>
+				Search
+			</button>
+		</form>
+		{#if streamMessage}
+			<p class="hint" role="status">{streamMessage}</p>
+		{/if}
+		<ul class="queue-list stream-hits">
+			{#each streamHits as hit (hit.uri)}
+				<li class="queue-row">
+					<div class="queue-main">
+						<span class="source-title">{hit.title}</span>
+						<span class="source-sub"
+							>{hit.artist}{#if hit.album}
+								· {hit.album}{/if}</span
+						>
+					</div>
+					<button
+						type="button"
+						class="btn btn-small"
+						disabled={streamBusy}
+						onclick={() => onQueueStreamHit(hit)}
+					>
+						Queue &amp; play
+					</button>
+				</li>
+			{:else}
+				<li class="empty-group">Search to pick a track</li>
+			{/each}
+		</ul>
+	</section>
+
 	<section class="panel queue-panel" aria-labelledby="queue-heading">
 		<div class="panel-head">
 			<h2 id="queue-heading">Song queue</h2>
@@ -1211,7 +1405,10 @@
 						>
 							{#each SOURCE_TYPES as t}
 								<option value={t}
-									>{sourceTypeLabel(t)}{t === 'local' || (t === 'input' && liveHosts.length)
+									>{sourceTypeLabel(t)}{t === 'local' ||
+									(t === 'input' && liveHosts.length) ||
+									(t === 'spotify' && streaming?.spotify?.authenticated) ||
+									(t === 'apple' && streaming?.apple?.authenticated)
 										? ''
 										: ' (stub)'}</option
 								>

@@ -18,6 +18,9 @@ env/
 config/devices.yaml
 config/profiles.yaml
 config/pipewire-graph.plan.sh
+config/spotify_tokens.json
+config/librespot-cache/
+*.p8
 media/library/
 !media/samples/.gitkeep
 .coverage

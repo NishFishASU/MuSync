@@ -68,7 +68,8 @@ scripts/build_web.sh  run_dev.sh  run_pi.sh  pair_bt600.sh
 ```
 
 Phone **input** (S21 FE → `bluez_input` → feeder): [docs/phone-bt-source-vs-spp-sink.md](docs/phone-bt-source-vs-spp-sink.md).  
-SPP phone **sink**: enable Phone SPP in Device setup, connect Simple Protocol Player to Pi IP:port — [docs/spp-network-sink.md](docs/spp-network-sink.md).
+SPP phone **sink**: enable Phone SPP in Device setup, connect Simple Protocol Player to Pi IP:port — [docs/spp-network-sink.md](docs/spp-network-sink.md).  
+**Spotify** (librespot → `musync_feeder`) + **Apple Music** (best-effort): [docs/spotify-apple.md](docs/spotify-apple.md) · env template `config/streaming.env.example`.
 
 ## API (minimum)
 
@@ -78,12 +79,16 @@ SPP phone **sink**: enable Phone SPP in Device setup, connect Simple Protocol Pl
 | `GET` | `/api/devices` | List sinks (Bluetooth + optional `network_spp`) |
 | `PATCH` | `/api/devices/{id}` | `{ delay_ms?, volume?, mute?, enabled?, listen_port?, … }` |
 | `GET`/`PUT` | `/api/transport` | `{ state, position_ms, source_id?, queue_item_id? }` |
-| `GET` | `/api/sources` | Catalog: `local` + `spotify` / `apple` / `input` stubs |
+| `GET` | `/api/sources` | Catalog: `local` + Spotify/Apple hub rows + input hosts |
 | `PUT` | `/api/sources/active` | `{ id }` — activate catalog entry (feeder swap only) |
 | `GET`/`POST` | `/api/queue` | Song queue; each item has `source_type` + optional `input_id` |
 | `PATCH` | `/api/queue/{id}` | Switch `source_type` / bind phone-PC host without tearing down sinks |
 | `PUT` | `/api/queue/active` | `{ id }` — play this queue item (feeder swap only) |
 | `DELETE` | `/api/queue/{id}` | Remove a queue item |
+| `GET` | `/api/streaming` | Spotify/Apple auth status (no secrets) |
+| `GET` | `/api/streaming/spotify/login` | Start Spotify OAuth |
+| `GET` | `/api/streaming/search` | `?provider=spotify\|apple&q=` |
+| `POST` | `/api/streaming/queue` | Queue a searched track (`activate` optional) |
 | `GET`/`POST` | `/api/inputs` | Register ≤4 phone/PC hosts (`capture_path`: `bt_a2dp`\|`usb`\|`network`) |
 | `GET` | `/api/inputs/discover` | Live PipeWire sources (`bluez_input` / USB) for host binding |
 | `POST` | `/api/inputs/{id}/upload` | Network path: upload file that plays into the feeder |
@@ -108,7 +113,7 @@ Pi tip: `web/build/` is gitignored — build on a laptop (or once on the Pi with
 | Sinks | In-memory fake devices (≤6) | Same model; maps MAC/`pw_node` → WirePlumber ids |
 | Delay | Stored on device object | `pactl module-loopback latency_msec=N` from feeder |
 | Volume/mute | In-memory | `wpctl set-volume` / `set-mute` |
-| Playback | Software clock (+ live input cue) | `mpv` **or** `bluez_input`/`USB` loopback → `musync_feeder` |
+| Playback | Software clock (+ live/streaming cues) | `mpv` / librespot / capture loopback → `musync_feeder` |
 | Without hardware | Always | **Dry-run**: writes `config/pipewire-graph.plan.sh` |
 | UI | Same SvelteKit `web/build` | Same |
 

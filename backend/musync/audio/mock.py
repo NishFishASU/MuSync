@@ -288,8 +288,11 @@ class MockAudioBackend(AudioBackend):
 
     def health(self) -> Health:
         with self._lock:
+            from ..streaming import get_streaming_service
+
             devices = list(self._devices.values())
             hci_map = {d.hci: d.mac for d in devices if d.hci}
+            stream = get_streaming_service().status()
             return Health(
                 ok=True,
                 backend="mock",
@@ -299,5 +302,7 @@ class MockAudioBackend(AudioBackend):
                 hci_map=hci_map,
                 mapped_sinks=0,
                 graph_dry_run=True,
+                spotify_ready=stream.spotify.authenticated,
+                apple_ready=stream.apple.authenticated,
                 detail="MockAudioBackend — simulated sinks; source switch keeps sink graph (noop)",
             )
