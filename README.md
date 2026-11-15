@@ -100,9 +100,9 @@ USB/PC capture needs a **USB-A sound card** — Pi 5 USB-C PD is power-only: [do
 | `POST` | `/api/bluetooth/discover/clear` | Clear discovery list except connected remotes |
 | `POST` | `/api/bluetooth/connect` | `{ mac, name?, enable_as_output? }` — pair/connect (+ enable output) |
 | `GET`/`PUT` | `/api/transport` | `{ state, position_ms, source_id?, queue_item_id?, title/artist/album/cover_url? }` |
-| `GET` | `/api/avrcp` | BT Absolute Volume + headset transport relay status (soft-fail if unsupported) |
+| `GET` | `/api/avrcp` | Absolute Volume + MPRIS `RegisterPlayer` status (`player_registered` for headset buttons) |
 | `POST` | `/api/avrcp/command` | Relay `{ action: play\|pause\|stop\|toggle\|next\|previous }` to active source |
-| `POST` | `/api/avrcp/volume` | Simulate Absolute Volume → slider (`{ device_id, volume }`; Pi uses BlueZ poll) |
+| `POST` | `/api/avrcp/volume` | Simulate Absolute Volume → slider (`{ device_id, volume }`; Pi polls BlueZ) |
 | `GET` | `/api/now-playing` | Unified now-playing (title, artist, album, cover) |
 | `GET` | `/api/now-playing/cover` | Embedded local cover bytes |
 | `GET` | `/api/sources` | Catalog: `local` + Spotify/AirPlay hub rows + input hosts |
@@ -156,8 +156,9 @@ Do **not** start with six dongles. Prove sync with two, then scale.
 
 ```bash
 sudo apt update
-sudo apt install -y python3-pip python3-venv pipewire wireplumber \
-  pipewire-audio-client-libraries pulseaudio-utils mpv bluez
+sudo apt install -y python3-pip python3-venv python3-dbus python3-gi \
+  pipewire wireplumber pipewire-audio-client-libraries pulseaudio-utils mpv bluez
+# python3-dbus + python3-gi: Qudelix/headset AVRCP play/pause/skip (BlueZ RegisterPlayer)
 # Node only if you build the UI on-device (otherwise copy a prebuilt web/build/):
 # curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash -
 # sudo apt install -y nodejs
