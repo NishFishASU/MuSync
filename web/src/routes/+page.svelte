@@ -8,6 +8,7 @@
 		addQueueItem,
 		addStreamingTrack,
 		applyProfile,
+		assignDeviceUser,
 		capturePathLabel,
 		clearBluetoothDiscovery,
 		connectBluetooth,
@@ -119,6 +120,10 @@
 	let profiles = $state([]);
 	/** @type {string | null} */
 	let activeProfileId = $state(null);
+	/** @type {Record<string, string>} */
+	let deviceAssignments = $state({});
+	/** @type {Record<string, number>} */
+	let learnedDeviceGains = $state({});
 	let newProfileName = $state('');
 	let newProfileLevel = $state(80);
 	let profileBusy = $state(false);
@@ -500,10 +505,18 @@
 		}
 	}
 
-	async function refreshProfiles() {
-		const state = await listProfiles();
+	/**
+	 * @param {import('$lib/api.js').VolumeProfilesState} state
+	 */
+	function applyProfileState(state) {
 		profiles = state.profiles || [];
 		activeProfileId = state.active_id ?? null;
+		deviceAssignments = state.assignments || {};
+		learnedDeviceGains = state.device_gains || {};
+	}
+
+	async function refreshProfiles() {
+		applyProfileState(await listProfiles());
 	}
 
 	async function refresh() {
@@ -709,6 +722,10 @@
 			try {
 				const updated = await patchDevice(id, partial);
 				devices = devices.map((d) => (d.id === id ? updated : d));
+				// Volume set by an assigned user re-fits S_u / G_d on the hub.
+				if (partial.volume != null && deviceAssignments[id]) {
+					await refreshProfiles().catch(() => {});
+				}
 			} catch (err) {
 				console.error(err);
 				await refresh().catch(() => {});
@@ -746,8 +763,7 @@
 		profileMessage = '';
 		try {
 			const state = await setActiveProfile(id);
-			profiles = state.profiles || [];
-			activeProfileId = state.active_id ?? null;
+			applyProfileState(state);
 			if (apply) {
 				devices = await listDevices();
 				profileMessage = `Applied ${profiles.find((p) => p.id === id)?.name || id}`;
@@ -764,10 +780,35 @@
 		profileBusy = true;
 		profileMessage = '';
 		try {
-			const state = await setActiveProfile(null);
-			profiles = state.profiles || [];
-			activeProfileId = state.active_id ?? null;
+			applyProfileState(await setActiveProfile(null));
 			profileMessage = 'Cleared active profile (outputs unchanged)';
+		} catch (err) {
+			profileMessage = err instanceof Error ? err.message : String(err);
+		} finally {
+			profileBusy = false;
+		}
+	}
+
+	/**
+	 * Assign which listening profile/user owns an output (presets via S_u × G_d).
+	 * @param {string} deviceId
+	 * @param {string} profileId
+	 */
+	async function onAssignDeviceUser(deviceId, profileId) {
+		if (profileBusy) return;
+		profileBusy = true;
+		profileMessage = '';
+		try {
+			const res = await assignDeviceUser({
+				device_id: deviceId,
+				profile_id: profileId || null,
+				apply_suggested: true
+			});
+			applyProfileState(res.state);
+			if (res.device) {
+				devices = devices.map((d) => (d.id === res.device.id ? res.device : d));
+			}
+			profileMessage = res.detail || 'Assignment updated';
 		} catch (err) {
 			profileMessage = err instanceof Error ? err.message : String(err);
 		} finally {
@@ -1651,8 +1692,8 @@
 				</p>
 			</div>
 			<p class="hint muted">
-				Named users share one feeder; each profile sets loudness across headphone/IEM outputs.
-				Per-output Gain calibrates sensitivity; Delay stays independent.
+				Named users share one feeder; preferred × gain applies explicitly. Assign a user on each
+				output to learn S_u × G_d and preset new IEMs. Delay stays independent.
 			</p>
 			<form
 				class="profile-create"
@@ -1684,7 +1725,12 @@
 					{#each profiles as p (p.id)}
 						<li class="profile-row" class:active={p.id === activeProfileId}>
 							<div class="profile-main">
-								<span class="source-title">{p.name}</span>
+								<span class="source-title"
+									>{p.name}
+									<small class="gain-hint" title="Learned relative sensitivity S_u"
+										>S {(p.sensitivity ?? 1).toFixed(2)}</small
+									></span
+								>
 								<label class="field compact-field">
 									<span>Preferred <em>{Math.round(p.preferred_level * 100)}%</em></span>
 									<input
@@ -1803,6 +1849,29 @@
 							</span>
 						</button>
 						<div class="output-controls">
+							<label class="field compact-field">
+								<span>User on this output</span>
+								<select
+									value={deviceAssignments[d.id] || ''}
+									disabled={profileBusy || !profiles.length}
+									onchange={(e) => {
+										onAssignDeviceUser(
+											d.id,
+											/** @type {HTMLSelectElement} */ (e.currentTarget).value
+										);
+									}}
+								>
+									<option value="">— unassigned —</option>
+									{#each profiles as p (p.id)}
+										<option value={p.id}>{p.name}</option>
+									{/each}
+								</select>
+								{#if learnedDeviceGains[d.id]}
+									<small class="gain-hint"
+										>G_d {(learnedDeviceGains[d.id] ?? 1).toFixed(2)}</small
+									>
+								{/if}
+							</label>
 							<label class="field compact-field">
 								<span>Delay <em>{d.delay_ms} ms</em></span>
 								<input

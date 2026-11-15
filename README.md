@@ -64,6 +64,7 @@ docs/demo-checklist.md                # Qudelix + Phone SPP demo path
 docs/spp-network-sink.md              # phone as SPP TCP *output*
 docs/phone-bt-source-vs-spp-sink.md   # phone as BT A2DP *source* vs SPP sink
 docs/wifi-join.md                     # phone hotspot join (nmcli)
+docs/volume-profiles.md               # silent-disco preferred × gain + S_u × G_d learning
 backend/musync/wifi/       # nmcli on Pi; mock on laptop
 scripts/build_web.sh  run_dev.sh  run_pi.sh  pair_bt600.sh
 ```
@@ -82,10 +83,11 @@ USB/PC capture needs a **USB-A sound card** — Pi 5 USB-C PD is power-only: [do
 | `GET` | `/api/health` | Backend, PipeWire up?, mapped sinks, graph dry-run |
 | `GET` | `/api/devices` | List sinks (Bluetooth + optional `network_spp`) |
 | `PATCH` | `/api/devices/{id}` | Per-output `{ delay_ms?, volume?, gain?, mute?, enabled?, listen_port?, … }` |
-| `GET`/`POST` | `/api/profiles` | Named listening profiles (silent-disco preferred level) |
-| `PUT` | `/api/profiles/active` | Select profile (`{ id }` or `null`) → apply preferred × gain volumes |
+| `GET`/`POST` | `/api/profiles` | Named listening profiles (silent-disco preferred level + learned S_u) |
+| `PUT` | `/api/profiles/active` | Select profile (`{ id }` or `null`) → apply preferred × Device.gain |
+| `PUT` | `/api/profiles/assignments` | Assign user to output (`{ device_id, profile_id?, apply_suggested? }`) → preset via S_u × G_d |
 | `PATCH`/`DELETE` | `/api/profiles/{id}` | Update / delete a profile (active patch re-applies) |
-| `POST` | `/api/profiles/{id}/apply` | Re-apply preferred × gain without changing selection |
+| `POST` | `/api/profiles/{id}/apply` | Re-apply preferred × Device.gain without changing selection |
 | `GET`/`POST`/`DELETE` | `/api/bluetooth/scan` | BlueZ scan status / start (`scan on`) / stop (`scan off`) |
 | `POST` | `/api/bluetooth/discover/clear` | Clear discovery list except connected remotes |
 | `POST` | `/api/bluetooth/connect` | `{ mac, name?, enable_as_output? }` — pair/connect (+ enable output) |
@@ -225,6 +227,7 @@ sudo systemctl enable --now musync
 | `MUSYNC_PORT` | `8080` | HTTP port |
 | `MUSYNC_DEVICES_CONFIG` | `config/devices.yaml` | Device profile path |
 | `MUSYNC_PROFILES_CONFIG` | `config/profiles.yaml` | User volume preference profiles |
+| `MUSYNC_VOLUME_DB` | `config/user_volumes.sqlite` | Per-user×device volumes + learned G_d |
 | `MUSYNC_MEDIA_DIR` | `media/` | Local library root |
 | `MUSYNC_WEB_DIR` | `web/build/` | Built SvelteKit static root |
 | `MUSYNC_PW_FEEDER` | `musync_feeder` | Virtual sink name for fan-out |

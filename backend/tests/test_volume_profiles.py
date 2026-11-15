@@ -23,6 +23,7 @@ def client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> TestClient:
     monkeypatch.setenv("MUSYNC_DEVICES_CONFIG", str(tmp_path / "devices.yaml"))
     monkeypatch.setenv("MUSYNC_MEDIA_DIR", str(tmp_path / "media"))
     monkeypatch.setenv("MUSYNC_PROFILES_CONFIG", str(tmp_path / "profiles.yaml"))
+    monkeypatch.setenv("MUSYNC_VOLUME_DB", str(tmp_path / "user_volumes.sqlite"))
     backend = MockAudioBackend(
         devices=[
             Device(
@@ -46,7 +47,10 @@ def client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> TestClient:
             ),
         ]
     )
-    store = VolumeProfileStore(path=tmp_path / "profiles.yaml")
+    store = VolumeProfileStore(
+        path=tmp_path / "profiles.yaml",
+        volume_db=tmp_path / "user_volumes.sqlite",
+    )
     app_module.backend = backend
     app_module.profile_store = store
     return TestClient(app_module.app)
@@ -85,7 +89,13 @@ def test_volumes_for_devices_honors_overrides() -> None:
 def test_create_select_apply_delete_profiles(client: TestClient) -> None:
     empty = client.get("/api/profiles")
     assert empty.status_code == 200
-    assert empty.json() == {"profiles": [], "active_id": None}
+    assert empty.json() == {
+        "profiles": [],
+        "active_id": None,
+        "assignments": {},
+        "volumes": [],
+        "device_gains": {},
+    }
 
     created = client.post(
         "/api/profiles",

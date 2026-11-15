@@ -41,6 +41,8 @@ from .models import (
     StreamingStatus,
     Transport,
     TransportPut,
+    DeviceUserAssign,
+    DeviceUserAssignResult,
     VolumeProfile,
     VolumeProfileActivePut,
     VolumeProfileCreate,
@@ -140,7 +142,16 @@ def api_get_device(device_id: str) -> Device:
 
 @app.patch("/api/devices/{device_id}", response_model=Device)
 def api_patch_device(device_id: str, patch: DevicePatch) -> Device:
-    return backend.patch_device(device_id, patch)
+    """Patch sink controls. Volume changes by an assigned user update S_u / G_d."""
+    updated = backend.patch_device(device_id, patch)
+    if patch.volume is not None:
+        user_id = profile_store.assigned_user(device_id)
+        if user_id:
+            try:
+                profile_store.record_volume(user_id, device_id, float(patch.volume))
+            except KeyError:
+                pass
+    return updated
 
 
 @app.get("/api/profiles", response_model=VolumeProfilesState)
@@ -156,12 +167,22 @@ def api_create_profile(body: VolumeProfileCreate) -> VolumeProfile:
 
 @app.put("/api/profiles/active", response_model=VolumeProfilesState)
 def api_set_active_profile(body: VolumeProfileActivePut) -> VolumeProfilesState:
-    """Select a profile (or clear) and apply preferred × gain volumes to outputs."""
+    """Select a profile (or clear) and apply preferred × Device.gain volumes."""
     state = profile_store.set_active(body.id)
     if body.id:
         profile = profile_store.get(body.id)
         apply_profile_to_backend(profile, backend)
     return state
+
+
+@app.put("/api/profiles/assignments", response_model=DeviceUserAssignResult)
+def api_assign_device_user(body: DeviceUserAssign) -> DeviceUserAssignResult:
+    """Assign a listening profile/user to one output; preset via S_u × G_d."""
+    try:
+        device = backend.get_device(body.device_id)
+    except KeyError as exc:
+        raise KeyError(f"Unknown device: {body.device_id}") from exc
+    return profile_store.assign_device(body, backend=backend, device=device)
 
 
 @app.get("/api/profiles/{profile_id}", response_model=VolumeProfile)
