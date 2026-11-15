@@ -275,6 +275,7 @@
  * @property {string[]} [scopes]
  * @property {string[]} [missing_scopes]
  * @property {string | null} [playback_mode]
+ * @property {string | null} [search_market]
  * @property {string[]} [limits]
  * @property {string} [note]
  */

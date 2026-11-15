@@ -472,6 +472,7 @@ class StreamingProviderStatus(BaseModel):
     scopes: list[str] = Field(default_factory=list)
     missing_scopes: list[str] = Field(default_factory=list)
     playback_mode: Optional[str] = None
+    search_market: Optional[str] = None
     limits: list[str] = Field(default_factory=list)
     note: str = ""
 
