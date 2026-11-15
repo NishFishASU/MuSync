@@ -321,6 +321,16 @@ def transport_state_to_mpris(state: str) -> str:
     return "Stopped"
 
 
+# Hint when the running interpreter cannot import apt python3-dbus / python3-gi
+# (common when `.venv` was created without `--system-site-packages`).
+_DBUS_IMPORT_HINT = (
+    "python3-dbus / python3-gi not importable in this Python — "
+    "sudo apt install -y python3-dbus python3-gi; "
+    "recreate venv with: python3 -m venv --system-site-packages .venv "
+    "(or run ./scripts/run_pi.sh which enables system-site-packages)"
+)
+
+
 def _try_import_dbus():
     """Soft-import system dbus + GLib (Pi: python3-dbus + python3-gi)."""
     try:
@@ -331,13 +341,14 @@ def _try_import_dbus():
 
         return dbus, dbus.service, dbus.mainloop.glib, GLib
     except Exception as exc:  # noqa: BLE001
-        log.debug("AVRCP MPRIS soft-fail (no dbus/gi): %s", exc)
+        log.info("AVRCP MPRIS soft-fail (no dbus/gi): %s", exc)
         return None
 
 
 def _build_mpris_props(dbus_mod, *, status: str = "Stopped") -> Any:
     track = dbus_mod.Dictionary(
         {
+            "mpris:trackid": dbus_mod.ObjectPath("/org/musync/track/0"),
             "xesam:title": "",
             "xesam:artist": dbus_mod.Array([], signature="s"),
             "xesam:album": "",
@@ -469,8 +480,14 @@ def _make_player_class(dbus_mod, service_mod):
                 self.properties["Position"] = pos_us
                 changed["Position"] = pos_us
             artists = [artist] if artist else []
+            # Stable track id so BlueZ/headsets treat Metadata updates as one track.
+            safe = "".join(
+                ch if ch.isalnum() else "_"
+                for ch in (title or "track")[:48]
+            ) or "track"
             track = dbus_mod.Dictionary(
                 {
+                    "mpris:trackid": dbus_mod.ObjectPath(f"/org/musync/track/{safe}"),
                     "xesam:title": title or "",
                     "xesam:artist": dbus_mod.Array(artists, signature="s"),
                     "xesam:album": album or "",
@@ -559,6 +576,11 @@ class AvrcpStatusSnapshot:
     last_action: Optional[str] = None
     last_error: str = ""
     player_registered: bool = False
+    volume_supported: bool = False
+    dbus_import_ok: bool = False
+    player_path: str = PLAYER_PATH
+    registered_adapters: list[str] = field(default_factory=list)
+    mpris_playback_status: str = "Stopped"
 
 
 class AvrcpBridge:
@@ -591,10 +613,22 @@ class AvrcpBridge:
         self._glib_loop = None
         self._glib_thread: Optional[threading.Thread] = None
         self._registered_adapters: set[str] = set()
+        self._bluez_owner: str = ""
+        self._dbus_import_ok = _try_import_dbus() is not None
+        self._status.dbus_import_ok = self._dbus_import_ok
 
     @property
     def status(self) -> AvrcpStatusSnapshot:
         with self._lock:
+            mpris_status = "Stopped"
+            player = self._player
+            if player is not None:
+                try:
+                    mpris_status = str(
+                        player.properties.get("PlaybackStatus") or "Stopped"
+                    )
+                except Exception:  # noqa: BLE001
+                    mpris_status = "Stopped"
             return AvrcpStatusSnapshot(
                 supported=self._status.supported,
                 watching=self._status.watching,
@@ -603,6 +637,11 @@ class AvrcpBridge:
                 last_action=self._status.last_action,
                 last_error=self._status.last_error,
                 player_registered=self._status.player_registered,
+                volume_supported=self._status.volume_supported,
+                dbus_import_ok=self._dbus_import_ok,
+                player_path=PLAYER_PATH,
+                registered_adapters=sorted(self._registered_adapters),
+                mpris_playback_status=mpris_status,
             )
 
     def note_ui_volume(self, device_id: str, volume: float) -> None:
@@ -630,7 +669,14 @@ class AvrcpBridge:
                 self._node_by_device = {
                     did: nid for did, nid in node_by_device.items() if nid
                 }
-        # Hot-plug HCI: try RegisterPlayer on any new Media1 adapters.
+        # Hot-plug HCI / bluetoothd restart: re-RegisterPlayer when needed.
+        self._schedule_on_glib(self._register_player_on_adapters)
+
+    def force_reregister(self) -> None:
+        """Clear adapter cache and retry Media1.RegisterPlayer (BT connect / churn)."""
+        with self._lock:
+            self._registered_adapters.clear()
+            self._bluez_owner = ""
         self._schedule_on_glib(self._register_player_on_adapters)
 
     def start_watcher(self) -> None:
@@ -643,10 +689,12 @@ class AvrcpBridge:
         player_ok, player_detail = self._start_mpris_player()
         with self._lock:
             self._status.player_registered = player_ok
+            self._status.dbus_import_ok = self._dbus_import_ok
             if player_ok:
                 self._status.supported = True
                 self._status.detail = player_detail
-            elif not self._busctl:
+                self._status.last_error = ""
+            elif not self._busctl and not self._dbus_import_ok:
                 self._status.supported = False
                 self._status.watching = False
                 self._status.detail = (
@@ -657,9 +705,10 @@ class AvrcpBridge:
                 return
             else:
                 self._status.last_error = player_detail
+                # Absolute Volume may still work via busctl — do not claim buttons OK.
                 self._status.detail = (
-                    f"AVRCP volume poll ok; transport RegisterPlayer soft-fail "
-                    f"({player_detail[:120]})"
+                    f"AVRCP Absolute Volume may work; headset buttons soft-fail — "
+                    f"{player_detail[:160]}"
                 )
 
         # Volume still uses busctl monitor (PropertyChanged); optional action tokens.
@@ -759,14 +808,25 @@ class AvrcpBridge:
 
         with self._lock:
             if by_mac:
+                self._status.volume_supported = True
                 self._status.supported = True
-                if (
-                    "soft-fail" not in detail.lower()
-                    and "missing" not in detail.lower()
-                    and not self._status.player_registered
-                ):
-                    # Keep RegisterPlayer detail when player is up.
-                    if "RegisterPlayer" not in (self._status.detail or ""):
+                if not self._status.player_registered:
+                    # Volume OK ≠ buttons OK — keep RegisterPlayer failure visible.
+                    if self._status.last_error and (
+                        "RegisterPlayer" in (self._status.last_error or "")
+                        or "dbus" in (self._status.last_error or "").lower()
+                        or "python3-dbus" in (self._status.last_error or "")
+                    ):
+                        self._status.detail = (
+                            f"Absolute Volume OK; headset buttons soft-fail — "
+                            f"{self._status.last_error[:120]}"
+                        )
+                    elif (
+                        "soft-fail" not in detail.lower()
+                        and "missing" not in detail.lower()
+                        and "RegisterPlayer" not in (self._status.detail or "")
+                        and "buttons soft-fail" not in (self._status.detail or "")
+                    ):
                         self._status.detail = detail
             elif detail and not self._status.watching:
                 self._status.detail = detail
@@ -851,8 +911,9 @@ class AvrcpBridge:
         requirement). Ready/error is signaled back to the caller.
         """
         mods = _try_import_dbus()
+        self._dbus_import_ok = mods is not None
         if mods is None:
-            return False, "python3-dbus / python3-gi missing"
+            return False, _DBUS_IMPORT_HINT
         dbus_mod, service_mod, mainloop_mod, GLib = mods
         ready = threading.Event()
         result: dict[str, Any] = {"ok": False, "detail": "MPRIS start pending"}
@@ -864,7 +925,12 @@ class AvrcpBridge:
                 PlayerCls = _make_player_class(dbus_mod, service_mod)
 
                 def _on_player_action(action: AvrcpAction) -> None:
-                    self.inject_action(action, deliver=True)
+                    # Relay off the GLib thread so session/mpv locks cannot stall BlueZ.
+                    threading.Thread(
+                        target=lambda: self.inject_action(action, deliver=True),
+                        name="musync-avrcp-action",
+                        daemon=True,
+                    ).start()
 
                 player = PlayerCls(bus, PLAYER_PATH, _on_player_action)
                 loop = GLib.MainLoop()
@@ -877,7 +943,7 @@ class AvrcpBridge:
                     result["ok"] = False
                     result["detail"] = (
                         "BlueZ Media1.RegisterPlayer found no adapters "
-                        "(bluetoothd down?)"
+                        "(bluetoothd down? After=bluetooth.service; retry on connect)"
                     )
                 else:
                     result["ok"] = True
@@ -942,13 +1008,32 @@ class AvrcpBridge:
                 log.debug("AVRCP schedule fallback soft-fail: %s", exc2)
 
     def _register_player_on_adapters(self) -> int:
-        """Call Media1.RegisterPlayer on each HCI adapter not yet registered."""
+        """Call Media1.RegisterPlayer on each HCI adapter not yet registered.
+
+        If ``org.bluez`` name owner changes (bluetoothd restart under dual A2DP
+        churn), clear the adapter cache and re-register — otherwise status can
+        stay ``player_registered=true`` while BlueZ has forgotten our player.
+        """
         mods = self._dbus_mods
         bus = self._bus
         player = self._player
         if not mods or bus is None or player is None:
             return 0
         dbus_mod = mods[0]
+        try:
+            owner = str(bus.get_name_owner("org.bluez"))
+        except Exception as exc:  # noqa: BLE001
+            log.debug("AVRCP get_name_owner(org.bluez): %s", exc)
+            owner = ""
+        if owner and owner != self._bluez_owner:
+            if self._bluez_owner:
+                log.info(
+                    "AVRCP: org.bluez owner changed (%s → %s); re-RegisterPlayer",
+                    self._bluez_owner,
+                    owner,
+                )
+            self._registered_adapters.clear()
+            self._bluez_owner = owner
         try:
             om = dbus_mod.Interface(
                 bus.get_object("org.bluez", "/"),
@@ -959,6 +1044,7 @@ class AvrcpBridge:
             log.debug("AVRCP GetManagedObjects: %s", exc)
             return 0
         count = 0
+        errors: list[str] = []
         for path, ifaces in objects.items():
             path_s = str(path)
             if BLUEZ_MEDIA_IFACE not in ifaces:
@@ -985,14 +1071,21 @@ class AvrcpBridge:
                     self._registered_adapters.add(path_s)
                     count += 1
                 else:
+                    errors.append(f"{path_s}: {err[:80]}")
                     log.info("AVRCP RegisterPlayer %s soft-fail: %s", path_s, exc)
         with self._lock:
             if count:
                 self._status.player_registered = True
                 self._status.supported = True
-                if "RegisterPlayer" not in (self._status.detail or ""):
+                self._status.last_error = ""
+                self._status.detail = (
+                    f"RegisterPlayer on {count} adapter(s) at {PLAYER_PATH}"
+                )
+            elif errors:
+                self._status.last_error = "; ".join(errors)[:200]
+                if "buttons soft-fail" not in (self._status.detail or ""):
                     self._status.detail = (
-                        f"RegisterPlayer on {count} adapter(s) at {PLAYER_PATH}"
+                        f"AVRCP RegisterPlayer soft-fail — {self._status.last_error}"
                     )
         return count
 

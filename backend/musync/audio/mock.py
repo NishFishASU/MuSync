@@ -955,6 +955,11 @@ class MockAudioBackend(AudioBackend):
             last_action=snap.last_action,
             last_error=snap.last_error,
             player_registered=False,
+            volume_supported=True,
+            dbus_import_ok=False,
+            player_path="/org/musync/player",
+            registered_adapters=[],
+            mpris_playback_status="Stopped",
         )
 
     def relay_avrcp_command(self, action: str):
@@ -1058,6 +1063,7 @@ class MockAudioBackend(AudioBackend):
                 apple_ready=stream.airplay.configured,
                 youtube_ready=stream.youtube.configured,
                 avrcp_supported=True,
+                avrcp_player_registered=False,
                 host_speakers=self._host_player.backend,
                 detail=detail,
             )

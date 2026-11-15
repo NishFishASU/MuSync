@@ -913,6 +913,11 @@ class PipeWireBackend(AudioBackend):
             last_action=snap.last_action,
             last_error=snap.last_error,
             player_registered=bool(snap.player_registered),
+            volume_supported=bool(snap.volume_supported),
+            dbus_import_ok=bool(snap.dbus_import_ok),
+            player_path=snap.player_path or "/org/musync/player",
+            registered_adapters=list(snap.registered_adapters or []),
+            mpris_playback_status=snap.mpris_playback_status or "Stopped",
         )
 
     def relay_avrcp_command(self, action: str):
@@ -1530,6 +1535,45 @@ class PipeWireBackend(AudioBackend):
                 self._cast_soft_warn = f"Cast sync soft-fail: {exc}"
                 log.warning("Cast sync soft-fail %s: %s", device.id, exc)
 
+    def _sink_links_healthy_for_play(self) -> bool:
+        """True when enabled+connected BT sinks already have loaded loopbacks."""
+        enabled_bt = [
+            d
+            for d in self._devices.values()
+            if d.enabled and d.kind == DeviceKind.BLUETOOTH and d.connected
+        ]
+        if not enabled_bt:
+            return True
+        return all(d.id in self._loopback_module_ids for d in enabled_bt)
+
+    def _ensure_play_ready(self) -> None:
+        """Fast Play path: ensure feeder; skip rediscovery + loopback bounce when healthy.
+
+        Full ``_ensure_graph`` runs ``wpctl`` + per-MAC ``bluetoothctl info`` and
+        unloads/reloads every BT loopback — multi-second on a busy Pi. Local file
+        Play only needs an existing feeder + links.
+        """
+        if self._env_dry_run():
+            self._ensure_graph()
+            return
+        try:
+            if self._feeder_sink_present() and self._sink_links_healthy_for_play():
+                log.debug(
+                    "Play: skipping full graph rebuild (feeder + BT links healthy)"
+                )
+                return
+        except Exception as exc:  # noqa: BLE001
+            log.debug("Play ready check soft-fail: %s", exc)
+        self._ensure_graph()
+
+    def _sync_spp_and_cast_after_play(self) -> None:
+        """Background silence→file upgrade for SPP/Cast after local BT audio starts."""
+        try:
+            self._sync_spp_listeners()
+            self._sync_cast_streams()
+        except Exception as exc:  # noqa: BLE001
+            log.debug("post-play SPP/Cast sync: %s", exc)
+
     def _ensure_graph(self, only_device: str | None = None) -> GraphPlan:
         """Ensure feeder → delay/volume → enabled sinks.
 
@@ -1719,6 +1763,16 @@ class PipeWireBackend(AudioBackend):
         except Exception as exc:  # noqa: BLE001
             log.debug("Phone-side pause soft-fail: %s", exc)
 
+    def _pause_competing_phone_async(self) -> None:
+        """Pause phone Spotify after hub PCM starts — never gate local Play on Web API."""
+
+        def _run() -> None:
+            self._pause_competing_phone_playback()
+
+        threading.Thread(
+            target=_run, name="musync-phone-pause", daemon=True
+        ).start()
+
     def _start_mpv_into_feeder(self, path: str, *, position_ms: int = 0) -> None:
         """Play local audio or video into the feeder (video: audio-only via --no-video)."""
         if self._env_dry_run():
@@ -1733,12 +1787,17 @@ class PipeWireBackend(AudioBackend):
         try:
             if mpv:
                 # --no-video: extract audio from video containers into musync_feeder.
+                # Low demux/cache so Play→first sample is not padded by readahead.
                 self._player_proc = subprocess.Popen(
                     [
                         mpv,
                         "--no-video",
+                        "--no-audio-display",
                         "--ao=pipewire",
                         f"--audio-device={self._feeder}",
+                        "--audio-buffer=0.03",
+                        "--demuxer-readahead-secs=0",
+                        "--cache=no",
                         f"--start={position_ms / 1000:.3f}",
                         path,
                     ],
@@ -1954,11 +2013,12 @@ class PipeWireBackend(AudioBackend):
             return
 
         if transport.source_type == SourceType.YOUTUBE:
-            self._stop_player_process(keep_librespot=False, pause_spotify=True)
-            # Hub YouTube PCM — pause phone Spotify so speakers don't fight.
-            self._pause_competing_phone_playback()
+            # Stop prior producers without sync Spotify pause; start ffmpeg first.
+            self._stop_player_process(keep_librespot=False, pause_spotify=False)
             locator = self._session.active_locator() or ""
             self._start_youtube_into_feeder(locator)
+            # Phone Spotify pause is best-effort — do not gate YouTube PCM.
+            self._pause_competing_phone_async()
             return
 
         if transport.source_type == SourceType.INPUT and transport.input_id:
@@ -1978,22 +2038,23 @@ class PipeWireBackend(AudioBackend):
                 self._start_capture_into_feeder(host)
                 return
             if host.capture_path == CapturePath.NETWORK and host.endpoint:
-                self._stop_player_process(keep_librespot=False, pause_spotify=True)
-                self._pause_competing_phone_playback()
+                self._stop_player_process(keep_librespot=False, pause_spotify=False)
                 path = Path(host.endpoint)
                 if path.is_file():
                     self._start_mpv_into_feeder(
                         str(path), position_ms=transport.position_ms
                     )
+                    self._pause_competing_phone_async()
                     return
                 log.info(
                     "Network capture endpoint not a file yet: %s", host.endpoint
                 )
                 return
 
-        # Local file (and pathless software-clock cues): pause phone Spotify.
-        self._stop_player_process(keep_librespot=False, pause_spotify=True)
-        self._pause_competing_phone_playback()
+        # Local file (and pathless software-clock cues): start mpv first.
+        # Prior path double-called /me/player/pause (stop_spotify + pause_competing)
+        # before Popen — up to 40s when Spotify API hung; phone pause is async now.
+        self._stop_player_process(keep_librespot=False, pause_spotify=False)
         path = self._session.active_file_path()
         if not path:
             log.info(
@@ -2001,8 +2062,10 @@ class PipeWireBackend(AudioBackend):
                 transport.source_type,
                 transport.queue_item_id or transport.source_id,
             )
+            self._pause_competing_phone_async()
             return
         self._start_mpv_into_feeder(path, position_ms=transport.position_ms)
+        self._pause_competing_phone_async()
 
     def _discover_capture_candidates(self) -> tuple[list[PwNode], str]:
         """PipeWire Audio/Source + ALSA USB + HDMI/capture cards."""
@@ -2891,6 +2954,12 @@ class PipeWireBackend(AudioBackend):
                         self._ensure_graph()
                     except Exception as exc:  # noqa: BLE001
                         notes.append(f"graph refresh: {exc}")
+                    # Dual A2DP / reconnect churn: re-bind MPRIS after Qudelix links.
+                    try:
+                        self._avrcp.force_reregister()
+                        self._publish_avrcp_transport()
+                    except Exception as exc:  # noqa: BLE001
+                        log.debug("AVRCP re-register after connect: %s", exc)
 
             _bn, _bm, rows, _d = self._discovery_maps()
             adapters, _capacity, soft_warn = self._adapter_snapshot()
@@ -2909,15 +2978,21 @@ class PipeWireBackend(AudioBackend):
         return self._session.get_transport()
 
     def set_transport(self, body: TransportPut) -> Transport:
-        # Ensure BT sink graph before Play; swap feeder; then align SPP/Cast
-        # (anullsrc ↔ file/pulse) without bouncing a matching listener.
+        # Ensure feeder/links before Play (cheap when healthy); swap feeder;
+        # defer SPP/Cast silence→file so Qudelix BT is not gated on ffmpeg restart.
         if body.state is TransportState.PLAYING:
-            self._ensure_graph()
+            self._ensure_play_ready()
         transport = self._session.set_transport(body)
         if body.state is TransportState.PLAYING:
             self._apply_turn_policy(rotate=False)
-        self._sync_spp_listeners()
-        self._sync_cast_streams()
+            threading.Thread(
+                target=self._sync_spp_and_cast_after_play,
+                name="musync-spp-cast-sync",
+                daemon=True,
+            ).start()
+        else:
+            self._sync_spp_listeners()
+            self._sync_cast_streams()
         self._publish_avrcp_transport(transport)
         return transport
 
@@ -3250,8 +3325,13 @@ class PipeWireBackend(AudioBackend):
             if self._bt_adapters_detail:
                 hint += f"; {self._bt_adapters_detail}"
             avrcp = self._avrcp.status
-            if avrcp.supported:
-                hint += f"; AVRCP={avrcp.detail or 'ok'}"
+            if avrcp.player_registered:
+                hint += f"; AVRCP buttons=ok ({avrcp.detail or 'RegisterPlayer'})"
+            elif avrcp.volume_supported or avrcp.supported:
+                hint += (
+                    f"; AVRCP volume=ok buttons=MISSING "
+                    f"({(avrcp.last_error or avrcp.detail or 'RegisterPlayer')[:80]})"
+                )
             elif avrcp.detail:
                 hint += f"; AVRCP soft-fail ({avrcp.detail[:80]})"
             return Health(
@@ -3270,6 +3350,7 @@ class PipeWireBackend(AudioBackend):
                 apple_ready=stream.airplay.configured,
                 youtube_ready=stream.youtube.configured,
                 avrcp_supported=bool(avrcp.supported),
+                avrcp_player_registered=bool(avrcp.player_registered),
                 detail=(
                     f"{detail}; mapped={mapped}/{len(devices)}; "
                     f"planned_links={links}; dry_run={dry}; "

@@ -135,6 +135,39 @@ def test_avrcp_status_exposes_player_registered(
     assert "player_registered" in body
     # Mock / no BlueZ → false; field must still serialize.
     assert body["player_registered"] is False
+    # Debug fields for Pi triage (venv dbus/gi + RegisterPlayer).
+    assert "dbus_import_ok" in body
+    assert "volume_supported" in body
+    assert "registered_adapters" in body
+    assert body["player_path"] == "/org/musync/player"
+    assert body["mpris_playback_status"] in {"Stopped", "Playing", "Paused"}
+
+
+def test_mpris_props_include_trackid() -> None:
+    mods = None
+    try:
+        import dbus
+
+        mods = dbus
+    except ImportError:
+        pytest.skip("python3-dbus not installed")
+    from musync.audio.avrcp import _build_mpris_props
+
+    props = _build_mpris_props(mods, status="Playing")
+    meta = props["Metadata"]
+    assert "mpris:trackid" in meta
+    assert str(meta["mpris:trackid"]).startswith("/org/musync/track/")
+
+
+def test_force_reregister_clears_adapter_cache() -> None:
+    from musync.audio.avrcp import AvrcpBridge
+
+    bridge = AvrcpBridge()
+    bridge._registered_adapters.add("/org/bluez/hci0")
+    bridge._bluez_owner = ":1.99"
+    bridge.force_reregister()
+    assert bridge._registered_adapters == set()
+    assert bridge._bluez_owner == ""
 
 
 def test_inject_volume_updates_slider(backend: MockAudioBackend) -> None:

@@ -18,6 +18,18 @@ sudo apt install -y pipewire wireplumber pipewire-pulse pulseaudio-utils \
 (BlueZ `Media1.RegisterPlayer`). Absolute Volume still works via `busctl`/`wpctl`
 without them.
 
+The project venv must see those apt packages:
+
+```bash
+# New venv:
+python3 -m venv --system-site-packages .venv
+# Existing isolated venv: ./scripts/run_pi.sh flips include-system-site-packages=true
+# Verify the *same* interpreter MuSync uses:
+.venv/bin/python -c "import dbus, gi; from gi.repository import GLib; print('ok')"
+curl -s http://127.0.0.1:8080/api/avrcp | python3 -m json.tool
+# Expect: dbus_import_ok true, player_registered true
+```
+
 ## 2. Spotify Connect (librespot)
 
 ```bash

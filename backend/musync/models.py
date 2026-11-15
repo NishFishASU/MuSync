@@ -496,6 +496,13 @@ class AvrcpStatus(BaseModel):
     last_error: str = ""
     # True when BlueZ Media1.RegisterPlayer succeeded (headset Play/Pause/Next).
     player_registered: bool = False
+    # Absolute Volume (busctl/wpctl) can work even when RegisterPlayer fails.
+    volume_supported: bool = False
+    # Pi debug: apt python3-dbus/gi must import in the MuSync interpreter.
+    dbus_import_ok: bool = False
+    player_path: str = "/org/musync/player"
+    registered_adapters: list[str] = Field(default_factory=list)
+    mpris_playback_status: str = "Stopped"
 
 
 class AvrcpCommandPut(BaseModel):
@@ -533,6 +540,8 @@ class Health(BaseModel):
     apple_ready: bool = False
     youtube_ready: bool = False
     avrcp_supported: bool = False
+    # BlueZ Media1.RegisterPlayer — headset play/pause/skip (independent of volume).
+    avrcp_player_registered: bool = False
     # Mock only: sounddevice / ffplay / mpv / … or "none" when soft-failed.
     host_speakers: str = ""
 

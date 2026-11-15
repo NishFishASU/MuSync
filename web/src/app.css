@@ -159,6 +159,18 @@ body {
 	letter-spacing: 0.01em;
 }
 
+.avrcp-warn {
+	margin: 0 auto 0.65rem;
+	max-width: var(--content-max);
+	width: calc(100% - 1.5rem);
+	padding: 0.45rem 0.75rem;
+	font-size: 0.82rem;
+	line-height: 1.35;
+	color: var(--accent);
+	background: var(--accent-soft);
+	border-left: 3px solid var(--accent);
+}
+
 .health {
 	font-size: 0.74rem;
 	font-weight: 600;

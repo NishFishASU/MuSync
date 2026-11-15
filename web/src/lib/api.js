@@ -324,6 +324,24 @@ export function spaPollRequestsPerSecond(cadence) {
  * @property {boolean} [spotify_ready]
  * @property {boolean} [apple_ready]
  * @property {boolean} [youtube_ready]
+ * @property {boolean} [avrcp_supported]
+ * @property {boolean} [avrcp_player_registered]
+ */
+
+/**
+ * @typedef {Object} AvrcpStatus
+ * @property {boolean} supported
+ * @property {boolean} watching
+ * @property {string} [detail]
+ * @property {Record<string, number>} [last_volume_sync]
+ * @property {string | null} [last_action]
+ * @property {string} [last_error]
+ * @property {boolean} [player_registered]
+ * @property {boolean} [volume_supported]
+ * @property {boolean} [dbus_import_ok]
+ * @property {string} [player_path]
+ * @property {string[]} [registered_adapters]
+ * @property {string} [mpris_playback_status]
  */
 
 /**
@@ -547,6 +565,11 @@ export async function api(path, options = {}) {
 /** @returns {Promise<Health>} */
 export function getHealth() {
 	return api('/api/health');
+}
+
+/** @returns {Promise<AvrcpStatus>} */
+export function getAvrcpStatus() {
+	return api('/api/avrcp');
 }
 
 /** @returns {Promise<Device[]>} */

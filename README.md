@@ -164,7 +164,8 @@ sudo apt install -y python3-pip python3-venv python3-dbus python3-gi \
 # sudo apt install -y nodejs
 git clone https://github.com/NishFishASU/MuSync.git
 cd MuSync
-python3 -m venv .venv && source .venv/bin/activate
+# --system-site-packages so apt python3-dbus/gi work for Qudelix AVRCP buttons
+python3 -m venv --system-site-packages .venv && source .venv/bin/activate
 pip install -r requirements.txt
 ./scripts/build_web.sh   # or rsync a laptop-built web/build/
 ```

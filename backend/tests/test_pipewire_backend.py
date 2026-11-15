@@ -181,6 +181,62 @@ def test_transport_still_works_software(backend: PipeWireBackend) -> None:
     assert playing.state == TransportState.PLAYING
 
 
+def test_play_skips_full_graph_when_links_healthy(
+    backend: PipeWireBackend, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Second Play must not rediscover BT + bounce loopbacks when already linked."""
+    monkeypatch.setattr(backend, "_env_dry_run", lambda: False)
+    monkeypatch.setattr(backend, "_feeder_sink_present", lambda: True)
+    backend._loopback_module_ids = {"sink-1": "10", "sink-2": "11"}
+    for device_id in ("sink-1", "sink-2"):
+        backend._devices[device_id] = backend._devices[device_id].model_copy(
+            update={"connected": True}
+        )
+    calls = {"n": 0}
+
+    def boom() -> None:
+        calls["n"] += 1
+        raise AssertionError("full _ensure_graph should be skipped")
+
+    monkeypatch.setattr(backend, "_ensure_graph", boom)
+    backend._ensure_play_ready()
+    assert calls["n"] == 0
+
+
+def test_local_play_pauses_spotify_async(
+    backend: PipeWireBackend, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Local Play must start mpv before (async) phone Spotify pause."""
+    order: list[str] = []
+
+    monkeypatch.setattr(backend, "_env_dry_run", lambda: True)
+    monkeypatch.setattr(
+        backend,
+        "_stop_player_process",
+        lambda **_k: order.append("stop"),
+    )
+    monkeypatch.setattr(
+        backend,
+        "_start_mpv_into_feeder",
+        lambda *_a, **_k: order.append("mpv"),
+    )
+
+    real_async = backend._pause_competing_phone_async
+
+    def tracked_async() -> None:
+        order.append("pause_async")
+        # Do not start a real thread in unit test.
+
+    monkeypatch.setattr(backend, "_pause_competing_phone_async", tracked_async)
+    monkeypatch.setattr(
+        backend._session, "active_file_path", lambda: "/tmp/demo.flac"
+    )
+
+    backend._start_player_process()
+    assert order == ["stop", "mpv", "pause_async"]
+    assert real_async  # keep reference for lint / intent
+
+
 def test_shutdown_tears_down_graph_and_children(
     backend: PipeWireBackend, monkeypatch: pytest.MonkeyPatch
 ) -> None:

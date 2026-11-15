@@ -131,13 +131,17 @@ def test_pause_phone_playback_puts_pause(tmp_path, monkeypatch) -> None:
     _token_env(tmp_path, monkeypatch)
     client = SpotifyClient()
     called: list[str] = []
+    timeouts: list[float] = []
 
-    def _put(path: str, *, params=None, json_body=None) -> None:
+    def _put(path: str, *, params=None, json_body=None, timeout=20.0) -> None:
         called.append(path)
+        timeouts.append(float(timeout))
 
     monkeypatch.setattr(client, "_put_json", _put)
     assert client.pause_phone_playback() is True
     assert called == ["/me/player/pause"]
+    # Local Play must not wait on a 20s Spotify hang.
+    assert timeouts == [3.0]
 
 
 def test_pause_competing_on_local_mock_play(tmp_path, monkeypatch) -> None:

@@ -28,7 +28,7 @@ USB / PC capture (ALSA auto-detect → feeder): [usb-pc-capture.md](./usb-pc-cap
 | Discovery | `wpctl status` / `bluetoothctl` → UI by friendly name (MAC auto-filled) |
 | Feeder | One `musync_feeder` null-sink — startup/shutdown purge orphan `MuSync_Feeder` modules + MuSync loopbacks |
 | Streaming | Spotify librespot → feeder; AirPlay receive (shairport) — [spotify-apple.md](spotify-apple.md), [airplay-receive.md](airplay-receive.md) |
-| AVRCP | Absolute Volume → sliders; play/pause/skip via BlueZ `Media1.RegisterPlayer` (MPRIS) → hub transport (local/Spotify/YouTube); soft-fail without `python3-dbus` / bluetoothd |
+| AVRCP | Absolute Volume → sliders; play/pause/skip via BlueZ `Media1.RegisterPlayer` (MPRIS) → hub transport (local/Spotify/YouTube); needs apt `python3-dbus`/`python3-gi` **importable in the MuSync venv** (`--system-site-packages` / `run_pi.sh`); soft-fail otherwise. Check `GET /api/avrcp` → `dbus_import_ok` + `player_registered` |
 | Lifecycle | Ctrl+C / SIGTERM / systemd stop → unload capture→feeder→sink loopbacks, purge feeder, stop librespot/yt-dlp/ffmpeg/mpv. **Does not** unpair BlueZ — disconnect BT in phone/speaker settings if the raw A2DP link should go away |
 
 ## Cloud vs Pi

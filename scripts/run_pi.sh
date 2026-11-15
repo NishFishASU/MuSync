@@ -41,6 +41,17 @@ unset -f _path_prepend
 cd "$ROOT"
 
 # Prefer the project venv — system python3 often lacks uvicorn (ModuleNotFoundError).
+# AVRCP RegisterPlayer needs apt python3-dbus + python3-gi. Isolated venvs hide
+# those packages unless include-system-site-packages is true.
+if [[ -f "$ROOT/.venv/pyvenv.cfg" ]]; then
+  if grep -qiE '^include-system-site-packages[[:space:]]*=[[:space:]]*false' "$ROOT/.venv/pyvenv.cfg"; then
+    echo "  note:     enabling system-site-packages on .venv (python3-dbus/gi for AVRCP)"
+    # portable: rewrite the flag without assuming GNU sed -i backup behavior
+    cfg="$ROOT/.venv/pyvenv.cfg"
+    tmp="${cfg}.tmp.$$"
+    sed -E 's/^include-system-site-packages[[:space:]]*=[[:space:]]*false/include-system-site-packages = true/I' "$cfg" >"$tmp" && mv "$tmp" "$cfg"
+  fi
+fi
 if [[ -f "$ROOT/.venv/bin/activate" ]]; then
   # shellcheck disable=SC1091
   source "$ROOT/.venv/bin/activate"
@@ -110,11 +121,21 @@ if ! "$PY" -c "import uvicorn" 2>/dev/null; then
   echo "MuSync must run inside the project venv (system python usually lacks deps)." >&2
   echo "Fix:" >&2
   echo "  cd $ROOT" >&2
-  echo "  python3 -m venv .venv" >&2
+  echo "  python3 -m venv --system-site-packages .venv" >&2
   echo "  source .venv/bin/activate" >&2
   echo "  pip install -r requirements.txt" >&2
   echo "  ./scripts/run_pi.sh" >&2
   exit 1
+fi
+
+# Qudelix play/pause/skip needs Media1.RegisterPlayer (dbus + gi in THIS interpreter).
+if "$PY" -c "import dbus, dbus.service, dbus.mainloop.glib; from gi.repository import GLib" 2>/dev/null; then
+  echo "  avrcp:    dbus/gi import OK (RegisterPlayer available)"
+else
+  echo "  warn:     dbus/gi NOT importable under $PY — headset buttons will soft-fail"
+  echo "            sudo apt install -y python3-dbus python3-gi"
+  echo "            then: python3 -m venv --system-site-packages .venv && pip install -r requirements.txt"
+  echo "            curl /api/avrcp → player_registered / dbus_import_ok for truth"
 fi
 
 if [[ ! -f "$MUSYNC_WEB_DIR/index.html" ]]; then
