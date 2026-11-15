@@ -881,7 +881,11 @@ class MockAudioBackend(AudioBackend):
         self._host_player.stop()
 
     def _start_host_player(self) -> None:
-        """Route local mock playback to host speakers; soft-fail if no audio."""
+        """Route local mock playback to host speakers; soft-fail if no audio.
+
+        Also best-effort pause phone-side Spotify (OAuth) so mock local play
+        does not fight the phone speakers when the same account is playing.
+        """
         transport = self._session.get_transport()
         # Live / streaming cues stay software-clock on laptop mock.
         if transport.source_type in {
@@ -892,6 +896,12 @@ class MockAudioBackend(AudioBackend):
         }:
             self._host_player.stop()
             return
+        try:
+            from ..streaming import get_streaming_service
+
+            get_streaming_service().pause_competing_phone_playback()
+        except Exception:  # noqa: BLE001
+            pass
         path = self._session.active_file_path()
         if path:
             self._host_player.play(path, position_ms=transport.position_ms)

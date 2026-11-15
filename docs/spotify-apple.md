@@ -13,8 +13,23 @@ Secrets stay in environment variables / local files. Never commit client secrets
 | Auth | OAuth (Authorization Code) via UI **Connect Spotify** | None (receiver on the Pi) |
 | Search | Web API — real | N/A — play on the Apple device |
 | Hub PCM | **librespot** Connect device with `PULSE_SINK=musync_feeder` | **shairport-sync** Source → loopback → feeder |
-| Play path | Web API transfers track to librespot → feeder → sinks | AirPlay to Pi → capture into feeder |
+| Play path | Web API **force-transfers** to MuSync Connect (never plays on the phone) → feeder → sinks | AirPlay to Pi → capture into feeder |
 | Without credentials | Rows show **unavailable**; **mock/local still work** | Install shairport / Refresh inputs |
+
+## Phone speakers vs hub (exclusive / duck)
+
+**Symptom:** phone earpiece/speakers keep playing while Qudelix / SPP / Cast also play.
+
+| Hub source | What MuSync does | What it cannot do |
+|------------|------------------|-------------------|
+| **Spotify** Queue & play | `PUT /me/player` transfer → MuSync librespot, then `play?device_id=…`. Refuses to play if Connect device is missing (avoids starting audio on the phone). | Free accounts; phone playing a *different* Spotify account |
+| **Local file / YouTube** | Soft-fail `PUT /me/player/pause` when Spotify is OAuth-connected, so phone Spotify yields | Mute YouTube Music, Files, browser tabs, or any non-Spotify app |
+| **BT A2DP / AirPlay live input** | Does **not** pause the phone — the phone *is* the capture source | Force Android/iOS media routing if the phone still uses its own speakers |
+| **MuSync SPA in the phone browser** | Controls the hub over HTTP | **No OS exclusive-audio API** — a web page cannot mute other apps system-wide |
+
+**User steps (Spotify):** Connect Spotify once → ensure librespot is on PATH → Queue & play. Confirm the Spotify phone app shows **MuSync** as the active Connect speaker (not the phone). If phone speakers still play, open Spotify → Devices → MuSync, or stop the phone player manually.
+
+**User steps (local / YouTube):** Play from the hub UI. If Spotify was playing on the phone under the same account, it should pause. For other apps, stop them on the phone — Android/iOS do not let MuSync duck them from a browser.
 
 ## Spotify setup (Pi)
 
@@ -170,9 +185,10 @@ command. API: `GET /api/streaming/spotify/https-tunnel` (+ `.sh` download).
 1. Without Spotify env: local Play still works; Spotify rows show **unavailable**.
 2. With env + OAuth: `GET /api/streaming` shows `spotify.authenticated: true`.
 3. Search returns hits; queue item `source_type=spotify`, `available=true`.
-4. Play: `pactl list sinks short` shows one `musync_feeder`; librespot running; sinks hear audio.
-5. Stop/Pause: Spotify pauses; feeder swap does not tear down BT/SPP graph.
-6. Logout: tokens cleared; Spotify becomes unavailable again; local still plays.
+4. Play: `pactl list sinks short` shows one `musync_feeder`; librespot running; sinks hear audio; **phone Spotify shows MuSync** (not phone speakers).
+5. Local Play after Spotify: phone Spotify pauses (same OAuth account); sinks hear the local file.
+6. Stop/Pause: Spotify pauses; feeder swap does not tear down BT/SPP graph.
+7. Logout: tokens cleared; Spotify becomes unavailable again; local still plays.
 
 ## AirPlay receive (Apple devices)
 
@@ -256,7 +272,8 @@ export MUSYNC_STREAMING_MOCK=1
 - **403 after Connect / Internal Server Error on callback** — Spotify app is in **development mode** and your account is not allowlisted. After the auth code exchange, MuSync calls `GET /v1/me`; Spotify returns **403 Forbidden** until you add the signed-in user under Developer Dashboard → your app → **User Management**. MuSync redirects to `/?spotify=error&detail=…` with that message (no bare 500).
 - **Queue search 403 “Insufficient client scope”** — search no longer sends `market=from_token` (that required `user-read-private`). It uses `MUSYNC_SPOTIFY_MARKET` (default **US**). Streaming status shows **granted scopes** + search market. Reconnect on Streaming only if playback scopes are missing.
 - **Queue search 400 “Invalid limit”** — Spotify **Development Mode** apps allow at most **10** results per `/v1/search` request (limit 15–50 returns this misleading error). MuSync clamps to 10 by default; set `MUSYNC_SPOTIFY_SEARCH_MAX=50` only if the app has Extended Quota Mode.
-- **No Connect device** — install librespot; check `MUSYNC_LIBRESPOT_NAME` matches; ensure PipeWire/Pulse is up and `musync_feeder` exists (`./scripts/run_pi.sh` + Play once).
+- **No Connect device / “refusing to play on the phone”** — install librespot; check `MUSYNC_LIBRESPOT_NAME` matches; ensure PipeWire/Pulse is up and `musync_feeder` exists (`./scripts/run_pi.sh` + Play once). MuSync will **not** fall back to the phone as the Spotify player.
+- **Phone speakers + hub both audible** — see [Phone speakers vs hub](#phone-speakers-vs-hub-exclusive--duck). Spotify needs Connect transfer; local/YouTube only pause Spotify via Web API; other phone apps must be stopped manually.
 - **OAuth redirect mismatch** — Dashboard must list the exact `MUSYNC_SPOTIFY_REDIRECT_URI` (`127.0.0.1:8080` and/or `:8081`; never Vite `:5173`, never `localhost` / `musync.local`). mDNS `musync.local` is UI-only — see [mdns.md](./mdns.md).
 - **Connect does nothing / credentials missing** — use Streaming → Save to musync.env, or fill `%USERPROFILE%\musync.env` / `config/streaming.local.env`; Connect shows a clear error when Client ID/Secret are unset.
 - **Duplicate feeders** — fixed by idempotent feeder purge on startup (see `docs/pi-pipewire.md`).

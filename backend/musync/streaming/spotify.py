@@ -812,7 +812,12 @@ class SpotifyClient:
                 proc.kill()
 
     def play_uri(self, uri: str, *, feeder: Optional[str] = None) -> dict[str, Any]:
-        """Transfer playback to librespot Connect device (Premium required)."""
+        """Force-transfer playback to the MuSync librespot Connect device.
+
+        Never calls ``/me/player/play`` without ``device_id`` — that would keep
+        (or start) audio on the phone speakers while the hub also plays.
+        Premium + librespot required for hub PCM.
+        """
         track_uri = (uri or "").strip()
         if not track_uri.startswith("spotify:"):
             if track_uri.startswith("http"):
@@ -827,34 +832,31 @@ class SpotifyClient:
             raise ValueError("Connect a Spotify account first")
 
         librespot = self.ensure_librespot(feeder=feeder)
-        if not librespot and not self._find_connect_device():
+        device_id = self._wait_for_connect_device(
+            attempts=5 if librespot else 2,
+            delay_s=1.0,
+        )
+        if not device_id:
             raise ValueError(
-                "Spotify hub playback needs librespot on PATH "
-                f"(Connect name={_librespot_name()!r}) or another Connect device. "
-                "Install librespot, set MUSYNC_LIBRESPOT_BIN if needed, and use "
-                "Spotify Premium. Search/auth still work without it."
+                "No MuSync Spotify Connect device — refusing to play on the phone. "
+                "Install/start librespot on the Pi "
+                f"(name={_librespot_name()!r}, PULSE_SINK={feeder or _feeder_sink()}), "
+                "use Spotify Premium, then Queue & play again. "
+                "Without a Connect device, Web API play would keep phone speakers alive."
             )
-        device_id = self._find_connect_device()
-        body: dict[str, Any] = {"uris": [track_uri]}
-        params: dict[str, str] = {}
-        if device_id:
-            params["device_id"] = device_id
-        elif librespot:
-            # Device may not have appeared yet — retry once.
-            time.sleep(1.5)
-            device_id = self._find_connect_device()
-            if device_id:
-                params["device_id"] = device_id
 
+        # Explicit transfer first so the phone Spotify app yields to MuSync.
+        transferred = self.transfer_playback(device_id, play=False)
+        body: dict[str, Any] = {"uris": [track_uri]}
+        params: dict[str, str] = {"device_id": device_id}
         try:
-            self._put_json("/me/player/play", params=params or None, json_body=body)
+            self._put_json("/me/player/play", params=params, json_body=body)
         except httpx.HTTPStatusError as exc:
             detail = self._spotify_error_detail(exc)
-            if exc.response.status_code == 404 and not device_id:
+            if exc.response.status_code == 404:
                 raise ValueError(
-                    "No Spotify Connect device found. Install/start librespot "
-                    f"(name={_librespot_name()!r}) on the Pi, or open Spotify on a phone "
-                    f"and transfer to {_librespot_name()!r}. Premium required. {detail}"
+                    "Spotify Connect device gone after transfer. Keep librespot running "
+                    f"(name={_librespot_name()!r}) and retry. Premium required. {detail}"
                 ) from exc
             if exc.response.status_code == 403:
                 raise ValueError(
@@ -867,16 +869,63 @@ class SpotifyClient:
             "uri": track_uri,
             "device_id": device_id,
             "librespot": bool(librespot),
+            "transferred": transferred,
             "feeder": feeder or _feeder_sink(),
         }
 
+    def transfer_playback(self, device_id: str, *, play: bool = False) -> bool:
+        """PUT /me/player — move the active Spotify session onto ``device_id``.
+
+        Soft-fails (returns False) when Spotify has no active device yet; the
+        subsequent ``/me/player/play?device_id=…`` still targets MuSync.
+        """
+        did = (device_id or "").strip()
+        if not did or not self.authenticated():
+            return False
+        try:
+            self._put_json(
+                "/me/player",
+                json_body={"device_ids": [did], "play": bool(play)},
+            )
+            log.info("Spotify Connect transferred → device %s (play=%s)", did, play)
+            return True
+        except httpx.HTTPStatusError as exc:
+            # 404 = nothing to transfer yet; play with device_id still works.
+            log.debug(
+                "Spotify transfer soft-fail (%s): %s",
+                exc.response.status_code,
+                self._spotify_error_detail(exc),
+            )
+            return False
+        except Exception as exc:  # noqa: BLE001
+            log.debug("Spotify transfer soft-fail: %s", exc)
+            return False
+
     def pause(self) -> None:
+        """Pause the active Spotify Connect player (phone or hub). Soft-fail."""
         if not self.authenticated():
             return
         try:
             self._put_json("/me/player/pause", json_body=None)
         except Exception as exc:  # noqa: BLE001
             log.debug("Spotify pause: %s", exc)
+
+    def pause_phone_playback(self) -> bool:
+        """Best-effort pause so phone Spotify stops fighting hub local/YouTube/….
+
+        Uses Web API ``/me/player/pause`` when OAuth tokens exist. Returns True
+        when the pause request succeeded. Cannot mute non-Spotify phone apps —
+        the MuSync SPA has no OS-level exclusive-audio API on Android/iOS.
+        """
+        if not self.authenticated():
+            return False
+        try:
+            self._put_json("/me/player/pause", json_body=None)
+            log.info("Paused Spotify remote playback (phone/other devices yield to hub)")
+            return True
+        except Exception as exc:  # noqa: BLE001
+            log.debug("Spotify phone-side pause soft-fail: %s", exc)
+            return False
 
     def preview_url_for(self, uri: str) -> Optional[str]:
         """30s preview fallback when Connect is unavailable (degraded)."""
@@ -907,6 +956,19 @@ class SpotifyClient:
             if dname == name or "musync" in dname:
                 return dev.get("id")
         return None
+
+    def _wait_for_connect_device(
+        self, *, attempts: int = 5, delay_s: float = 1.0
+    ) -> Optional[str]:
+        """Poll ``/me/player/devices`` until librespot/MuSync appears."""
+        attempts = max(1, int(attempts))
+        for i in range(attempts):
+            device_id = self._find_connect_device()
+            if device_id:
+                return device_id
+            if i + 1 < attempts:
+                time.sleep(max(0.0, float(delay_s)))
+        return self._find_connect_device()
 
     def _open_url_to_uri(self, url: str) -> Optional[str]:
         # https://open.spotify.com/track/ID?...
