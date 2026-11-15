@@ -15,7 +15,7 @@ HDMI source ──► capture dongle ──► ALSA (hw:N) ──► PipeWire al
                                                                                  │
                                                                  ┌───────────────┼───────────────┐
                                                                  ▼               ▼               ▼
-                                                            Qudelix / BT600   …            Phone SPP
+                                                            Qudelix / USB HCI …            Phone SPP
 ```
 
 Common USB HDMI capture chips (MS2109 / Macrosilicon, Elgato, AverMedia, …)

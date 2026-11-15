@@ -107,7 +107,7 @@ class DiscoveredBluetoothSink(BaseModel):
 
 
 class BluetoothAdapter(BaseModel):
-    """One HCI controller — onboard Pi Bluetooth or a USB BT600."""
+    """One BlueZ HCI controller — onboard Pi Bluetooth or a USB dongle."""
 
     hci: str
     mac: str = ""
@@ -115,6 +115,10 @@ class BluetoothAdapter(BaseModel):
     powered: bool = False
     healthy: bool = True
     onboard: bool = False
+    # "usb" | "uart" | "" — bus class from sysfs (generic; not chip-specific).
+    bus: str = ""
+    # USB idVendor:idProduct when bus=usb (e.g. 0b05:1d70); empty otherwise.
+    usb_id: str = ""
     detail: str = ""
 
 

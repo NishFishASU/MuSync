@@ -186,7 +186,7 @@ fi
 
 echo
 echo "Qudelix + SPP via web UI:"
-echo "  1) Pair Qudelix (./scripts/pair_bt600.sh hci0 or bluetoothctl)"
+echo "  1) Pair Qudelix (./scripts/pair_hci.sh hci0 or bluetoothctl)"
 echo "  2) ./scripts/run_pi.sh  (this script — uses .venv, clears stray ffmpeg)"
 echo "  3) Open http://<Pi-IP>:8080 → Device setup"
 echo "     - Refresh → enable BT by name (Qudelix) — no MAC typing"

@@ -86,6 +86,8 @@
  * @property {boolean} [powered]
  * @property {boolean} [healthy]
  * @property {boolean} [onboard]
+ * @property {string} [bus]
+ * @property {string} [usb_id]
  * @property {string} [detail]
  */
 
@@ -381,7 +383,7 @@ export function clearBluetoothDiscovery() {
 }
 
 /**
- * @param {{ mac: string, name?: string, enable_as_output?: boolean }} body
+ * @param {{ mac: string, name?: string, hci?: string, enable_as_output?: boolean }} body
  * @returns {Promise<BluetoothConnectResponse>}
  */
 export function connectBluetooth(body) {

@@ -347,6 +347,10 @@ body {
 	border-color: color-mix(in srgb, var(--danger, #c45c4a) 45%, var(--line));
 }
 
+.adapter-chip.adapter-used {
+	border-color: color-mix(in srgb, var(--warn) 40%, var(--line));
+}
+
 .adapter-hci {
 	font-family: var(--mono, ui-monospace, monospace);
 	font-weight: 600;
@@ -359,8 +363,44 @@ body {
 	letter-spacing: 0.04em;
 }
 
-.adapter-empty {
+.adapter-usb {
+	font-family: var(--mono, ui-monospace, monospace);
+	font-size: 0.72rem;
+	opacity: 0.65;
+}
+
+.adapter-empty,
+.adapter-untested {
 	margin-bottom: 0.75rem;
+}
+
+.adapter-untested {
+	color: var(--ink-muted);
+	font-size: 0.85rem;
+}
+
+.adapter-assign {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: 0.5rem 0.75rem;
+	margin: 0 0 0.85rem;
+}
+
+.adapter-assign-label {
+	font-size: 0.85rem;
+	color: var(--ink-muted);
+}
+
+.adapter-select {
+	font: inherit;
+	font-size: 0.9rem;
+	color: var(--ink);
+	background: rgba(8, 14, 12, 0.55);
+	border: 1px solid var(--line);
+	border-radius: calc(var(--radius) - 6px);
+	padding: 0.35rem 0.55rem;
+	min-width: 12rem;
 }
 
 .bt-discover-list {
@@ -1015,9 +1055,14 @@ input[type='range'] {
 	border-color: rgba(94, 207, 154, 0.35);
 }
 
-.status-pill.missing {
+.status-pill.warn {
 	color: var(--warn);
-	border-color: rgba(212, 162, 76, 0.35);
+	border-color: rgba(212, 162, 76, 0.4);
+}
+
+.status-pill.missing {
+	color: var(--bad);
+	border-color: rgba(224, 122, 106, 0.4);
 }
 
 .detail-name {

@@ -1,8 +1,10 @@
 # ASUS BT600 (RTL8761) on Raspberry Pi 5
 
-Hardware notes for getting **ASUS USB-BT500 / BT600-class** dongles (`0b05:1d70`, Realtek **RTL8761BU**) stable enough for MuSync A2DP sinks.
+Chip-specific hardware notes for **ASUS USB-BT500 / BT600-class** dongles (`0b05:1d70`, Realtek **RTL8761BU**). MuSync’s multi-adapter path is **generic BlueZ HCI** (any USB dongle BlueZ enumerates) — this doc is only for RTL8761 bring-up / failure modes.
 
 **Known-good baseline on this project:** Pi 5 **onboard** Bluetooth → Qudelix-5K already plays local media through MuSync/PipeWire. Use that path to confirm software is fine; treat BT600 failures as **adapter / USB / firmware**, not the app.
+
+**Untested without hardware:** the software inventory / soft-fail / HCI-assign path is in place; live multi-dongle A2DP was not verified (BT600 stick was dead).
 
 ## Identify the dongle
 
@@ -103,8 +105,8 @@ To re-enable later, remove that `dtoverlay=disable-bt` line and reboot.
 Use the project helper (one adapter at a time):
 
 ```bash
-./scripts/pair_bt600.sh hci0
-./scripts/pair_bt600.sh hci1
+./scripts/pair_hci.sh hci0
+./scripts/pair_hci.sh hci1
 ```
 
 Or manually:
@@ -159,5 +161,5 @@ Prefer **Device setup** in the web UI (discover by name → Save). Optional YAML
 ## Related
 
 - Fan-out / feeder graph: [pi-pipewire.md](./pi-pipewire.md)
-- Pairing script: `scripts/pair_bt600.sh`
+- Pairing script: `scripts/pair_hci.sh` (`pair_bt600.sh` is a compat alias)
 - Pi launcher: `scripts/run_pi.sh`

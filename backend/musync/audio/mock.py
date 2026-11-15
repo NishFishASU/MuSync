@@ -82,7 +82,7 @@ _MOCK_SCAN_ONLY = [
     ),
 ]
 
-# Six healthy HCIs for ≤6 A2DP sinks; plus one dead stick that must not block.
+# Six healthy HCIs for ≤6 A2DP sinks; plus one dead USB stick that must not block.
 _MOCK_ADAPTERS = [
     BluetoothAdapter(
         hci="hci0",
@@ -91,16 +91,19 @@ _MOCK_ADAPTERS = [
         powered=True,
         healthy=True,
         onboard=True,
+        bus="uart",
         detail="powered",
     ),
     *[
         BluetoothAdapter(
             hci=f"hci{i}",
             mac=f"00:11:22:33:44:{i:02X}",
-            name=f"BT600 hci{i}",
+            name=f"USB HCI hci{i}",
             powered=True,
             healthy=True,
             onboard=False,
+            bus="usb",
+            usb_id="0b05:1d70" if i == 1 else "",
             detail="powered",
         )
         for i in range(1, 6)
@@ -108,11 +111,12 @@ _MOCK_ADAPTERS = [
     BluetoothAdapter(
         hci="hci6",
         mac="00:11:22:33:44:66",
-        name="BT600 dead",
+        name="USB HCI dead",
         powered=False,
         healthy=False,
         onboard=False,
-        detail="probe timeout — skip (dead BT600?)",
+        bus="usb",
+        detail="probe timeout — skip (unhealthy USB HCI?)",
     ),
 ]
 from .base import AudioBackend
@@ -220,13 +224,13 @@ class MockAudioBackend(AudioBackend):
         if capacity == 0:
             warn = (
                 "No healthy Bluetooth adapters — BT outputs stay MISSING; "
-                "onboard / BT600 soft-fail (API stays up)"
+                "unhealthy USB HCI soft-fail (API stays up)"
             )
         elif capacity == 1:
             label = "onboard" if healthy[0].onboard else healthy[0].hci
             warn = (
                 f"Only 1 healthy adapter ({label}) — one A2DP sink max; "
-                "extra BT600s soft-fail until plugged / healthy"
+                "extra USB HCI dongles soft-fail until plugged / healthy"
             )
         else:
             warn = f"{capacity} healthy adapters · up to {capacity} A2DP sinks"

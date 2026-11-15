@@ -1,6 +1,6 @@
 # MuSync
 
-Multi-room Bluetooth audio sync on a **Raspberry Pi 5**: one local-file transport fans out through **PipeWire** to up to **6× ASUS BT600** A2DP sinks, with per-sink delay/volume from a responsive web UI on the LAN.
+Multi-room Bluetooth audio sync on a **Raspberry Pi 5**: one local-file transport fans out through **PipeWire** to up to **6× BlueZ HCI** A2DP sinks (onboard + USB dongles), with per-sink delay/volume from a responsive web UI on the LAN.
 
 Cloud/dev uses **MockAudioBackend**; the Pi uses **PipeWireBackend** (feeder → per-sink delay/volume → bluez). The control UI is a **SvelteKit** static SPA (`@sveltejs/adapter-static`) served by FastAPI from `web/build/`.
 
@@ -66,7 +66,7 @@ docs/phone-bt-source-vs-spp-sink.md   # phone as BT A2DP *source* vs SPP sink
 docs/wifi-join.md                     # phone hotspot join (nmcli)
 docs/volume-profiles.md               # silent-disco preferred × gain + S_u × G_d learning
 backend/musync/wifi/       # nmcli on Pi; mock on laptop
-scripts/build_web.sh  run_dev.sh  run_pi.sh  pair_bt600.sh
+scripts/build_web.sh  run_dev.sh  run_pi.sh  pair_hci.sh  (pair_bt600.sh → alias)
 ```
 
 Phone **input** (S21 FE → `bluez_input` → feeder): [docs/phone-bt-source-vs-spp-sink.md](docs/phone-bt-source-vs-spp-sink.md).  
@@ -152,12 +152,12 @@ pip install -r requirements.txt
 ./scripts/build_web.sh   # or rsync a laptop-built web/build/
 ```
 
-### 2. Pair BT600 ↔ Qudelix
+### 2. Pair HCI ↔ Qudelix (onboard first)
 
 ```bash
-./scripts/pair_bt600.sh hci0    # enter Qudelix MAC when prompted (pairing only)
-# optional second dongle:
-# ./scripts/pair_bt600.sh hci1
+./scripts/pair_hci.sh hci0    # enter Qudelix MAC when prompted (pairing only)
+# optional second USB HCI dongle (generic BlueZ — not chip-specific):
+# ./scripts/pair_hci.sh hci1
 ```
 
 Confirm bluez sinks:
@@ -193,9 +193,11 @@ Missing or broken `devices.yaml` is fine — MuSync boots with **Phone SPP** def
 
 Graph details: [docs/pi-pipewire.md](docs/pi-pipewire.md). SPP details: [docs/spp-network-sink.md](docs/spp-network-sink.md).
 
-### 5. Scale to 4 then 6
+### 5. Scale to 4 then 6 (USB HCI dongles)
 
-Enable more discovered BT sinks in the UI (≤6 A2DP). Use a **powered USB hub**. Pair each new dongle with `./scripts/pair_bt600.sh hciN`.
+Enable more discovered BT sinks in the UI (≤6 A2DP). Use a **powered USB hub**. Pair each new dongle with `./scripts/pair_hci.sh hciN`. The UI inventories onboard + USB HCI adapters and can assign a free healthy HCI on Connect.
+
+**Untested without hardware:** multi-dongle A2DP scale-out is wired and soft-fails unhealthy sticks, but live USB HCI verification is pending (ASUS BT600 was dead). Onboard Qudelix remains the proven path.
 
 ### Optional systemd
 
@@ -207,16 +209,16 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now musync
 ```
 
-### ASUS BT600 notes
+### Extra USB HCI / BlueZ adapters
 
-- One A2DP sink per adapter ⇒ six speakers need six BT600s (`hci0`…`hci5`).
-- Onboard-only soft-fails gracefully (1 A2DP); UI shows adapter ready/dead chips.
-- Dead BT600s are skipped with short BlueZ timeouts — they must not block scan/reconnect.
+- One A2DP sink per HCI adapter (`hci0`…`hci5`) — chip-agnostic (any BlueZ USB dongle).
+- Onboard-only soft-fails gracefully (1 A2DP); UI shows adapter ready / in use / dead chips.
+- Unhealthy USB dongles are skipped with short BlueZ timeouts — they must not block onboard scan/reconnect.
 - Powered hub strongly recommended beyond two dongles.
 - Prefer the same codec (SBC or AAC) across sinks.
-- Onboard Pi Bluetooth can validate the software path (e.g. Qudelix-5K + local file); dedicated BT600s own multi-sink demos.
+- Onboard Pi Bluetooth validates the software path (e.g. Qudelix-5K + local file); USB HCI expands capacity when healthy.
 - Losing one sink should not stop the others (MuSync unloads only that sink's loopback).
-- Hardware instability (`0b05:1d70` RTL8761, `reg16 -110` disconnect loops, USB3 vs USB2, firmware): see **[docs/bt600-realtek.md](docs/bt600-realtek.md)**.
+- ASUS BT600 / RTL8761 hardware notes (`0b05:1d70`): **[docs/bt600-realtek.md](docs/bt600-realtek.md)** (chip-specific; not required by MuSync).
 
 ## Environment variables
 
