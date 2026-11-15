@@ -1,17 +1,24 @@
 from __future__ import annotations
 
 from musync.audio.pw_tools import (
+    CAPTURE_LOOPBACK_LATENCY_MSEC,
+    FEEDER_CHANNELS,
+    FEEDER_NODE_LATENCY,
+    FEEDER_RATE,
     alsa_hdmi_to_pw_node,
     alsa_usb_to_pw_node,
     bluetoothctl_connect,
     build_capture_loopback_commands,
     build_sink_commands,
     classify_capture_source,
+    estimated_capture_loopback_saving_ms,
     feeder_listed_in_sinks,
+    feeder_null_sink_args,
     find_feeder_null_sink_ids,
     find_musync_loopback_ids,
     is_capture_candidate,
     looks_like_hdmi_capture,
+    loopback_latency_args,
     match_device_node,
     merge_alsa_hdmi_into_sources,
     merge_alsa_usb_into_sources,
@@ -83,6 +90,28 @@ def test_match_device_node_override() -> None:
     assert hit.id == "99"
 
 
+def test_feeder_and_loopback_low_latency_args() -> None:
+    args = feeder_null_sink_args("musync_feeder")
+    assert args[0] == "module-null-sink"
+    assert f"sink_name=musync_feeder" in args
+    assert f"rate={FEEDER_RATE}" in args
+    assert f"channels={FEEDER_CHANNELS}" in args
+    props = next(a for a in args if a.startswith("sink_properties="))
+    assert "device.description=MuSync_Feeder" in props
+    assert f"node.latency={FEEDER_NODE_LATENCY}" in props
+
+    lb = loopback_latency_args(40)
+    assert lb == ["latency_msec=40", "max_latency_msec=40", "adjust_time=0"]
+    assert loopback_latency_args(0) == [
+        "latency_msec=0",
+        "max_latency_msec=10",
+        "adjust_time=0",
+    ]
+    # Measurable win: capture path 20 → 10 ms.
+    assert CAPTURE_LOOPBACK_LATENCY_MSEC == 10
+    assert estimated_capture_loopback_saving_ms() == 10
+
+
 def test_build_sink_commands_with_pactl() -> None:
     cmds, notes = build_sink_commands(
         device_id="sink-1",
@@ -94,9 +123,26 @@ def test_build_sink_commands_with_pactl() -> None:
         mute=False,
         tools={"pactl": "/usr/bin/pactl", "wpctl": "/usr/bin/wpctl", "pw-link": None},
     )
-    assert any("module-loopback" in c for c in cmds)
+    loop = next(c for c in cmds if "module-loopback" in c)
+    assert "latency_msec=40" in loop
+    assert "max_latency_msec=40" in loop
+    assert "adjust_time=0" in loop
     assert any(c[:3] == ["/usr/bin/wpctl", "set-volume", "48"] for c in cmds)
     assert notes
+
+
+def test_build_capture_loopback_low_latency() -> None:
+    cmds, notes = build_capture_loopback_commands(
+        host_id="phone-1",
+        feeder="musync_feeder",
+        source_ref="bluez_input.AA_BB_CC_DD_EE_21",
+        tools={"pactl": "/usr/bin/pactl", "pw-link": None},
+    )
+    assert len(cmds) == 1
+    assert f"latency_msec={CAPTURE_LOOPBACK_LATENCY_MSEC}" in cmds[0]
+    assert "max_latency_msec=10" in cmds[0]
+    assert "adjust_time=0" in cmds[0]
+    assert "adjust_time=0" in notes[0]
 
 
 def test_find_musync_loopback_ids() -> None:

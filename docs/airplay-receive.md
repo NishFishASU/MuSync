@@ -77,9 +77,10 @@ export MUSYNC_AIRPLAY_SOURCE="shairport-sync"   # exact Source name
 
 ```bash
 pactl load-module module-null-sink sink_name=musync_feeder \
-  sink_properties=device.description=MuSync_Feeder
+  rate=48000 channels=2 \
+  sink_properties=device.description=MuSync_Feeder node.latency=512/48000
 
-pactl load-module module-loopback latency_msec=20 \
+pactl load-module module-loopback latency_msec=10 max_latency_msec=10 adjust_time=0 \
   source=shairport-sync sink=musync_feeder \
   sink_dont_move=true source_dont_move=true
 ```

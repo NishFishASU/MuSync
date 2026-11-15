@@ -10,6 +10,8 @@ from musync import app as app_module
 from musync.audio.mock import MockAudioBackend
 from musync.audio.pipewire import PipeWireBackend
 from musync.audio.spp import (
+    SPP_LOW_LATENCY_INPUT_FLAGS,
+    SPP_PULSE_FRAGMENT_SIZE,
     build_spp_ffmpeg,
     build_spp_ffmpeg_from_file,
     build_spp_ffmpeg_from_pulse,
@@ -37,28 +39,33 @@ def test_spp_ffmpeg_matches_verified_manual_shape() -> None:
         mute=False,
     )
     file_cmd = build_spp_ffmpeg_from_file(device, path="media/test.wav")
-    # Proven listen shape + per-sink -af volume (even at unity).
+    # Proven listen shape + low-latency flags + per-sink -af volume (even at unity).
     assert "-re" in file_cmd
     assert file_cmd[file_cmd.index("-i") + 1] == "media/test.wav"
+    for flag in SPP_LOW_LATENCY_INPUT_FLAGS:
+        assert flag in file_cmd
+    assert file_cmd.index("-probesize") < file_cmd.index("-i")
     assert "-af" in file_cmd
     assert file_cmd[file_cmd.index("-af") + 1] == "volume=1.0000"
     assert "s16le" in file_cmd
     assert file_cmd[file_cmd.index("-acodec") + 1] == "pcm_s16le"
     assert file_cmd[file_cmd.index("-ar") + 1] == "48000"
     assert file_cmd[file_cmd.index("-ac") + 1] == "1"
-    assert file_cmd[-1] == "tcp://0.0.0.0:1234?listen=1"
+    assert file_cmd[file_cmd.index("-flush_packets") + 1] == "1"
+    assert file_cmd[-1] == "tcp://0.0.0.0:1234?listen=1&tcp_nodelay=1"
 
     idle = build_spp_ffmpeg_idle(device)
     assert "-af" in idle
     assert "anullsrc=" in idle[idle.index("-i") + 1]
-    assert idle[-1] == "tcp://0.0.0.0:1234?listen=1"
+    assert idle[-1] == "tcp://0.0.0.0:1234?listen=1&tcp_nodelay=1"
 
     live = build_spp_ffmpeg_from_pulse(device, feeder="musync_feeder")
     assert "musync_feeder.monitor" in live
     assert "-re" not in live
+    assert live[live.index("-fragment_size") + 1] == str(SPP_PULSE_FRAGMENT_SIZE)
     # Pulse fallback stays filter-free (monitor starvation).
     assert "-af" not in live
-    assert spp_tcp_url(device) == "tcp://0.0.0.0:1234?listen=1"
+    assert spp_tcp_url(device) == "tcp://0.0.0.0:1234?listen=1&tcp_nodelay=1"
 
 
 def test_spp_ffmpeg_per_sink_delay_and_volume() -> None:
@@ -101,6 +108,9 @@ def test_spp_ffmpeg_unified_builder_kinds() -> None:
         device, input_kind="file", input_spec="/tmp/a.wav", ffmpeg_bin="ffmpeg"
     )
     assert file_cmd[:4] == ["ffmpeg", "-hide_banner", "-loglevel", "warning"]
+    assert file_cmd[4 : 4 + len(SPP_LOW_LATENCY_INPUT_FLAGS)] == list(
+        SPP_LOW_LATENCY_INPUT_FLAGS
+    )
     assert "-re" in file_cmd
     assert file_cmd[file_cmd.index("-af") + 1] == "volume=0.7500"
 

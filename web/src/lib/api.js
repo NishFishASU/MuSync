@@ -4,6 +4,47 @@
  * In `npm run dev`, Vite proxies `/api` → MUSYNC_API_PROXY (default :8080).
  */
 
+/**
+ * SPA poll cadence (ms) — cuts idle/hidden API chatter vs prior fixed 1 Hz × 2.
+ * Playing: transport 1s, now-playing 2s → 1.5 req/s (was 2).
+ * Idle: transport 3s, now-playing 6s → ~0.5 req/s (was 2; ~4× fewer).
+ * Hidden tab: pause until visible (0 req/s).
+ */
+export const SPA_POLL_TRANSPORT_PLAYING_MS = 1000;
+export const SPA_POLL_TRANSPORT_IDLE_MS = 3000;
+export const SPA_POLL_NOW_PLAYING_PLAYING_MS = 2000;
+export const SPA_POLL_NOW_PLAYING_IDLE_MS = 6000;
+
+/**
+ * @param {{ playing?: boolean, hidden?: boolean }} opts
+ * @returns {{ transportMs: number, nowPlayingMs: number, paused: boolean }}
+ */
+export function spaPollCadence({ playing = false, hidden = false } = {}) {
+	if (hidden) {
+		return { transportMs: 0, nowPlayingMs: 0, paused: true };
+	}
+	if (playing) {
+		return {
+			transportMs: SPA_POLL_TRANSPORT_PLAYING_MS,
+			nowPlayingMs: SPA_POLL_NOW_PLAYING_PLAYING_MS,
+			paused: false
+		};
+	}
+	return {
+		transportMs: SPA_POLL_TRANSPORT_IDLE_MS,
+		nowPlayingMs: SPA_POLL_NOW_PLAYING_IDLE_MS,
+		paused: false
+	};
+}
+
+/** Steady-state HTTP requests per second for the given cadence (0 when paused). */
+export function spaPollRequestsPerSecond(cadence) {
+	if (!cadence || cadence.paused) return 0;
+	const t = cadence.transportMs > 0 ? 1000 / cadence.transportMs : 0;
+	const n = cadence.nowPlayingMs > 0 ? 1000 / cadence.nowPlayingMs : 0;
+	return t + n;
+}
+
 /** @typedef {'stopped' | 'playing' | 'paused'} TransportState */
 /** @typedef {'local' | 'spotify' | 'apple' | 'youtube' | 'input'} SourceType */
 /** @typedef {'audio' | 'video'} MediaKind */

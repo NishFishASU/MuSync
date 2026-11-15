@@ -11,6 +11,10 @@ ffmpeg -re -i media/test.wav -f s16le -acodec pcm_s16le -ar 48000 -ac 1 \
   tcp://0.0.0.0:1234?listen=1
 ```
 
+MuSync adds low-latency knobs on top of this shape: `-fflags nobuffer`,
+`-flags low_delay`, `-probesize 32`, `-analyzeduration 0`, `-flush_packets 1`,
+and `tcp_nodelay=1` on the listen URL (Nagle off).
+
 In SPP on the phone:
 
 | Setting | Value |
@@ -34,19 +38,21 @@ In SPP on the phone:
 Idle (SPP enabled, not playing) — continuous silence so the phone can connect. Per-sink delay/volume use `-af` on this output only:
 
 ```text
-ffmpeg -f lavfi -i anullsrc=channel_layout=mono:sample_rate=48000 \
+ffmpeg -fflags nobuffer -flags low_delay -probesize 32 -analyzeduration 0 \
+  -f lavfi -i anullsrc=channel_layout=mono:sample_rate=48000 \
   -af adelay=80:all=1,volume=0.7500 \
-  -f s16le -acodec pcm_s16le -ar 48000 -ac 1 \
-  tcp://0.0.0.0:1234?listen=1
+  -f s16le -acodec pcm_s16le -ar 48000 -ac 1 -flush_packets 1 \
+  tcp://0.0.0.0:1234?listen=1&tcp_nodelay=1
 ```
 
-Playing a hub-local file — proven listen shape + the same per-sink `-af`:
+Playing a hub-local file — proven listen shape + low-latency flags + the same per-sink `-af`:
 
 ```text
-ffmpeg -re -i /path/to/track.wav \
+ffmpeg -fflags nobuffer -flags low_delay -probesize 32 -analyzeduration 0 \
+  -re -i /path/to/track.wav \
   -af adelay=80:all=1,volume=0.7500 \
-  -f s16le -acodec pcm_s16le -ar 48000 -ac 1 \
-  tcp://0.0.0.0:1234?listen=1
+  -f s16le -acodec pcm_s16le -ar 48000 -ac 1 -flush_packets 1 \
+  tcp://0.0.0.0:1234?listen=1&tcp_nodelay=1
 ```
 
 `PATCH /api/devices/{id}` `{ delay_ms, volume, mute }` restarts **this** SPP listener only. BT sinks keep using PipeWire `module-loopback latency_msec` + `wpctl` on their own node — never a global gain.

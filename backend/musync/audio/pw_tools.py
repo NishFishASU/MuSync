@@ -15,6 +15,18 @@ from typing import Optional
 
 log = logging.getLogger(__name__)
 
+# Low-latency feeder / loopback defaults (PipeWire pulse-compat).
+# Explicit rate/channels avoid resample + oversized null-sink buffers.
+# Capture path: 10 ms (was 20) — ~10 ms less input→feeder delay.
+# adjust_time=0 disables adaptive resampler buffering that grows latency.
+FEEDER_RATE = 48000
+FEEDER_CHANNELS = 2
+# ~10.7 ms target quantum on the null sink (512 / 48000).
+FEEDER_NODE_LATENCY = "512/48000"
+CAPTURE_LOOPBACK_LATENCY_MSEC = 10
+# Floor for max_latency_msec when intentional delay is 0 (stability headroom).
+LOOPBACK_MIN_MAX_LATENCY_MSEC = 10
+
 # bluez_output.XX_XX_XX_XX_XX_XX or bluez_sink.XX_XX_...
 _BLUEZ_MAC_RE = re.compile(
     r"bluez[_-](?:output|sink)\.([0-9A-Fa-f]{2}(?:_[0-9A-Fa-f]{2}){5})",
@@ -791,6 +803,36 @@ def match_capture_source(
     return None
 
 
+def feeder_null_sink_args(feeder_name: str) -> list[str]:
+    """``module-null-sink`` argv fragment after ``load-module`` (low-latency)."""
+    name = (feeder_name or "musync_feeder").strip() or "musync_feeder"
+    return [
+        "module-null-sink",
+        f"sink_name={name}",
+        f"rate={FEEDER_RATE}",
+        f"channels={FEEDER_CHANNELS}",
+        "sink_properties="
+        f"device.description=MuSync_Feeder "
+        f"node.latency={FEEDER_NODE_LATENCY}",
+    ]
+
+
+def loopback_latency_args(delay_ms: int) -> list[str]:
+    """``module-loopback`` latency knobs: intentional delay + no adaptive growth."""
+    delay = max(0, int(delay_ms))
+    max_lat = max(delay, LOOPBACK_MIN_MAX_LATENCY_MSEC)
+    return [
+        f"latency_msec={delay}",
+        f"max_latency_msec={max_lat}",
+        "adjust_time=0",
+    ]
+
+
+def estimated_capture_loopback_saving_ms() -> int:
+    """Measurable win vs prior hardcoded ``latency_msec=20`` capture path."""
+    return max(0, 20 - CAPTURE_LOOPBACK_LATENCY_MSEC)
+
+
 def build_capture_loopback_commands(
     *,
     host_id: str,
@@ -811,7 +853,7 @@ def build_capture_loopback_commands(
                 pactl,
                 "load-module",
                 "module-loopback",
-                "latency_msec=20",
+                *loopback_latency_args(CAPTURE_LOOPBACK_LATENCY_MSEC),
                 f"source={source_ref}",
                 f"sink={feeder}",
                 "sink_dont_move=true",
@@ -819,7 +861,10 @@ def build_capture_loopback_commands(
                 f"sink_input_properties=media.name={tag}",
             ]
         )
-        notes.append(f"{host_id}: capture loopback {source_ref} → {feeder}")
+        notes.append(
+            f"{host_id}: capture loopback {source_ref} → {feeder} "
+            f"(latency_msec={CAPTURE_LOOPBACK_LATENCY_MSEC}, adjust_time=0)"
+        )
     elif pw_link:
         cmds.append([pw_link, f"{source_ref}:capture_FL", f"{feeder}:playback_FL"])
         cmds.append([pw_link, f"{source_ref}:capture_FR", f"{feeder}:playback_FR"])
@@ -1472,12 +1517,13 @@ def build_sink_commands(
 
     if pactl:
         # Caller should unload prior module index first; load creates a new one.
+        delay = max(0, int(delay_ms))
         cmds.append(
             [
                 pactl,
                 "load-module",
                 "module-loopback",
-                f"latency_msec={max(0, int(delay_ms))}",
+                *loopback_latency_args(delay),
                 f"source={feeder}.monitor",
                 f"sink={sink_ref}",
                 "sink_dont_move=true",
@@ -1487,7 +1533,9 @@ def build_sink_commands(
             ]
         )
         notes.append(
-            f"{device_id}: loopback latency_msec={delay_ms} via pactl → {sink_ref}"
+            f"{device_id}: loopback latency_msec={delay} "
+            f"max_latency_msec={max(delay, LOOPBACK_MIN_MAX_LATENCY_MSEC)} "
+            f"adjust_time=0 via pactl → {sink_ref}"
         )
     elif pw_link:
         cmds.append([pw_link, f"{feeder}:monitor_FL", f"{sink_ref}:playback_FL"])

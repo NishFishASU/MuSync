@@ -64,9 +64,26 @@ def free_spp_listen_port(port: int, *, settle_s: float = 0.2) -> str:
     return f"pkill rc={proc.returncode}" + (f" ({detail})" if detail else "")
 
 
+# Low-latency ffmpeg input/output knobs (before ``-i`` / on TCP URL).
+# probesize+analyzeduration cut demuxer pre-roll; nobuffer/low_delay/flush
+# avoid optional mux buffering; tcp_nodelay disables Nagle on the listen socket.
+SPP_LOW_LATENCY_INPUT_FLAGS: tuple[str, ...] = (
+    "-fflags",
+    "nobuffer",
+    "-flags",
+    "low_delay",
+    "-probesize",
+    "32",
+    "-analyzeduration",
+    "0",
+)
+# Pulse monitor fragment: 512 frames @ 48 kHz mono s16le ≈ 10.7 ms.
+SPP_PULSE_FRAGMENT_SIZE = 512
+
+
 def spp_tcp_url(device: Device) -> str:
     host = (device.listen_host or "0.0.0.0").strip() or "0.0.0.0"
-    return f"tcp://{host}:{int(device.listen_port)}?listen=1"
+    return f"tcp://{host}:{int(device.listen_port)}?listen=1&tcp_nodelay=1"
 
 
 def spp_anullsrc(device: Device) -> str:
@@ -122,7 +139,13 @@ def build_spp_ffmpeg(
     if apply_controls is None:
         apply_controls = input_kind in {"file", "lavfi"}
 
-    cmd: list[str] = [ffmpeg_bin, "-hide_banner", "-loglevel", "warning"]
+    cmd: list[str] = [
+        ffmpeg_bin,
+        "-hide_banner",
+        "-loglevel",
+        "warning",
+        *SPP_LOW_LATENCY_INPUT_FLAGS,
+    ]
     if input_kind == "file":
         # Proven shape: realtime file read → raw PCM TCP listen (+ optional -af).
         cmd += ["-re", "-i", input_spec]
@@ -131,7 +154,15 @@ def build_spp_ffmpeg(
         cmd += ["-f", "lavfi", "-i", input_spec]
     elif input_kind == "pulse":
         # Optional live fan-out; may starve until the feeder has clients.
-        cmd += ["-f", "pulse", "-i", input_spec]
+        # Small fragment_size caps Pulse capture buffering (~10 ms @ 48 kHz).
+        cmd += [
+            "-f",
+            "pulse",
+            "-fragment_size",
+            str(SPP_PULSE_FRAGMENT_SIZE),
+            "-i",
+            input_spec,
+        ]
     else:
         raise ValueError(f"Unknown SPP input_kind: {input_kind!r}")
 
@@ -149,6 +180,8 @@ def build_spp_ffmpeg(
         str(int(device.sample_rate)),
         "-ac",
         str(int(device.channels)),
+        "-flush_packets",
+        "1",
         spp_tcp_url(device),
     ]
     return cmd

@@ -28,22 +28,26 @@ write a shell script of Pi commands, and dry-runs safely when tools are missing
 ## Documented Pi commands (after pairing 2 speakers)
 
 ```bash
-# Create feeder (once per boot / session)
+# Create feeder (once per boot / session) — fixed rate + tight node.latency
 pactl load-module module-null-sink sink_name=musync_feeder \
-  sink_properties=device.description=MuSync_Feeder
+  rate=48000 channels=2 \
+  sink_properties=device.description=MuSync_Feeder node.latency=512/48000
 
-# Per sink (example: 40 ms delay to kitchen bluez node)
-pactl load-module module-loopback latency_msec=40 \
+# Per sink (example: 40 ms delay); adjust_time=0 stops adaptive buffer growth
+pactl load-module module-loopback latency_msec=40 max_latency_msec=40 \
+  adjust_time=0 \
   source=musync_feeder.monitor sink=bluez_output.AA_BB_CC_DD_EE_02 \
   sink_dont_move=true source_dont_move=true
 
 # Phone as A2DP source (S21 FE → bluez_input) into the same feeder
-pactl load-module module-loopback latency_msec=20 \
+pactl load-module module-loopback latency_msec=10 max_latency_msec=10 \
+  adjust_time=0 \
   source=bluez_input.XX_XX_XX_XX_XX_XX sink=musync_feeder \
   sink_dont_move=true source_dont_move=true
 
 # HDMI / capture card (ALSA → PipeWire source) into the same feeder
-pactl load-module module-loopback latency_msec=20 \
+pactl load-module module-loopback latency_msec=10 max_latency_msec=10 \
+  adjust_time=0 \
   source=alsa_input.usb-MACROSILICON_HDMI-00 sink=musync_feeder \
   sink_dont_move=true source_dont_move=true
 
@@ -136,6 +140,7 @@ from .pw_tools import (
     discover_nodes,
     discover_sources,
     feeder_listed_in_sinks,
+    feeder_null_sink_args,
     find_feeder_null_sink_ids,
     find_musync_capture_ids,
     find_musync_loopback_ids,
@@ -494,15 +499,7 @@ class PipeWireBackend(AudioBackend):
         pactl = self._tools["pactl"]
         if not pactl:
             return []
-        return [
-            [
-                pactl,
-                "load-module",
-                "module-null-sink",
-                f"sink_name={self._feeder}",
-                "sink_properties=device.description=MuSync_Feeder",
-            ]
-        ]
+        return [[pactl, "load-module", *feeder_null_sink_args(self._feeder)]]
 
     def _list_feeder_module_ids(self) -> list[str]:
         pactl = self._tools["pactl"]
@@ -541,13 +538,7 @@ class PipeWireBackend(AudioBackend):
         pactl = self._tools["pactl"]
         if not pactl:
             return
-        cmd = [
-            pactl,
-            "load-module",
-            "module-null-sink",
-            f"sink_name={self._feeder}",
-            "sink_properties=device.description=MuSync_Feeder",
-        ]
+        cmd = [pactl, "load-module", *feeder_null_sink_args(self._feeder)]
         proc = self._exec_soft(cmd)
         if proc and proc.returncode == 0:
             log.info(
