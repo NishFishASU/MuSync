@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import os
 import re
+from contextlib import asynccontextmanager
 from pathlib import Path
 from urllib.parse import unquote
 
@@ -14,6 +16,7 @@ from fastapi.staticfiles import StaticFiles
 from . import __version__
 from .audio import AudioBackend, create_backend
 from .config import media_library_path, resolve_media_file, web_root
+from .mdns import get_mdns_status, start_hub_mdns, stop_hub_mdns
 from .streaming.spotify import default_redirect_uri
 from .models import (
     ActiveQueuePut,
@@ -53,6 +56,7 @@ from .models import (
     VolumeProfileCreate,
     VolumeProfilePatch,
     VolumeProfilesState,
+    MdnsStatus,
     WifiConnectRequest,
     WifiNetwork,
     WifiSaveRequest,
@@ -75,14 +79,28 @@ backend: AudioBackend = create_backend()
 wifi_backend: WifiBackend = create_wifi_backend()
 profile_store: VolumeProfileStore = VolumeProfileStore()
 
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    """Advertise ``musync.local`` for UI LAN discovery (not Spotify OAuth)."""
+    port = int(os.environ.get("MUSYNC_PORT", "8080"))
+    start_hub_mdns(port=port)
+    try:
+        yield
+    finally:
+        stop_hub_mdns()
+
+
 app = FastAPI(
     title="MuSync",
     version=__version__,
     description="Multi-device Bluetooth audio sync hub — song-level source switching",
+    lifespan=lifespan,
 )
 
 # Vite (:5173) / preview (:4173) and alternate mock ports (:8081) call the API
 # cross-origin; OAuth itself is a top-level redirect, but status/search need CORS.
+# musync.local is UI-only (Spotify forbids .local / localhost redirects).
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
@@ -94,6 +112,8 @@ app.add_middleware(
         "http://localhost:8080",
         "http://127.0.0.1:8081",
         "http://localhost:8081",
+        "http://musync.local:8080",
+        "http://musync.local:8081",
     ],
     allow_credentials=True,
     allow_methods=["*"],
@@ -710,10 +730,20 @@ def api_streaming_queue_add(body: StreamingQueueAdd) -> QueueItem:
     return item
 
 
+@app.get("/api/mdns", response_model=MdnsStatus)
+def api_mdns_status() -> MdnsStatus:
+    """Hub UI mDNS (``musync.local``) — discovery only; not for Spotify redirects."""
+    return MdnsStatus.model_validate(get_mdns_status().as_dict())
+
+
 @app.get("/api/wifi", response_model=WifiStatus)
 def api_wifi_status() -> WifiStatus:
     """Current Wi-Fi association and IPv4 addresses (for SPP / LAN access)."""
-    return wifi_backend.status()
+    status = wifi_backend.status()
+    mdns = get_mdns_status()
+    if mdns.hostname:
+        status.mdns_hostname = mdns.hostname
+    return status
 
 
 @app.get("/api/wifi/networks", response_model=list[WifiNetwork])

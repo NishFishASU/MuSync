@@ -21,18 +21,29 @@ Secrets stay in environment variables / local files. Never commit client secrets
 ### 1. Spotify Developer app
 
 1. Create an app at [developer.spotify.com/dashboard](https://developer.spotify.com/dashboard).
-2. Add redirect URI (must match env):
-   - Laptop: `http://127.0.0.1:8080/api/streaming/spotify/callback`
-   - Pi LAN: `http://<Pi-IP>:8080/api/streaming/spotify/callback`
-3. Copy **Client ID** and **Client Secret**.
+2. Add **both** laptop redirect URIs (Spotify allows multiple; must match env for the port you run):
+   - `http://127.0.0.1:8080/api/streaming/spotify/callback`
+   - `http://127.0.0.1:8081/api/streaming/spotify/callback`
+3. Optional Pi LAN OAuth (phone/laptop browser on the hub IP — **not** mDNS):
+   - `http://<Pi-IP>:8080/api/streaming/spotify/callback`
+4. **Do not** register `localhost` or `musync.local` — Spotify forbids those redirect hosts.
+   Open the UI at `http://musync.local:8080` (mDNS) if you like, but Connect Spotify must use a
+   `127.0.0.1` or Pi-IP redirect URI that matches `MUSYNC_SPOTIFY_REDIRECT_URI`.
+5. Copy **Client ID** and **Client Secret**.
 
 ### 2. Env on the Pi
+
+**Defaults:** `MUSYNC_PORT=8080` and
+`MUSYNC_SPOTIFY_REDIRECT_URI=http://127.0.0.1:8080/api/streaming/spotify/callback`
+(`run_pi.sh` and `deploy/systemd/musync.service` set these when unset).
 
 ```bash
 # Prefer a file that is never committed, e.g. ~/musync.env
 export MUSYNC_SPOTIFY_CLIENT_ID="…"
 export MUSYNC_SPOTIFY_CLIENT_SECRET="…"
-export MUSYNC_SPOTIFY_REDIRECT_URI="http://<Pi-IP>:8080/api/streaming/spotify/callback"
+# Pi default (omit to use run_pi.sh / systemd default):
+# export MUSYNC_SPOTIFY_REDIRECT_URI="http://127.0.0.1:8080/api/streaming/spotify/callback"
+# Browser on another device → use http://<Pi-IP>:8080/... instead (also in Dashboard).
 # optional:
 # export MUSYNC_SPOTIFY_TOKEN_PATH="$HOME/MuSync/config/spotify_tokens.json"
 # export MUSYNC_LIBRESPOT_BIN=librespot
@@ -69,14 +80,16 @@ export MUSYNC_BACKEND=pipewire
 ./scripts/run_pi.sh
 ```
 
-1. Open `http://<Pi-IP>:8080`
+1. Open `http://musync.local:8080` (mDNS UI) or `http://<Pi-IP>:8080`
 2. Device setup → enable Qudelix + Phone SPP → Save
 3. **Streaming** → paste Client ID/Secret (+ redirect URI) → **Save to musync.env**
    (API stores `~/musync.env`, returns masked status only — never raw secrets).
    Short Dashboard / Google Cloud guides are on that panel.
+   Redirect URI must be `127.0.0.1` or Pi IP — **not** `musync.local` / `localhost`.
 4. **Connect Spotify** (same-origin link → Spotify authorize →
    `/api/streaming/spotify/callback` → tokens). MuSync never asks for your
-   Spotify password.
+   Spotify password. If you opened the UI via `musync.local`, set redirect + Dashboard
+   to the Pi IP (or run Connect from a `127.0.0.1` tab on the Pi).
 5. **Queue** → search a track → **Queue & play**
 6. Confirm audio on Qudelix / SPP (`Simple Protocol Player` → Pi IP:port)
 
@@ -128,13 +141,16 @@ export MUSYNC_STREAMING_MOCK=1
 1. Copy `config/streaming.env.example` → `%USERPROFILE%\musync.env` **or**
    `config\streaming.local.env`. Use `KEY=value` lines (no bash `export` required;
    `export KEY=` is also accepted).
-2. Set Client ID/Secret. Redirect URI must match the **API** port (default **8080**):
+2. Set Client ID/Secret. In the Spotify Developer Dashboard register **both**:
 
-   `http://127.0.0.1:8080/api/streaming/spotify/callback`
+   - `http://127.0.0.1:8080/api/streaming/spotify/callback`
+   - `http://127.0.0.1:8081/api/streaming/spotify/callback`
 
-   If you set `MUSYNC_PORT=8081`, use `:8081` in **both** the Spotify Developer
-   Dashboard and `MUSYNC_SPOTIFY_REDIRECT_URI`. Do **not** register Vite’s
-   `:5173` — OAuth callback hits FastAPI, not the Vite dev server.
+   **Pi default is always `:8080`.** On the laptop, keep `:8080` unless it is
+   taken — then `MUSYNC_PORT=8081` and set `MUSYNC_SPOTIFY_REDIRECT_URI` to the
+   `:8081` URI. Spotify rejects `localhost` and `*.local` — always use
+   `127.0.0.1`. Do **not** register Vite’s `:5173` — OAuth callback hits
+   FastAPI, not the Vite dev server.
 3. Build UI (`cd web; npm ci; npm run build`), then:
 
    ```powershell
@@ -154,6 +170,7 @@ export MUSYNC_STREAMING_MOCK=1
 | Method | Path | Purpose |
 |--------|------|---------|
 | `GET` | `/api/streaming` | Spotify + AirPlay status (no secrets) |
+| `GET` | `/api/mdns` | UI `musync.local` advertise (not for OAuth redirects) |
 | `GET`/`PUT` | `/api/streaming/credentials` | Masked keys → `~/musync.env` (secrets never raw) |
 | `GET` | `/api/streaming/spotify/login` | Start OAuth redirect |
 | `GET` | `/api/streaming/spotify/authorize-url` | JSON preflight (url or error) |
@@ -169,7 +186,7 @@ export MUSYNC_STREAMING_MOCK=1
 - **Queue search 403 “Insufficient client scope”** — search no longer sends `market=from_token` (that required `user-read-private`). It uses `MUSYNC_SPOTIFY_MARKET` (default **US**). Streaming status shows **granted scopes** + search market. Reconnect on Streaming only if playback scopes are missing.
 - **Queue search 400 “Invalid limit”** — Spotify **Development Mode** apps allow at most **10** results per `/v1/search` request (limit 15–50 returns this misleading error). MuSync clamps to 10 by default; set `MUSYNC_SPOTIFY_SEARCH_MAX=50` only if the app has Extended Quota Mode.
 - **No Connect device** — install librespot; check `MUSYNC_LIBRESPOT_NAME` matches; ensure PipeWire/Pulse is up and `musync_feeder` exists (`./scripts/run_pi.sh` + Play once).
-- **OAuth redirect mismatch** — redirect URI in the Spotify dashboard must equal `MUSYNC_SPOTIFY_REDIRECT_URI` (API port `:8080` / `:8081`, never Vite `:5173`).
+- **OAuth redirect mismatch** — Dashboard must list the exact `MUSYNC_SPOTIFY_REDIRECT_URI` (`127.0.0.1:8080` and/or `:8081`; never Vite `:5173`, never `localhost` / `musync.local`). mDNS `musync.local` is UI-only — see [mdns.md](./mdns.md).
 - **Connect does nothing / credentials missing** — use Streaming → Save to musync.env, or fill `%USERPROFILE%\musync.env` / `config/streaming.local.env`; Connect shows a clear error when Client ID/Secret are unset.
 - **Duplicate feeders** — fixed by idempotent feeder purge on startup (see `docs/pi-pipewire.md`).
 - **AirPlay silent** — confirm shairport Source in `wpctl status`, Refresh inputs, Play the AirPlay live host, then AirPlay *to* the Pi (see [airplay-receive.md](./airplay-receive.md)).

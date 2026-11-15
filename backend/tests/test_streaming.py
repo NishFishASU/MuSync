@@ -792,6 +792,7 @@ def test_credentials_api_masks_secrets_and_persists(tmp_path, monkeypatch) -> No
     monkeypatch.delenv("MUSYNC_SPOTIFY_CLIENT_SECRET", raising=False)
     monkeypatch.delenv("MUSYNC_SPOTIFY_REDIRECT_URI", raising=False)
     monkeypatch.delenv("MUSYNC_YOUTUBE_API_KEY", raising=False)
+    monkeypatch.delenv("MUSYNC_PORT", raising=False)
     reset_streaming_service()
 
     backend = _backend(tmp_path, monkeypatch)
@@ -804,6 +805,11 @@ def test_credentials_api_masks_secrets_and_persists(tmp_path, monkeypatch) -> No
     assert body["youtube_configured"] is False
     assert body["spotify_client_secret"]["set"] is False
     assert body["youtube_api_key"]["set"] is False
+    # Pi default redirect prefill when unset (127.0.0.1:8080 — not localhost/.local)
+    assert body["spotify_redirect_uri"]["set"] is False
+    assert body["spotify_redirect_uri"]["value"] == (
+        "http://127.0.0.1:8080/api/streaming/spotify/callback"
+    )
     # Soft-fail empty PUT — no write, no crash
     soft = client.put("/api/streaming/credentials", json={})
     assert soft.status_code == 200

@@ -824,6 +824,24 @@ class WifiStatus(BaseModel):
     ips: list[str] = Field(default_factory=list)
     interface: Optional[str] = None
     detail: str = ""
+    # Optional UI hint when mDNS is advertising (not used for Spotify OAuth).
+    mdns_hostname: Optional[str] = None
+
+
+class MdnsStatus(BaseModel):
+    """Hub UI mDNS advertise status (``musync.local`` — not for Spotify redirects)."""
+
+    hostname: str = "musync.local"
+    advertising: bool = False
+    port: int = 8080
+    addresses: list[str] = Field(default_factory=list)
+    detail: str = ""
+    soft_warn: str = ""
+    ui_only: bool = True
+    spotify_note: str = (
+        "mDNS is for UI only — Spotify redirect must use 127.0.0.1 "
+        "(not musync.local / localhost)"
+    )
 
 
 class WifiSaveRequest(BaseModel):
