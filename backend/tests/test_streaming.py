@@ -181,6 +181,10 @@ def test_spotify_search_api_error_is_400_not_500(tmp_path, monkeypatch) -> None:
                 "refresh_token": "test-refresh",
                 "expires_at": 9999999999,
                 "display_name": "Test User",
+                "scope": (
+                    "user-read-private user-read-email user-read-playback-state "
+                    "user-modify-playback-state user-read-currently-playing streaming"
+                ),
             }
         ),
         encoding="utf-8",
@@ -216,6 +220,97 @@ def test_spotify_search_api_error_is_400_not_500(tmp_path, monkeypatch) -> None:
     assert "internal server error" not in detail
 
 
+def test_spotify_search_rejects_token_missing_scopes(tmp_path, monkeypatch) -> None:
+    """Old tokens without user-read-private must 400 with reconnect guidance."""
+    from musync.app import create_app
+
+    token_path = tmp_path / "spotify_tokens.json"
+    token_path.write_text(
+        json.dumps(
+            {
+                "access_token": "test-access",
+                "refresh_token": "test-refresh",
+                "expires_at": 9999999999,
+                "display_name": "Test User",
+                # Pre-MDAS-40 grant — no user-read-private
+                "scope": "user-read-playback-state streaming",
+            }
+        ),
+        encoding="utf-8",
+    )
+    backend = _backend(tmp_path, monkeypatch)
+    monkeypatch.setenv("MUSYNC_SPOTIFY_CLIENT_ID", "cid")
+    monkeypatch.setenv("MUSYNC_SPOTIFY_CLIENT_SECRET", "csecret")
+    monkeypatch.setenv("MUSYNC_SPOTIFY_TOKEN_PATH", str(token_path))
+    reset_streaming_service()
+    client = TestClient(create_app(audio_backend=backend))
+
+    status = client.get("/api/streaming").json()["spotify"]
+    assert "user-read-private" in status["missing_scopes"]
+
+    res = client.get(
+        "/api/streaming/search",
+        params={"provider": "spotify", "q": "Shape Of You"},
+    )
+    assert res.status_code == 400
+    detail = res.json()["detail"].lower()
+    assert "missing required scopes" in detail
+    assert "user-read-private" in detail
+    assert "reconnect" in detail or "connect" in detail
+
+
+def test_spotify_search_insufficient_scope_message(tmp_path, monkeypatch) -> None:
+    from unittest.mock import MagicMock, patch
+
+    from musync.app import create_app
+
+    token_path = tmp_path / "spotify_tokens.json"
+    token_path.write_text(
+        json.dumps(
+            {
+                "access_token": "test-access",
+                "refresh_token": "test-refresh",
+                "expires_at": 9999999999,
+                "display_name": "Test User",
+                "scope": (
+                    "user-read-private user-read-email user-read-playback-state "
+                    "user-modify-playback-state user-read-currently-playing streaming"
+                ),
+            }
+        ),
+        encoding="utf-8",
+    )
+    backend = _backend(tmp_path, monkeypatch)
+    monkeypatch.setenv("MUSYNC_SPOTIFY_CLIENT_ID", "cid")
+    monkeypatch.setenv("MUSYNC_SPOTIFY_CLIENT_SECRET", "csecret")
+    monkeypatch.setenv("MUSYNC_SPOTIFY_TOKEN_PATH", str(token_path))
+    reset_streaming_service()
+    client = TestClient(create_app(audio_backend=backend))
+
+    search_resp = MagicMock()
+    search_resp.status_code = 403
+    search_resp.json.return_value = {
+        "error": {"status": 403, "message": "Insufficient client scope"}
+    }
+    search_resp.text = '{"error":{"status":403,"message":"Insufficient client scope"}}'
+
+    mock_client = MagicMock()
+    mock_client.__enter__.return_value = mock_client
+    mock_client.__exit__.return_value = False
+    mock_client.get.return_value = search_resp
+
+    with patch("musync.streaming.spotify.httpx.Client", return_value=mock_client):
+        res = client.get(
+            "/api/streaming/search",
+            params={"provider": "spotify", "q": "Shape Of You"},
+        )
+
+    assert res.status_code == 400
+    detail = res.json()["detail"].lower()
+    assert "insufficient client scope" in detail
+    assert "reconnect" in detail or "disconnect" in detail
+
+
 def test_spotify_search_shape_of_you_maps_hits(tmp_path, monkeypatch) -> None:
     from unittest.mock import MagicMock, patch
 
@@ -229,6 +324,10 @@ def test_spotify_search_shape_of_you_maps_hits(tmp_path, monkeypatch) -> None:
                 "refresh_token": "test-refresh",
                 "expires_at": 9999999999,
                 "display_name": "Test User",
+                "scope": (
+                    "user-read-private user-read-email user-read-playback-state "
+                    "user-modify-playback-state user-read-currently-playing streaming"
+                ),
             }
         ),
         encoding="utf-8",
@@ -346,6 +445,10 @@ def test_spotify_authorize_url_when_configured(tmp_path, monkeypatch) -> None:
     assert qs.get("redirect_uri", [""])[0] == (
         "http://127.0.0.1:8081/api/streaming/spotify/callback"
     )
+    scope = qs.get("scope", [""])[0]
+    assert "user-read-private" in scope
+    assert "streaming" in scope
+    assert qs.get("show_dialog", [""])[0] == "true"
 
 
 def test_spotify_callback_me_403_redirects_allowlist_error(tmp_path, monkeypatch) -> None:

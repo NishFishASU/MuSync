@@ -272,6 +272,8 @@
  * @property {boolean | null} [user_token_set]
  * @property {string | null} [airplay_source]
  * @property {string | null} [playback_mode]
+ * @property {string[]} [scopes]
+ * @property {string[]} [missing_scopes]
  * @property {string[]} [limits]
  * @property {string} [note]
  */

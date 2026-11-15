@@ -461,6 +461,8 @@ class StreamingProviderStatus(BaseModel):
     user_token_set: Optional[bool] = None
     airplay_source: Optional[str] = None
     playback_mode: Optional[str] = None
+    scopes: list[str] = Field(default_factory=list)
+    missing_scopes: list[str] = Field(default_factory=list)
     limits: list[str] = Field(default_factory=list)
     note: str = ""
 

@@ -158,9 +158,11 @@ export MUSYNC_STREAMING_MOCK=1
    # or: $env:PYTHONPATH="backend"; $env:MUSYNC_BACKEND="mock"; python -m musync
    ```
 
-4. Open `http://127.0.0.1:8080` → **Connect Spotify** → approve → tokens return
+4. Open `http://127.0.0.1:8080` → **Streaming** → **Connect Spotify** → approve
+   the consent dialog (includes `user-read-private` for search) → tokens return
    to `/api/streaming/spotify/callback` → SPA `/?spotify=connected`.
-5. Optional: `MUSYNC_STREAMING_MOCK=1` so authenticated tracks play on the
+5. **Queue** → search tracks → **Queue & play**.
+6. Optional: `MUSYNC_STREAMING_MOCK=1` so authenticated tracks play on the
    software clock without librespot.
 
 ## API
@@ -179,6 +181,7 @@ export MUSYNC_STREAMING_MOCK=1
 
 - **403 on play** — Spotify Free accounts cannot control Connect; need Premium.
 - **403 after Connect / Internal Server Error on callback** — Spotify app is in **development mode** and your account is not allowlisted. After the auth code exchange, MuSync calls `GET /v1/me`; Spotify returns **403 Forbidden** until you add the signed-in user under Developer Dashboard → your app → **User Management**. MuSync redirects to `/?spotify=error&detail=…` with that message (no bare 500).
+- **Queue search 403 “Insufficient client scope”** — authorize now requests `user-read-private` (needed for `market=from_token` search) plus playback scopes, with `show_dialog=true`. Old tokens keep the previous grant; **Streaming → Disconnect → Reconnect Spotify**, approve the consent dialog, then search again on Queue.
 - **No Connect device** — install librespot; check `MUSYNC_LIBRESPOT_NAME` matches; ensure PipeWire/Pulse is up and `musync_feeder` exists (`./scripts/run_pi.sh` + Play once).
 - **OAuth redirect mismatch** — redirect URI in the Spotify dashboard must equal `MUSYNC_SPOTIFY_REDIRECT_URI` (API port `:8080` / `:8081`, never Vite `:5173`).
 - **Connect does nothing / credentials missing** — fill `%USERPROFILE%\musync.env` or `config/streaming.local.env`, restart the API; Connect shows a clear error when Client ID/Secret are unset.
