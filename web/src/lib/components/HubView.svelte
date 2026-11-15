@@ -3261,13 +3261,15 @@
 								.map((id) => devices.find((d) => d.id === id)?.name || id)
 								.join(' → ')}
 						{/if}
+						· headset Play bumps that sink to front
 					</p>
 				{:else if queueSettings && !queueSettings.turn_taking}
 					<p class="hint muted">Fan-out to all enabled sinks (no solo rotation)</p>
 				{:else}
 					<p class="hint muted">
 						After each track: next song + next ready sink (enabled + connected / armed). Loop
-						repeats from the top.
+						repeats from the top. Headset Play on a connected BT sink promotes it and resumes
+						hub transport (local / Spotify / YouTube / live input).
 					</p>
 				{/if}
 			</div>

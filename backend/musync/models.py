@@ -474,7 +474,9 @@ class QueueSettings(BaseModel):
     rotation_note: str = (
         "Eligible: enabled sinks that are connected (BT) or armed (SPP/Cast). "
         "If any have a profile/user assignment, only those participate. "
-        "Order: stable list_devices() order. On track end: next queue item + next device."
+        "Order: stable list_devices() order. On track end: next queue item + next device. "
+        "AVRCP Play on a connected BT headset promotes that sink to the active solo turn "
+        "(and resumes hub transport if paused)."
     )
 
 
@@ -506,9 +508,15 @@ class AvrcpStatus(BaseModel):
 
 
 class AvrcpCommandPut(BaseModel):
-    """Relay a headset (or test) AVRCP transport action to the active source."""
+    """Relay a headset (or test) AVRCP transport action to the active source.
+
+    Optional ``device_id`` identifies which output pressed Play (promote that
+    sink in turn-taking). Headset Absolute Volume / sole connected BT fill in
+    when omitted.
+    """
 
     action: Literal["play", "pause", "stop", "toggle", "next", "previous"]
+    device_id: Optional[str] = None
 
 
 class AvrcpVolumePut(BaseModel):

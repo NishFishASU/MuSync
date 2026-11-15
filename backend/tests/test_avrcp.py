@@ -193,6 +193,175 @@ def test_relay_play_pause_toggle(backend: MockAudioBackend) -> None:
     assert toggled.state == TransportState.PLAYING
 
 
+def test_avrcp_play_promotes_device_in_turn_taking(backend: MockAudioBackend) -> None:
+    """Play on a known BT sink bumps it to the active solo turn."""
+    from musync.models import QueueSettingsPut
+
+    # Two connected BT sinks; turn starts on sink-1.
+    settings = backend.get_queue_settings()
+    assert settings.turn_taking is True
+    assert settings.turn_device_id == "sink-1"
+    by_id = {d.id: d for d in backend.list_devices()}
+    assert by_id["sink-1"].mute is False
+
+    # Force turn onto sink-1, then Play from "phone-spp" is ineligible —
+    # only BT promote. Add second BT by enabling Kitchen via inject on sink-1
+    # then promote explicitly when a second sink exists.
+    # Use sink-1 after rotating away: simulate sink-1 muted as non-turn.
+    backend.set_queue_settings(QueueSettingsPut(turn_taking=True))
+    # Inject Absolute Volume on sink-1 so last_control is known, pause, then
+    # rotate turn by advancing — simpler: promote sink-1 via device_id while
+    # turn_device is forced elsewhere via second device mute state.
+    sources = backend.list_sources()
+    local = next(s for s in sources if s.available and s.type == SourceType.LOCAL)
+    backend.set_active_source(local.id)
+    backend.set_transport(TransportPut(state=TransportState.PAUSED))
+
+    # With sole connected BT in this fixture (sink-1), Play promotes sink-1.
+    playing = backend.relay_avrcp_command("play", device_id="sink-1")
+    assert playing.state == TransportState.PLAYING
+    assert backend.get_queue_settings().turn_device_id == "sink-1"
+    by_id = {d.id: d for d in backend.list_devices()}
+    assert by_id["sink-1"].mute is False
+
+
+def test_avrcp_play_promotes_second_bt_sink(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("MUSYNC_DEVICES_CONFIG", str(tmp_path / "devices.yaml"))
+    monkeypatch.setenv("MUSYNC_MEDIA_DIR", str(tmp_path / "media"))
+    backend = MockAudioBackend(
+        devices=[
+            Device(
+                id="qudelix",
+                name="Qudelix",
+                mac="11:22:33:44:55:66",
+                hci="hci0",
+                connected=True,
+            ),
+            Device(
+                id="buds",
+                name="Buds",
+                mac="11:22:33:44:55:77",
+                hci="hci1",
+                connected=True,
+            ),
+        ]
+    )
+    assert backend.get_queue_settings().turn_device_id == "qudelix"
+    sources = backend.list_sources()
+    local = next(s for s in sources if s.available and s.type == SourceType.LOCAL)
+    backend.set_active_source(local.id)
+    backend.set_transport(TransportPut(state=TransportState.PAUSED))
+
+    playing = backend.relay_avrcp_command("play", device_id="buds")
+    assert playing.state == TransportState.PLAYING
+    assert backend.get_queue_settings().turn_device_id == "buds"
+    by_id = {d.id: d for d in backend.list_devices()}
+    assert by_id["buds"].mute is False
+    assert by_id["qudelix"].mute is True
+
+
+def test_avrcp_relay_works_for_spotify_and_youtube_cues(
+    backend: MockAudioBackend, monkeypatch
+) -> None:
+    """Transport relay is source-agnostic — Spotify/YouTube cues pause/play too."""
+    # Mark streaming hub rows available so Play is accepted.
+    monkeypatch.setenv("MUSYNC_SPOTIFY_CLIENT_ID", "test-id")
+    monkeypatch.setenv("MUSYNC_SPOTIFY_CLIENT_SECRET", "test-secret")
+    monkeypatch.setenv("MUSYNC_YOUTUBE_API_KEY", "test-yt-key")
+
+    from musync.streaming import reset_streaming_service
+
+    reset_streaming_service()
+
+    # Spotify: add queue row with locator; force available via patch path.
+    spot = backend.add_queue_item(
+        QueueItemCreate(
+            source_type=SourceType.SPOTIFY,
+            title="Spot Track",
+            locator="spotify:track:abcdefghij0123456789ab",
+            source_id="spotify:track:abcdefghij0123456789ab",
+            duration_ms=30_000,
+        )
+    )
+    # Mock may mark unavailable without hub stream ready — force via internal.
+    if not spot.available:
+        with backend._session._lock:
+            for i, q in enumerate(backend._session._queue):
+                if q.id == spot.id:
+                    backend._session._queue[i] = q.model_copy(
+                        update={"available": True, "note": None}
+                    )
+                    spot = backend._session._queue[i]
+                    break
+    backend.set_active_queue_item(spot.id)
+    playing = backend.relay_avrcp_command("play", device_id="sink-1")
+    assert playing.state == TransportState.PLAYING
+    assert playing.source_type == SourceType.SPOTIFY
+    paused = backend.relay_avrcp_command("pause")
+    assert paused.state == TransportState.PAUSED
+    resumed = backend.relay_avrcp_command("play", device_id="sink-1")
+    assert resumed.state == TransportState.PLAYING
+
+    yt = backend.add_queue_item(
+        QueueItemCreate(
+            source_type=SourceType.YOUTUBE,
+            title="YT Clip",
+            locator="youtube:dQw4w9WgXcQ",
+            source_id="youtube:dQw4w9WgXcQ",
+            duration_ms=20_000,
+        )
+    )
+    if not yt.available:
+        with backend._session._lock:
+            for i, q in enumerate(backend._session._queue):
+                if q.id == yt.id:
+                    backend._session._queue[i] = q.model_copy(
+                        update={"available": True, "note": None}
+                    )
+                    yt = backend._session._queue[i]
+                    break
+    backend.set_active_queue_item(yt.id)
+    assert backend.relay_avrcp_command("play").state == TransportState.PLAYING
+    assert backend.get_transport().source_type == SourceType.YOUTUBE
+
+
+def test_resolve_avrcp_control_device_id() -> None:
+    from musync.audio.avrcp import resolve_avrcp_control_device_id
+
+    assert (
+        resolve_avrcp_control_device_id(
+            explicit_id="a",
+            last_control_id="b",
+            connected_bt_ids=["a", "b"],
+        )
+        == "a"
+    )
+    assert (
+        resolve_avrcp_control_device_id(
+            explicit_id=None,
+            last_control_id="b",
+            connected_bt_ids=["a", "b"],
+        )
+        == "b"
+    )
+    assert (
+        resolve_avrcp_control_device_id(
+            explicit_id=None,
+            last_control_id=None,
+            connected_bt_ids=["only"],
+        )
+        == "only"
+    )
+    assert (
+        resolve_avrcp_control_device_id(
+            explicit_id=None,
+            last_control_id=None,
+            connected_bt_ids=["a", "b"],
+        )
+        is None
+    )
+
+
 def test_relay_next_previous_skips_queue(backend: MockAudioBackend) -> None:
     # Clear seeded queue rows so Next/Previous are deterministic.
     for item in list(backend.list_queue()):

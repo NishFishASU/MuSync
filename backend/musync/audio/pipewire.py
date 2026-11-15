@@ -18,7 +18,8 @@ Live phone input (priority): phone pairs as A2DP **source** → ``bluez_input.*`
 
 Volume/mute: ``wpctl set-volume|set-mute <node-id>``.
 AVRCP: Absolute Volume (BlueZ MediaTransport / wpctl) → MuSync sliders;
-headset play/pause/skip → active source (soft-fail if unsupported).
+headset play/pause/skip → hub transport for any now-playing source; Play
+promotes that BT sink in turn-taking (soft-fail if unsupported).
 Delay: PipeWire pulse-compat ``pactl load-module module-loopback latency_msec=N``.
 
 Without Bluetooth hardware this backend still boots: it plans the graph, can
@@ -117,7 +118,7 @@ from ..models import (
     TransportPut,
     TransportState,
 )
-from .avrcp import AvrcpAction, AvrcpBridge, parse_action, relay_action_to_session
+from .avrcp import AvrcpAction, AvrcpBridge, parse_action
 from .base import AudioBackend
 from .input_registry import CAPTURE_NOTES, STUB_CAPTURE_NOTES, InputRegistry
 from .pw_tools import (
@@ -281,7 +282,7 @@ class PipeWireBackend(AudioBackend):
         self._session = SourceSession(
             inputs=self._inputs,
             lock=self._lock,
-            on_feeder_stop=self._stop_player_process,
+            on_feeder_stop=self._session_feeder_stop,
             on_feeder_start=self._start_player_process,
             on_auto_advance=self._on_queue_auto_advance,
         )
@@ -879,17 +880,85 @@ class PipeWireBackend(AudioBackend):
                 log.debug("AVRCP volume persist: %s", exc)
             log.info("AVRCP Absolute Volume → %s slider %.0f%%", device_id, vol * 100)
 
-    def _on_avrcp_action(self, action: AvrcpAction) -> None:
-        """Headset play/pause/skip → active hub source (Spotify/YouTube/local/…)."""
+    def _on_avrcp_action(
+        self, action: AvrcpAction, *, device_id: Optional[str] = None, **_kwargs
+    ) -> None:
+        """Headset play/pause/skip → hub transport for any now-playing source.
+
+        Play also promotes the pressing BT sink in turn-taking. Works for
+        hub-local files, Spotify, YouTube, AirPlay, and live A2DP capture —
+        not phone Files/apps offline of MuSync (OS limit).
+        """
         try:
-            transport = relay_action_to_session(self._session, action)
-            log.info("AVRCP %s → active source", action.value)
+            transport = self._handle_avrcp_action(action, device_id=device_id)
+            log.info(
+                "AVRCP %s → hub transport%s",
+                action.value,
+                f" (promote {device_id})" if device_id else "",
+            )
             self._publish_avrcp_transport(transport)
         except ValueError as exc:
             # Soft-fail: unavailable cue / empty queue — do not crash watcher.
             log.info("AVRCP %s soft-fail: %s", action.value, exc)
         except Exception as exc:  # noqa: BLE001
             log.debug("AVRCP action %s: %s", action, exc)
+
+    def _connected_bt_ids(self) -> list[str]:
+        with self._lock:
+            return [
+                d.id
+                for d in self._devices.values()
+                if d.kind == DeviceKind.BLUETOOTH and d.enabled and d.connected
+            ]
+
+    def _resolve_avrcp_device_id(
+        self, device_id: Optional[str] = None
+    ) -> Optional[str]:
+        from .avrcp import resolve_avrcp_control_device_id
+
+        explicit = None
+        if device_id and device_id in self._devices:
+            explicit = device_id
+        return resolve_avrcp_control_device_id(
+            explicit_id=explicit,
+            last_control_id=self._avrcp.last_control_device_id,
+            connected_bt_ids=self._connected_bt_ids(),
+        )
+
+    def _handle_avrcp_action(
+        self, action: AvrcpAction, *, device_id: Optional[str] = None
+    ):
+        """Promote on Play + drive transport via backend set_transport (all sources)."""
+        from ..models import TransportPut, TransportState
+
+        resolved = self._resolve_avrcp_device_id(device_id)
+
+        def _promote_if_play() -> None:
+            if resolved:
+                self._apply_turn_policy(rotate=False, promote_id=resolved)
+
+        if action == AvrcpAction.PLAY:
+            _promote_if_play()
+            return self.set_transport(TransportPut(state=TransportState.PLAYING))
+        if action == AvrcpAction.PAUSE:
+            return self.set_transport(TransportPut(state=TransportState.PAUSED))
+        if action == AvrcpAction.STOP:
+            return self.set_transport(TransportPut(state=TransportState.STOPPED))
+        if action == AvrcpAction.TOGGLE:
+            current = self.get_transport()
+            if current.state == TransportState.PLAYING:
+                return self.set_transport(TransportPut(state=TransportState.PAUSED))
+            _promote_if_play()
+            return self.set_transport(TransportPut(state=TransportState.PLAYING))
+        if action == AvrcpAction.NEXT:
+            transport = self._session.skip_relative(+1)
+            self._publish_avrcp_transport(transport)
+            return transport
+        if action == AvrcpAction.PREVIOUS:
+            transport = self._session.skip_relative(-1)
+            self._publish_avrcp_transport(transport)
+            return transport
+        raise ValueError(f"Unhandled AVRCP action: {action}")
 
     def _publish_avrcp_transport(self, transport=None) -> None:
         """Mirror Now Playing into BlueZ MPRIS player (headset display + Status)."""
@@ -933,11 +1002,11 @@ class PipeWireBackend(AudioBackend):
             mpris_playback_status=snap.mpris_playback_status or "Stopped",
         )
 
-    def relay_avrcp_command(self, action: str):
+    def relay_avrcp_command(self, action: str, *, device_id: Optional[str] = None):
         parsed = parse_action(action)
         # Status only — apply once below (toggle/next must not fire twice).
-        self._avrcp.inject_action(parsed, deliver=False)
-        transport = relay_action_to_session(self._session, parsed)
+        self._avrcp.inject_action(parsed, deliver=False, device_id=device_id)
+        transport = self._handle_avrcp_action(parsed, device_id=device_id)
         self._publish_avrcp_transport(transport)
         return transport
 
@@ -1706,6 +1775,29 @@ class PipeWireBackend(AudioBackend):
                         self._exec_soft([pactl, "unload-module", found])
         if host_id is None or host_id == self._active_capture_host_id:
             self._active_capture_host_id = None
+
+    def _session_feeder_stop(self) -> None:
+        """SourceSession pause/stop/switch — source-aware so AVRCP resume works.
+
+        Spotify: pause Connect but **keep librespot** so Play resumes without a
+        cold Connect re-pair (headset buttons previously only felt reliable on
+        local mpv because pause killed librespot).
+        Live input / AirPlay capture: unload capture only — do not pause the
+        phone Spotify session that may be the capture source.
+        Local / YouTube: stop mpv / yt-dlp ffmpeg as before.
+        """
+        try:
+            transport = self._session.get_transport()
+            st = transport.source_type
+            if st == SourceType.SPOTIFY:
+                self._stop_player_process(keep_librespot=True, pause_spotify=True)
+                return
+            if st in {SourceType.INPUT, SourceType.APPLE}:
+                self._stop_player_process(keep_librespot=False, pause_spotify=False)
+                return
+        except Exception as exc:  # noqa: BLE001
+            log.debug("session feeder stop probe: %s", exc)
+        self._stop_player_process(keep_librespot=False, pause_spotify=True)
 
     def _stop_player_process(
         self, *, keep_librespot: bool = False, pause_spotify: bool = True
@@ -3053,7 +3145,9 @@ class PipeWireBackend(AudioBackend):
         """Track end → next eligible output device (mute solo)."""
         self._apply_turn_policy(rotate=True)
 
-    def _apply_turn_policy(self, *, rotate: bool) -> None:
+    def _apply_turn_policy(
+        self, *, rotate: bool, promote_id: Optional[str] = None
+    ) -> None:
         changed = False
         spp_cast_restarts: list[Device] = []
         with self._lock:
@@ -3063,7 +3157,10 @@ class PipeWireBackend(AudioBackend):
             )
             eligible_ids = [d.id for d in eligible]
             self._turn_device_id = next_turn_device_id(
-                eligible_ids, self._turn_device_id, rotate=rotate
+                eligible_ids,
+                self._turn_device_id,
+                rotate=rotate,
+                promote_id=promote_id,
             )
             for device_id, want_mute in mute_targets_for_turn(
                 devices,

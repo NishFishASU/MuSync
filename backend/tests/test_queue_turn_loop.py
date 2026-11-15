@@ -101,6 +101,8 @@ def test_next_turn_rotates_and_wraps() -> None:
     assert next_turn_device_id(order, "c", rotate=True) == "a"
     assert next_turn_device_id(order, "b", rotate=False) == "b"
     assert next_turn_device_id(order, None, rotate=True) == "a"
+    assert next_turn_device_id(order, "a", rotate=True, promote_id="c") == "c"
+    assert next_turn_device_id(order, "a", rotate=False, promote_id="missing") == "a"
 
 
 def test_turn_taking_solos_first_eligible(tmp_path, monkeypatch) -> None:

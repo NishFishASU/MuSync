@@ -21,7 +21,9 @@ from ..models import Device, DeviceKind
 ROTATION_NOTE = (
     "Eligible: enabled sinks that are connected (BT) or armed (SPP/Cast). "
     "If any have a profile/user assignment, only those participate. "
-    "Order: stable list_devices() order. On track end: next queue item + next device."
+    "Order: stable list_devices() order. On track end: next queue item + next device. "
+    "AVRCP Play on a connected BT headset promotes that sink to the active solo turn "
+    "(and resumes hub transport if paused)."
 )
 
 
@@ -61,10 +63,17 @@ def next_turn_device_id(
     current_id: Optional[str],
     *,
     rotate: bool,
+    promote_id: Optional[str] = None,
 ) -> Optional[str]:
-    """Pick the turn device. ``rotate=True`` advances; else keep current if valid."""
+    """Pick the turn device.
+
+    ``promote_id`` (AVRCP Play on a known headset) wins when eligible.
+    ``rotate=True`` advances; else keep current if valid.
+    """
     if not eligible_ids:
         return None
+    if promote_id and promote_id in eligible_ids:
+        return promote_id
     if current_id in eligible_ids:
         if not rotate:
             return current_id

@@ -187,8 +187,11 @@ class AudioBackend(ABC):
 
         return AvrcpStatus(detail="AVRCP not available on this backend")
 
-    def relay_avrcp_command(self, action: str):
-        """Relay headset play/pause/skip to the active source (soft-fail)."""
+    def relay_avrcp_command(self, action: str, *, device_id: Optional[str] = None):
+        """Relay headset play/pause/skip to hub transport (any now-playing source).
+
+        Optional ``device_id`` promotes that BT sink on Play when turn-taking.
+        """
         raise NotImplementedError("AVRCP transport relay not available")
 
     def inject_avrcp_volume(self, device_id: str, volume: float):
