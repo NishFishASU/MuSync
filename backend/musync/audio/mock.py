@@ -49,7 +49,12 @@ from ..models import (
     TransportState,
 )
 from ..nowplaying import DEMO_SOURCE_ID
-from .avrcp import AvrcpAction, AvrcpBridge, parse_action, relay_action_to_session
+from .avrcp import (
+    AvrcpAction,
+    AvrcpBridge,
+    parse_action,
+    resolve_avrcp_control_device_id,
+)
 from .cast import DEFAULT_CAST_DELAY_MS, mock_nest_mini
 from .host_player import HostSpeakerPlayer
 from .turn_taking import (
@@ -727,7 +732,9 @@ class MockAudioBackend(AudioBackend):
         """Track end → next eligible output device (mute solo)."""
         self._apply_turn_policy(rotate=True)
 
-    def _apply_turn_policy(self, *, rotate: bool) -> None:
+    def _apply_turn_policy(
+        self, *, rotate: bool, promote_id: Optional[str] = None
+    ) -> None:
         with self._lock:
             devices = list(self._devices.values())
             eligible = eligible_turn_devices(
@@ -735,7 +742,10 @@ class MockAudioBackend(AudioBackend):
             )
             eligible_ids = [d.id for d in eligible]
             self._turn_device_id = next_turn_device_id(
-                eligible_ids, self._turn_device_id, rotate=rotate
+                eligible_ids,
+                self._turn_device_id,
+                rotate=rotate,
+                promote_id=promote_id,
             )
             for device_id, want_mute in mute_targets_for_turn(
                 devices,
@@ -935,12 +945,63 @@ class MockAudioBackend(AudioBackend):
             self._devices[device_id] = device.model_copy(update={"volume": vol})
             self._persist()
 
-    def _on_avrcp_action(self, action: AvrcpAction) -> None:
+    def _on_avrcp_action(
+        self, action: AvrcpAction, *, device_id: Optional[str] = None, **_kwargs
+    ) -> None:
         try:
-            relay_action_to_session(self._session, action)
+            self._handle_avrcp_action(action, device_id=device_id)
         except ValueError:
             # Soft-fail unavailable play — mock stays up.
             pass
+
+    def _connected_bt_ids(self) -> list[str]:
+        with self._lock:
+            return [
+                d.id
+                for d in self._devices.values()
+                if d.kind == DeviceKind.BLUETOOTH and d.enabled and d.connected
+            ]
+
+    def _resolve_avrcp_device_id(
+        self, device_id: Optional[str] = None
+    ) -> Optional[str]:
+        explicit = None
+        if device_id and device_id in self._devices:
+            explicit = device_id
+        return resolve_avrcp_control_device_id(
+            explicit_id=explicit,
+            last_control_id=self._avrcp.last_control_device_id,
+            connected_bt_ids=self._connected_bt_ids(),
+        )
+
+    def _handle_avrcp_action(
+        self, action: AvrcpAction, *, device_id: Optional[str] = None
+    ):
+        """Promote on Play + drive transport (all hub sources)."""
+        resolved = self._resolve_avrcp_device_id(device_id)
+
+        def _promote_if_play() -> None:
+            if resolved:
+                self._apply_turn_policy(rotate=False, promote_id=resolved)
+
+        if action == AvrcpAction.PLAY:
+            _promote_if_play()
+            return self.set_transport(TransportPut(state=TransportState.PLAYING))
+        if action == AvrcpAction.PAUSE:
+            return self.set_transport(TransportPut(state=TransportState.PAUSED))
+        if action == AvrcpAction.STOP:
+            return self.set_transport(TransportPut(state=TransportState.STOPPED))
+        if action == AvrcpAction.TOGGLE:
+            current = self.get_transport()
+            if current.state == TransportState.PLAYING:
+                return self.set_transport(TransportPut(state=TransportState.PAUSED))
+            _promote_if_play()
+            return self.set_transport(TransportPut(state=TransportState.PLAYING))
+        if action == AvrcpAction.NEXT:
+            return self._session.skip_relative(+1)
+        if action == AvrcpAction.PREVIOUS:
+            return self._session.skip_relative(-1)
+        raise ValueError(f"Unhandled AVRCP action: {action}")
 
     def get_avrcp_status(self):
         from ..models import AvrcpStatus
@@ -962,11 +1023,11 @@ class MockAudioBackend(AudioBackend):
             mpris_playback_status="Stopped",
         )
 
-    def relay_avrcp_command(self, action: str):
+    def relay_avrcp_command(self, action: str, *, device_id: Optional[str] = None):
         parsed = parse_action(action)
         # Status only — apply once below (toggle/next must not fire twice).
-        self._avrcp.inject_action(parsed, deliver=False)
-        return relay_action_to_session(self._session, parsed)
+        self._avrcp.inject_action(parsed, deliver=False, device_id=device_id)
+        return self._handle_avrcp_action(parsed, device_id=device_id)
 
     def inject_avrcp_volume(self, device_id: str, volume: float):
         with self._lock:

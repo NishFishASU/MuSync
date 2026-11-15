@@ -43,6 +43,7 @@ pactl list sources short | grep -i bluez
 6. MuSync UI → **Phone / PC hosts** → **Refresh live inputs** → **Use as input** on the S21 FE row (binds `bt_a2dp` + endpoint).
 7. Song queue → **+ Live input** (or set a row’s type to Live input + that host) → **Play**.
 8. Enabled Qudelix / USB HCI / SPP sinks receive the phone audio from the same feeder fan-out.
+9. **AVRCP on Qudelix (output):** play/pause/skip control **hub transport** (mute/unmute capture into the feeder, skip queue when applicable). That works when the phone track is the active hub **live input**. It does **not** remote-control the phone Files app / Spotify / YouTube when those apps are playing only on the phone and never enter MuSync — Android/iOS do not give the Pi that OS-level transport.
 
 Manual loopback (debug without UI):
 

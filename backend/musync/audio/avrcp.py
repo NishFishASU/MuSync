@@ -289,8 +289,12 @@ def parse_action(value: str) -> AvrcpAction:
 def relay_action_to_session(session, action: AvrcpAction):
     """Apply play/pause/skip to SourceSession for the active hub source.
 
-    Works for local / Spotify / YouTube / Apple / live input — same transport
-    clock the web UI uses. Raises ValueError when Play is rejected (unavailable).
+    Works for hub-local files, Spotify, YouTube, AirPlay, and live input
+    (including phone media captured over A2DP) — same transport clock the web
+    UI uses. Raises ValueError when Play is rejected (unavailable).
+
+    Prefer backend ``relay_avrcp_command`` / ``_handle_avrcp_action`` on Pi so
+    Play also promotes the pressing sink and runs ``_ensure_play_ready``.
     """
     from ..models import TransportPut, TransportState
 
@@ -310,6 +314,26 @@ def relay_action_to_session(session, action: AvrcpAction):
     if action == AvrcpAction.PREVIOUS:
         return session.skip_relative(-1)
     raise ValueError(f"Unhandled AVRCP action: {action}")
+
+
+def resolve_avrcp_control_device_id(
+    *,
+    explicit_id: Optional[str],
+    last_control_id: Optional[str],
+    connected_bt_ids: list[str],
+) -> Optional[str]:
+    """Pick which output headset pressed Play (for turn-taking promote).
+
+    Order: explicit API/inject id → last Absolute Volume device → sole
+    connected BT sink. Returns None when ambiguous (leave current turn).
+    """
+    if explicit_id:
+        return explicit_id
+    if last_control_id and last_control_id in set(connected_bt_ids):
+        return last_control_id
+    if len(connected_bt_ids) == 1:
+        return connected_bt_ids[0]
+    return None
 
 
 def transport_state_to_mpris(state: str) -> str:
@@ -603,6 +627,8 @@ class AvrcpBridge:
         self._last_seen_vol: dict[str, float] = {}
         self._last_poll_at = 0.0
         self._last_action_at = 0.0
+        # Last headset that moved Absolute Volume (best-effort Play promote id).
+        self._last_control_device_id: Optional[str] = None
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
         self._mac_by_device: dict[str, str] = {}
@@ -617,6 +643,11 @@ class AvrcpBridge:
         self._bluez_owner: str = ""
         self._dbus_import_ok = _try_import_dbus() is not None
         self._status.dbus_import_ok = self._dbus_import_ok
+
+    @property
+    def last_control_device_id(self) -> Optional[str]:
+        with self._lock:
+            return self._last_control_device_id
 
     @property
     def status(self) -> AvrcpStatusSnapshot:
@@ -844,6 +875,7 @@ class AvrcpBridge:
             changed[device_id] = vol
             with self._lock:
                 self._last_seen_vol[device_id] = vol
+                self._last_control_device_id = device_id
                 self._status.last_volume_sync[device_id] = vol
             if self._on_volume:
                 try:
@@ -852,11 +884,20 @@ class AvrcpBridge:
                     log.debug("AVRCP volume callback %s: %s", device_id, exc)
         return changed
 
-    def inject_action(self, action: AvrcpAction, *, deliver: bool = True) -> None:
+    def inject_action(
+        self,
+        action: AvrcpAction,
+        *,
+        deliver: bool = True,
+        device_id: Optional[str] = None,
+    ) -> None:
         """Record (and optionally deliver) a transport action.
 
         ``deliver=False`` updates status only — callers that apply the action
         themselves use this to avoid double toggle/next.
+
+        ``device_id`` identifies the pressing headset (turn-taking promote).
+        When omitted on deliver, falls back to last Absolute Volume device.
         """
         now = time.monotonic()
         with self._lock:
@@ -866,6 +907,9 @@ class AvrcpBridge:
                 return
             if deliver:
                 self._last_action_at = now
+            resolved = device_id or self._last_control_device_id
+            if device_id:
+                self._last_control_device_id = device_id
             self._status.last_action = action.value
             self._status.supported = True
             if not self._status.detail or "soft-fail" in self._status.detail.lower():
@@ -874,7 +918,15 @@ class AvrcpBridge:
             return
         if self._on_action:
             try:
-                self._on_action(action)
+                self._on_action(action, device_id=resolved)
+            except TypeError:
+                # Older one-arg callbacks (tests / stubs).
+                try:
+                    self._on_action(action)
+                except Exception as exc:  # noqa: BLE001
+                    log.debug("AVRCP action callback %s: %s", action, exc)
+                    with self._lock:
+                        self._status.last_error = str(exc)
             except Exception as exc:  # noqa: BLE001
                 log.debug("AVRCP action callback %s: %s", action, exc)
                 with self._lock:
@@ -885,6 +937,7 @@ class AvrcpBridge:
         vol = round(max(0.0, min(1.0, float(volume))), 3)
         with self._lock:
             self._last_seen_vol[device_id] = vol
+            self._last_control_device_id = device_id
             self._status.last_volume_sync[device_id] = vol
             self._status.supported = True
             self._status.detail = "AVRCP volume inject (mock/test)"
@@ -927,8 +980,17 @@ class AvrcpBridge:
 
                 def _on_player_action(action: AvrcpAction) -> None:
                     # Relay off the GLib thread so session/mpv locks cannot stall BlueZ.
+                    # device_id: last Absolute Volume headset (Play promote) when known.
+                    def _deliver() -> None:
+                        with self._lock:
+                            hint = self._last_control_device_id
+                            # Sole registered BT target → unambiguous promote.
+                            if hint is None and len(self._mac_by_device) == 1:
+                                hint = next(iter(self._mac_by_device))
+                        self.inject_action(action, deliver=True, device_id=hint)
+
                     threading.Thread(
-                        target=lambda: self.inject_action(action, deliver=True),
+                        target=_deliver,
                         name="musync-avrcp-action",
                         daemon=True,
                     ).start()

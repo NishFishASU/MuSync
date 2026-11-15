@@ -329,9 +329,13 @@ def api_avrcp_status() -> AvrcpStatus:
 
 @app.post("/api/avrcp/command", response_model=Transport)
 def api_avrcp_command(body: AvrcpCommandPut) -> Transport:
-    """Relay play/pause/skip from a headset (or test client) to the active source."""
+    """Relay play/pause/skip from a headset (or test client) to hub transport.
+
+    Works for hub-local, Spotify, YouTube, AirPlay, and live A2DP capture.
+    Optional ``device_id`` on Play promotes that output in turn-taking.
+    """
     try:
-        return backend.relay_avrcp_command(body.action)
+        return backend.relay_avrcp_command(body.action, device_id=body.device_id)
     except NotImplementedError as exc:
         raise HTTPException(
             status_code=501,
