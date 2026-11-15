@@ -99,7 +99,12 @@ from .pw_tools import (
     which,
 )
 from .source_session import SourceSession
-from .spp import build_spp_ffmpeg_from_pulse, spp_plan_notes, spp_tcp_url
+from .spp import (
+    build_spp_ffmpeg,
+    spp_anullsrc,
+    spp_plan_notes,
+    spp_tcp_url,
+)
 
 log = logging.getLogger(__name__)
 
@@ -143,6 +148,9 @@ class PipeWireBackend(AudioBackend):
         self._bt_remotes_by_mac: dict = {}
         self._player_proc: Optional[subprocess.Popen[str]] = None
         self._spp_procs: dict[str, subprocess.Popen[str]] = {}
+        # Track SPP input mode so we can switch silence → file on Play without
+        # bouncing a healthy listener that already matches the desired source.
+        self._spp_source_keys: dict[str, str] = {}
 
         self._tools = {
             "wpctl": which("wpctl"),
@@ -483,7 +491,7 @@ class PipeWireBackend(AudioBackend):
 
     def _apply_volume(self, device: Device) -> None:
         if device.kind == DeviceKind.NETWORK_SPP:
-            self._restart_spp_listener(device)
+            # SPP listen matches manual ffmpeg (no -af volume) — avoid bounce.
             return
         node = self._pw_node_ids.get(device.id)
         wpctl = self._tools["wpctl"]
@@ -500,7 +508,7 @@ class PipeWireBackend(AudioBackend):
 
     def _apply_mute(self, device: Device) -> None:
         if device.kind == DeviceKind.NETWORK_SPP:
-            self._restart_spp_listener(device)
+            # SPP listen matches manual ffmpeg (no -af) — avoid bounce.
             return
         node = self._pw_node_ids.get(device.id)
         wpctl = self._tools["wpctl"]
@@ -510,19 +518,18 @@ class PipeWireBackend(AudioBackend):
         self._exec_soft([wpctl, "set-mute", node, "1" if device.mute else "0"])
 
     def _apply_delay(self, device: Device) -> None:
-        """Re-wire this sink's loopback (BT) or restart SPP ffmpeg with adelay."""
-        if not device.enabled:
-            if device.kind == DeviceKind.NETWORK_SPP:
-                self._stop_spp_listener(device.id)
-            return
+        """Re-wire this sink's loopback (BT). SPP uses manual argv without adelay."""
         if device.kind == DeviceKind.NETWORK_SPP:
-            self._restart_spp_listener(device)
+            # Delay is stored for UI but not applied via -af (breaks SPP handshake).
+            return
+        if not device.enabled:
             return
         # Rebuild just this sink by running ensure_graph — keeps feeder shared.
         self._ensure_graph(only_device=device.id)
 
     def _stop_spp_listener(self, device_id: str) -> None:
         proc = self._spp_procs.pop(device_id, None)
+        self._spp_source_keys.pop(device_id, None)
         if proc is None:
             return
         if proc.poll() is None:
@@ -536,25 +543,45 @@ class PipeWireBackend(AudioBackend):
         proc = self._spp_procs.get(device_id)
         return proc is not None and proc.poll() is None
 
+    def _spp_desired_source(self, device: Device) -> tuple[str, str, str]:
+        """Return ``(input_kind, input_spec, source_key)`` for the SPP listen.
+
+        Prefer the proven manual shape (``-re -i <file>``) while a local track
+        is playing. Otherwise feed continuous ``anullsrc`` silence so the phone
+        can complete its handshake before Play — pulse ``feeder.monitor`` often
+        emits no frames until something plays into the feeder.
+        """
+        path = ""
+        try:
+            path = self._session.active_file_path() or ""
+        except Exception:  # noqa: BLE001 — session optional during early init
+            path = ""
+        transport = self._session.get_transport()
+        if path and transport.state == TransportState.PLAYING:
+            return "file", path, f"file:{path}"
+        spec = spp_anullsrc(device)
+        return "lavfi", spec, f"lavfi:{spec}"
+
     def _restart_spp_listener(self, device: Device) -> None:
         """(Re)start TCP listen for an enabled SPP sink.
 
-        Forced restart — used when listen_port / rate / delay / volume / mute
-        change. Graph ensure / Play must **not** call this when the process is
-        already healthy: killing ffmpeg drops the phone's TCP session right as
-        playback starts.
+        Forced restart when listen_port / rate / channels change, or when the
+        desired input switches (silence ↔ file). Do **not** bounce a healthy
+        listener that already matches the desired source — that drops the phone.
         """
         self._stop_spp_listener(device.id)
         if device.kind != DeviceKind.NETWORK_SPP or not device.enabled:
             device.connected = False
             return
 
+        kind, spec, source_key = self._spp_desired_source(device)
         if self._env_dry_run():
-            log.info(
-                "Dry-run SPP: %s",
-                " ".join(build_spp_ffmpeg_from_pulse(device, feeder=self._feeder)),
+            dry_cmd = build_spp_ffmpeg(
+                device, input_kind=kind, input_spec=spec, ffmpeg_bin="ffmpeg"
             )
+            log.info("Dry-run SPP (%s): %s", source_key, " ".join(dry_cmd))
             device.connected = True
+            self._spp_source_keys[device.id] = source_key
             return
 
         ff = self._tools.get("ffmpeg")
@@ -563,17 +590,31 @@ class PipeWireBackend(AudioBackend):
             device.connected = False
             return
 
-        cmd = build_spp_ffmpeg_from_pulse(device, feeder=self._feeder, ffmpeg_bin=ff)
+        cmd = build_spp_ffmpeg(
+            device, input_kind=kind, input_spec=spec, ffmpeg_bin=ff
+        )
+        # Ensure feeder exists for BT fan-out; SPP itself uses file/anullsrc.
+        for feeder_cmd in self._ensure_feeder_commands():
+            self._exec_soft(feeder_cmd)
+
         try:
-            # Keep stderr so early pulse/port failures are visible in logs.
+            # Never use stderr=PIPE without a reader — a full pipe blocks ffmpeg
+            # and the phone sees "unable to stream" even though the port is open.
+            log_path = repo_root() / "config" / f"spp-{device.id}.ffmpeg.log"
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            log_fh = log_path.open("w", encoding="utf-8")
             self._spp_procs[device.id] = subprocess.Popen(
                 cmd,
                 stdout=subprocess.DEVNULL,
-                stderr=subprocess.PIPE,
+                stderr=log_fh,
                 text=True,
             )
-            # Brief settle — ffmpeg exits immediately if pulse source/port fails.
-            time.sleep(0.15)
+            try:
+                log_fh.close()
+            except OSError:
+                pass
+            # Brief settle — ffmpeg exits immediately if bind/format fails.
+            time.sleep(0.2)
             proc = self._spp_procs.get(device.id)
             if proc is None:
                 device.connected = False
@@ -581,42 +622,49 @@ class PipeWireBackend(AudioBackend):
             if proc.poll() is not None:
                 err = ""
                 try:
-                    err = (proc.stderr.read() if proc.stderr else "") or ""
+                    err = log_path.read_text(encoding="utf-8")[-2000:]
                 except OSError:
                     err = ""
                 self._spp_procs.pop(device.id, None)
+                self._spp_source_keys.pop(device.id, None)
                 device.connected = False
                 log.warning(
                     "SPP listener %s exited immediately (code %s): %s — cmd=%s",
                     device.id,
                     proc.returncode,
-                    err.strip() or "(no stderr)",
+                    (err or "").strip() or "(no stderr)",
                     " ".join(cmd),
                 )
                 return
             device.connected = True
+            self._spp_source_keys[device.id] = source_key
             log.info(
-                "SPP listening %s → %s (pid %s)",
+                "SPP listening %s → %s (pid %s, source=%s)",
                 device.id,
                 spp_tcp_url(device),
                 proc.pid,
+                source_key,
             )
         except OSError as exc:
             log.warning("Failed to start SPP listener %s: %s", device.id, exc)
             device.connected = False
 
     def _ensure_spp_listener(self, device: Device) -> None:
-        """Start SPP listen only if missing/dead — preserve live phone TCP sessions."""
+        """Start/upgrade SPP listen; keep process if source already matches."""
         if device.kind != DeviceKind.NETWORK_SPP:
             return
         if not device.enabled:
             self._stop_spp_listener(device.id)
             device.connected = False
             return
-        if self._spp_listener_alive(device.id):
+        _kind, _spec, source_key = self._spp_desired_source(device)
+        if (
+            self._spp_listener_alive(device.id)
+            and self._spp_source_keys.get(device.id) == source_key
+        ):
             device.connected = True
             return
-        # Dead or never started — (re)bind the port.
+        # Dead, never started, or need silence↔file switch.
         self._restart_spp_listener(device)
 
     def _sync_spp_listeners(self, only_device: str | None = None) -> None:
@@ -790,19 +838,17 @@ class PipeWireBackend(AudioBackend):
                 self._pw_node_ids[device_id] = updated.pw_node
             self._persist()
 
-            spp_fields = {
+            # SPP uses file/anullsrc without -af — only restart on bind-shape changes.
+            spp_bind_fields = {
                 "listen_host",
                 "listen_port",
                 "sample_rate",
                 "channels",
-                "delay_ms",
-                "volume",
-                "mute",
                 "enabled",
             }
-            if updated.kind == DeviceKind.NETWORK_SPP and spp_fields & set(updates):
+            if updated.kind == DeviceKind.NETWORK_SPP and spp_bind_fields & set(updates):
                 self._restart_spp_listener(updated)
-            else:
+            elif updated.kind != DeviceKind.NETWORK_SPP:
                 if "volume" in updates:
                     self._apply_volume(updated)
                 if "mute" in updates:
@@ -865,11 +911,13 @@ class PipeWireBackend(AudioBackend):
         return self._session.get_transport()
 
     def set_transport(self, body: TransportPut) -> Transport:
-        # Ensure sink graph exists before starting playback; never tear it down
-        # when switching songs/sources (feeder swap only).
+        # Ensure BT sink graph before Play; swap feeder; then align SPP source
+        # (anullsrc ↔ ffmpeg -re -i file) without bouncing a matching listener.
         if body.state is TransportState.PLAYING:
             self._ensure_graph()
-        return self._session.set_transport(body)
+        transport = self._session.set_transport(body)
+        self._sync_spp_listeners()
+        return transport
 
     def list_sources(self) -> list[Source]:
         return self._session.list_sources()
