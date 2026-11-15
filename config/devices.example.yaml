@@ -1,0 +1,57 @@
+# Copy to devices.yaml (or set MUSYNC_DEVICES_CONFIG) and edit for your speakers.
+# One ASUS BT600 adapter (hciN) ↔ one A2DP speaker (MAC). Max 6 sinks.
+devices:
+  - id: sink-1
+    name: Living Room
+    mac: "AA:BB:CC:DD:EE:01"
+    hci: hci0
+    connected: true
+    delay_ms: 0
+    volume: 0.85
+    mute: false
+    enabled: true
+  - id: sink-2
+    name: Kitchen
+    mac: "AA:BB:CC:DD:EE:02"
+    hci: hci1
+    connected: true
+    delay_ms: 40
+    volume: 0.75
+    mute: false
+    enabled: true
+  - id: sink-3
+    name: Bedroom
+    mac: "AA:BB:CC:DD:EE:03"
+    hci: hci2
+    connected: false
+    delay_ms: 80
+    volume: 0.7
+    mute: false
+    enabled: false
+  - id: sink-4
+    name: Patio
+    mac: "AA:BB:CC:DD:EE:04"
+    hci: hci3
+    connected: true
+    delay_ms: 120
+    volume: 0.9
+    mute: false
+    enabled: true
+  - id: sink-5
+    name: Office
+    mac: "AA:BB:CC:DD:EE:05"
+    hci: hci4
+    connected: false
+    delay_ms: 0
+    volume: 0.8
+    mute: false
+    enabled: false
+  - id: sink-6
+    name: Garage
+    mac: "AA:BB:CC:DD:EE:06"
+    hci: hci5
+    connected: false
+    delay_ms: 60
+    volume: 0.65
+    mute: true
+    enabled: false
