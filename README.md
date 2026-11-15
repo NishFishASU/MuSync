@@ -204,6 +204,8 @@ sudo systemctl enable --now musync
 ### ASUS BT600 notes
 
 - One A2DP sink per adapter ⇒ six speakers need six BT600s (`hci0`…`hci5`).
+- Onboard-only soft-fails gracefully (1 A2DP); UI shows adapter ready/dead chips.
+- Dead BT600s are skipped with short BlueZ timeouts — they must not block scan/reconnect.
 - Powered hub strongly recommended beyond two dongles.
 - Prefer the same codec (SBC or AAC) across sinks.
 - Onboard Pi Bluetooth can validate the software path (e.g. Qudelix-5K + local file); dedicated BT600s own multi-sink demos.

@@ -90,11 +90,26 @@ class DiscoveredBluetoothSink(BaseModel):
     configured_id: Optional[str] = None
 
 
+class BluetoothAdapter(BaseModel):
+    """One HCI controller — onboard Pi Bluetooth or a USB BT600."""
+
+    hci: str
+    mac: str = ""
+    name: str = ""
+    powered: bool = False
+    healthy: bool = True
+    onboard: bool = False
+    detail: str = ""
+
+
 class DeviceDiscoverResponse(BaseModel):
     """Discovery payload for the device-setup UI (no manual MAC entry)."""
 
     bluetooth: list[DiscoveredBluetoothSink] = Field(default_factory=list)
     spp_default: Device
+    adapters: list[BluetoothAdapter] = Field(default_factory=list)
+    adapter_capacity: int = 0
+    soft_warn: str = ""
     config_path: str = ""
     config_ok: bool = True
     config_detail: str = ""
@@ -106,6 +121,9 @@ class BluetoothScanStatus(BaseModel):
 
     scanning: bool = False
     bluetooth: list[DiscoveredBluetoothSink] = Field(default_factory=list)
+    adapters: list[BluetoothAdapter] = Field(default_factory=list)
+    adapter_capacity: int = 0
+    soft_warn: str = ""
     detail: str = ""
 
 
@@ -114,6 +132,8 @@ class BluetoothConnectRequest(BaseModel):
 
     mac: str = Field(..., min_length=11, max_length=32)
     name: Optional[str] = None
+    # Prefer this HCI when free/healthy (multi-adapter). Empty = auto-pick.
+    hci: Optional[str] = None
     # When true, enable the device as an output sink after a successful connect.
     enable_as_output: bool = True
 
@@ -132,6 +152,8 @@ class BluetoothConnectResponse(BaseModel):
     detail: str = ""
     device: Optional[Device] = None
     bluetooth: list[DiscoveredBluetoothSink] = Field(default_factory=list)
+    adapters: list[BluetoothAdapter] = Field(default_factory=list)
+    soft_warn: str = ""
 
 
 class DeviceConfigEntry(BaseModel):
@@ -394,6 +416,9 @@ class Health(BaseModel):
     sink_count: int
     enabled_count: int
     hci_map: dict[str, str] = Field(default_factory=dict)
+    adapters: list[BluetoothAdapter] = Field(default_factory=list)
+    adapter_count: int = 0
+    healthy_adapter_count: int = 0
     detail: str = ""
     mapped_sinks: int = 0
     graph_dry_run: bool = True

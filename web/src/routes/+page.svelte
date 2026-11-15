@@ -86,6 +86,10 @@
 
 	/** @type {import('$lib/api.js').DiscoveredBluetoothSink[]} */
 	let discoveredBt = $state([]);
+	/** @type {import('$lib/api.js').BluetoothAdapter[]} */
+	let btAdapters = $state([]);
+	let btAdapterCapacity = $state(0);
+	let btSoftWarn = $state('');
 	/** @type {import('$lib/api.js').Device | null} */
 	let sppDefault = $state(null);
 	/** @type {Set<string>} */
@@ -225,8 +229,16 @@
 			ready || missing
 				? ` · ${missing && missing !== '—' ? 'MISSING' : 'READY'}`
 				: '';
-		return `${label} · ${health.enabled_count}/${health.sink_count} sinks · ${inputs.length}/4 hosts${readiness}`;
+		const healthyAdapters = health.healthy_adapter_count;
+		const adapterN = health.adapter_count;
+		const adapters =
+			typeof healthyAdapters === 'number' && typeof adapterN === 'number'
+				? ` · BT ${healthyAdapters}/${adapterN}`
+				: '';
+		return `${label} · ${health.enabled_count}/${health.sink_count} sinks · ${inputs.length}/4 hosts${adapters}${readiness}`;
 	});
+
+	const healthyAdapterCount = $derived(btAdapters.filter((a) => a.healthy !== false).length);
 
 	/** @param {import('$lib/api.js').Device} d */
 	function sinkStatusLabel(d) {
@@ -338,9 +350,26 @@
 		setupBtNames = names;
 	}
 
+	/**
+	 * @param {{
+	 *   adapters?: import('$lib/api.js').BluetoothAdapter[];
+	 *   adapter_capacity?: number;
+	 *   soft_warn?: string;
+	 * }} payload
+	 */
+	function applyAdapterStatus(payload) {
+		btAdapters = payload.adapters || [];
+		btAdapterCapacity =
+			typeof payload.adapter_capacity === 'number'
+				? payload.adapter_capacity
+				: btAdapters.filter((a) => a.healthy !== false).length;
+		btSoftWarn = payload.soft_warn || '';
+	}
+
 	async function refreshDiscovery() {
 		const disc = await discoverDevices();
 		applyBtRows(disc.bluetooth || []);
+		applyAdapterStatus(disc);
 		sppDefault = disc.spp_default || null;
 		setupDetail = disc.detail || '';
 		setupConfigOk = disc.config_ok !== false;
@@ -357,6 +386,7 @@
 	function applyScanStatus(status) {
 		btScanning = Boolean(status.scanning);
 		applyBtRows(status.bluetooth || []);
+		applyAdapterStatus(status);
 		if (status.detail) setupDetail = status.detail;
 	}
 
@@ -432,13 +462,18 @@
 				enable_as_output: true
 			});
 			if (res.bluetooth) applyBtRows(res.bluetooth);
+			applyAdapterStatus(res);
 			if (res.ok) {
-				setupMessage = `Connected ${bt.name}`;
+				setupMessage = res.device
+					? `Connected ${bt.name}${res.device.hci ? ` · ${res.device.hci}` : ''}`
+					: res.soft_warn || res.detail || `Connected ${bt.name} (output not enabled)`;
 				devices = await listDevices();
 				if (res.device?.id) selectedId = res.device.id;
 				health = await getHealth().catch(() => health);
+				if (res.soft_warn && !res.device) btSoftWarn = res.soft_warn;
 			} else {
 				setupMessage = res.detail || `Connect failed for ${bt.name}`;
+				if (res.soft_warn) btSoftWarn = res.soft_warn;
 			}
 		} catch (err) {
 			setupMessage = err instanceof Error ? err.message : String(err);
@@ -1303,8 +1338,39 @@
 					{#if btScanning}
 						<span class="status-pill linked scan-pill">live</span>
 					{/if}
+					{#if btAdapterCapacity}
+						· up to {btAdapterCapacity} A2DP
+					{/if}
 				</p>
 			</div>
+			{#if btAdapters.length}
+				<ul class="adapter-list" aria-label="Bluetooth adapters">
+					{#each btAdapters as adapter (adapter.hci)}
+						<li
+							class="adapter-chip"
+							class:adapter-dead={adapter.healthy === false}
+							title={adapter.detail || adapter.name || adapter.hci}
+						>
+							<span class="adapter-hci">{adapter.hci}</span>
+							{#if adapter.onboard}
+								<span class="adapter-tag">onboard</span>
+							{:else}
+								<span class="adapter-tag">USB</span>
+							{/if}
+							<span class="status-pill {adapter.healthy === false ? 'missing' : 'linked'}">
+								{adapter.healthy === false ? 'dead' : adapter.powered === false ? 'off' : 'ready'}
+							</span>
+						</li>
+					{/each}
+				</ul>
+			{:else}
+				<p class="hint adapter-empty">
+					Adapters appear when BlueZ is up — onboard alone is fine (1 A2DP sink).
+				</p>
+			{/if}
+			{#if btSoftWarn && healthyAdapterCount <= 1}
+				<p class="setup-warn">{btSoftWarn}</p>
+			{/if}
 			{#if !setupConfigOk}
 				<p class="setup-warn">Config missing — save outputs below to write devices.yaml.</p>
 			{/if}
@@ -1463,7 +1529,9 @@
 									{#if d.kind === 'network_spp'}
 										:{d.listen_port || 1234} · {d.sample_rate || 48000}/{d.channels || 1}
 									{:else if d.mac}
-										{d.mac}
+										{d.mac}{#if d.hci} · {d.hci}{/if}
+									{:else if d.hci}
+										{d.hci}
 									{:else}
 										Bluetooth A2DP
 									{/if}
