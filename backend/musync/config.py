@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+import logging
 import os
+import shutil
+import subprocess
+import wave
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 import yaml
 
@@ -16,6 +20,11 @@ from .models import (
     Source,
     SourceType,
 )
+
+log = logging.getLogger(__name__)
+
+# Virtual / missing-file demo tracks only — never invent this for real media.
+DEMO_DURATION_MS = 180_000
 
 AUDIO_EXTENSIONS = {".wav", ".flac", ".mp3", ".ogg", ".m4a", ".aac"}
 
@@ -220,6 +229,72 @@ def save_devices(devices: list[Device]) -> Path:
     return path
 
 
+def _probe_wav_duration_ms(path: Path) -> Optional[int]:
+    try:
+        with wave.open(str(path), "rb") as wf:
+            frames = wf.getnframes()
+            rate = wf.getframerate()
+            if rate <= 0 or frames < 0:
+                return None
+            return int(round(frames * 1000 / rate))
+    except (wave.Error, OSError, EOFError):
+        return None
+
+
+def _probe_ffprobe_duration_ms(path: Path) -> Optional[int]:
+    ffprobe = shutil.which("ffprobe")
+    if not ffprobe:
+        return None
+    try:
+        proc = subprocess.run(
+            [
+                ffprobe,
+                "-v",
+                "error",
+                "-show_entries",
+                "format=duration",
+                "-of",
+                "default=noprint_wrappers=1:nokey=1",
+                str(path),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=5.0,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        log.debug("ffprobe failed for %s: %s", path, exc)
+        return None
+    if proc.returncode != 0:
+        return None
+    raw = (proc.stdout or "").strip()
+    if not raw:
+        return None
+    try:
+        seconds = float(raw)
+    except ValueError:
+        return None
+    if seconds < 0 or seconds != seconds:  # NaN
+        return None
+    return int(round(seconds * 1000))
+
+
+def probe_audio_duration_ms(path: Path | str) -> Optional[int]:
+    """Return media duration in ms, or None if probing fails.
+
+    Prefers stdlib ``wave`` for ``.wav``, then ``ffprobe`` when installed
+    (common on Pi with ffmpeg). Does not invent a stub length for real files.
+    """
+    p = Path(path)
+    if not p.is_file():
+        return None
+    if p.suffix.lower() == ".wav":
+        wav_ms = _probe_wav_duration_ms(p)
+        if wav_ms is not None:
+            return wav_ms
+    return _probe_ffprobe_duration_ms(p)
+
+
 def discover_local_sources(media_dir: Path | None = None) -> list[Source]:
     root = media_dir or media_library_path()
     sources: list[Source] = []
@@ -232,6 +307,7 @@ def discover_local_sources(media_dir: Path | None = None) -> list[Source]:
         rel = path.relative_to(root)
         source_id = f"local:{rel.as_posix()}"
         resolved = str(path.resolve())
+        duration_ms = probe_audio_duration_ms(path)
         sources.append(
             Source(
                 id=source_id,
@@ -240,8 +316,7 @@ def discover_local_sources(media_dir: Path | None = None) -> list[Source]:
                 path=resolved,
                 locator=resolved,
                 available=True,
-                # Mock / stub duration; real probing can come later on Pi.
-                duration_ms=180_000,
+                duration_ms=duration_ms,
             )
         )
     return sources

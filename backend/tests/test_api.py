@@ -72,6 +72,29 @@ def test_transport_and_sources(client: TestClient) -> None:
     assert stopped.json()["position_ms"] == 0
 
 
+def test_host_local_catalog_activates_as_stub_not_400(client: TestClient) -> None:
+    """Regression: host:*:local used to 400 while other stubs returned 200."""
+    sources = client.get("/api/sources")
+    assert sources.status_code == 200
+    host_local = next(
+        s
+        for s in sources.json()
+        if s["type"] == "local" and not s["available"] and s.get("input_id")
+    )
+    active = client.put("/api/sources/active", json={"id": host_local["id"]})
+    assert active.status_code == 200, active.text
+    assert active.json()["source_type"] == "local"
+    assert active.json()["input_id"] == host_local["input_id"]
+
+    # Playable hub local still works after stub selection.
+    hub = next(s for s in sources.json() if s["available"] and s["type"] == "local")
+    restored = client.put("/api/sources/active", json={"id": hub["id"]})
+    assert restored.status_code == 200
+    playing = client.put("/api/transport", json={"state": "playing"})
+    assert playing.status_code == 200
+    assert playing.json()["state"] == "playing"
+
+
 def test_queue_source_type_switch(client: TestClient) -> None:
     queue = client.get("/api/queue")
     assert queue.status_code == 200

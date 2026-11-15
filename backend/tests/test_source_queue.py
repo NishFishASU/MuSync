@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import wave
+from pathlib import Path
+
 from musync.audio.mock import MockAudioBackend
 from musync.models import (
     Device,
@@ -11,6 +14,16 @@ from musync.models import (
     TransportPut,
     TransportState,
 )
+
+
+def _write_silence_wav(path: Path, *, seconds: float = 0.8, rate: int = 8000) -> None:
+    frames = int(rate * seconds)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with wave.open(str(path), "w") as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(rate)
+        wf.writeframes(b"\x00\x00" * frames)
 
 
 def _backend(tmp_path, monkeypatch) -> MockAudioBackend:
@@ -120,3 +133,15 @@ def test_catalog_active_source_api(tmp_path, monkeypatch) -> None:
     transport = backend.set_active_source(local.id)
     assert transport.source_id == local.id
     assert transport.queue_item_id is not None
+
+
+def test_transport_duration_matches_probed_file(tmp_path, monkeypatch) -> None:
+    media = tmp_path / "media"
+    _write_silence_wav(media / "short_clip.wav", seconds=0.5)
+    backend = _backend(tmp_path, monkeypatch)
+    local = next(q for q in backend.list_queue() if q.available)
+    assert local.duration_ms is not None
+    assert abs(local.duration_ms - 500) <= 20
+    transport = backend.set_active_queue_item(local.id)
+    assert abs(transport.duration_ms - 500) <= 20
+    assert transport.duration_ms != 180_000

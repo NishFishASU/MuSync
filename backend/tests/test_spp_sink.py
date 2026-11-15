@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+from unittest.mock import MagicMock
+
 from fastapi.testclient import TestClient
 
 from musync import app as app_module
 from musync.audio.mock import MockAudioBackend
+from musync.audio.pipewire import PipeWireBackend
 from musync.audio.spp import build_spp_ffmpeg_from_file, build_spp_ffmpeg_from_pulse, spp_tcp_url
 from musync.config import validate_devices
 from musync.models import Device, DeviceKind, DevicePatch
@@ -83,3 +86,66 @@ def test_api_spp_device(tmp_path, monkeypatch) -> None:
     assert patched.status_code == 200
     assert patched.json()["delay_ms"] == 25
     assert patched.json()["kind"] == "network_spp"
+
+
+def test_sync_spp_does_not_restart_healthy_listener(tmp_path, monkeypatch) -> None:
+    """Play → _ensure_graph → _sync_spp must not kill a live phone TCP session."""
+    monkeypatch.setenv("MUSYNC_DEVICES_CONFIG", str(tmp_path / "devices.yaml"))
+    monkeypatch.setenv("MUSYNC_MEDIA_DIR", str(tmp_path / "media"))
+    monkeypatch.setenv("MUSYNC_PW_DRY_RUN", "1")
+    devices = [
+        Device(id="sink-1", name="A", mac="AA:BB:CC:DD:EE:01", hci="hci0"),
+        Device(
+            id="spp-1",
+            name="Phone",
+            kind=DeviceKind.NETWORK_SPP,
+            enabled=True,
+            listen_port=1234,
+        ),
+    ]
+    backend = PipeWireBackend(devices=devices)
+    spp = backend._devices["spp-1"]
+    sentinel = MagicMock()
+    sentinel.poll.return_value = None  # still running
+    backend._spp_procs["spp-1"] = sentinel
+
+    restarts: list[str] = []
+    monkeypatch.setattr(
+        backend,
+        "_restart_spp_listener",
+        lambda d: restarts.append(d.id),
+    )
+
+    backend._sync_spp_listeners()
+    assert restarts == []
+    assert spp.connected is True
+    assert backend._spp_procs["spp-1"] is sentinel
+
+
+def test_sync_spp_revives_dead_listener(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("MUSYNC_DEVICES_CONFIG", str(tmp_path / "devices.yaml"))
+    monkeypatch.setenv("MUSYNC_MEDIA_DIR", str(tmp_path / "media"))
+    monkeypatch.setenv("MUSYNC_PW_DRY_RUN", "1")
+    devices = [
+        Device(id="sink-1", name="A", mac="AA:BB:CC:DD:EE:01", hci="hci0"),
+        Device(
+            id="spp-1",
+            name="Phone",
+            kind=DeviceKind.NETWORK_SPP,
+            enabled=True,
+            listen_port=1234,
+        ),
+    ]
+    backend = PipeWireBackend(devices=devices)
+    dead = MagicMock()
+    dead.poll.return_value = 1
+    backend._spp_procs["spp-1"] = dead
+
+    revived: list[str] = []
+    monkeypatch.setattr(
+        backend,
+        "_restart_spp_listener",
+        lambda d: revived.append(d.id),
+    )
+    backend._sync_spp_listeners()
+    assert revived == ["spp-1"]
