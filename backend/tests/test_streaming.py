@@ -1564,3 +1564,23 @@ def test_parse_ytdlp_version_helpers() -> None:
     assert format_ytdlp_version((2025, 4, 30)) == "2025.04.30"
     assert ytdlp_version_outdated((2025, 4, 30)) is True
     assert ytdlp_version_outdated((2026, 10, 26)) is False
+
+
+def test_ytdlp_bin_finds_local_bin(tmp_path, monkeypatch) -> None:
+    """pipx installs often land in ~/.local/bin — resolve even when PATH is thin."""
+    from musync.streaming import youtube as yt_mod
+
+    local_bin = tmp_path / ".local" / "bin"
+    local_bin.mkdir(parents=True)
+    fake = local_bin / "yt-dlp"
+    fake.write_text("#!/bin/sh\necho 2026.10.26\n", encoding="utf-8")
+    fake.chmod(0o755)
+
+    monkeypatch.delenv("MUSYNC_YTDLP_BIN", raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr(yt_mod.shutil, "which", lambda _name: None)
+
+    found = yt_mod._ytdlp_bin()
+    assert found is not None
+    assert found.endswith("yt-dlp")
+    assert str(tmp_path) in found

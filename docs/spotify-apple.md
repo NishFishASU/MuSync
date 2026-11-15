@@ -97,17 +97,34 @@ Tokens land in `config/spotify_tokens.json` (gitignored, mode 0600).
 librespot advertises a Spotify Connect speaker and writes PCM to Pulse/PipeWire.
 
 ```bash
-# Example (pick a build that matches your Pi OS):
-# cargo install librespot
-# or install a distro/package build that provides `librespot` on PATH
-which librespot
+# Build deps (ALSA headers — cargo fails without these on Raspberry Pi OS):
+sudo apt update
+sudo apt install -y build-essential pkg-config libasound2-dev libssl-dev
+
+# Then (Rust/cargo required — https://rustup.rs ):
+cargo install librespot
+
+# Binary lands in ~/.cargo/bin — MuSync auto-finds it even if PATH is thin
+# (run_pi.sh + systemd also prepend ~/.cargo/bin). Optional override:
+# export MUSYNC_LIBRESPOT_BIN=$HOME/.cargo/bin/librespot
+
+which librespot || ls -l ~/.cargo/bin/librespot
 ```
 
 MuSync starts it as:
 
 `PULSE_SINK=musync_feeder librespot --name MuSync --backend pulseaudio …`
 
+Connect device name defaults to **MuSync** (`MUSYNC_LIBRESPOT_NAME`). Hub play
+**force-transfers** to that device and refuses to start Spotify on the phone.
+If librespot is missing or exits, Play returns a clear UI/API error (no silent
+phone fallback). Optional 30s preview only with `MUSYNC_SPOTIFY_PREVIEW_FALLBACK=1`.
+
 **Spotify Premium is required** for Connect playback control.
+
+After install: **restart MuSync** (`Ctrl-C` → `./scripts/run_pi.sh`, or
+`sudo systemctl restart musync`). Streaming → librespot should show
+**on PATH** / **running** on Play.
 
 ### 4. Run + UI (OAuth Connect link — not a password form)
 

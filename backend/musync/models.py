@@ -543,6 +543,7 @@ class StreamingProviderStatus(BaseModel):
     librespot_available: Optional[bool] = None
     librespot_running: Optional[bool] = None
     librespot_name: Optional[str] = None
+    librespot_bin: Optional[str] = None
     ytdlp_available: Optional[bool] = None
     ytdlp_version: Optional[str] = None
     ytdlp_outdated: Optional[bool] = None
@@ -559,8 +560,9 @@ class StreamingProviderStatus(BaseModel):
     search_limit_max: Optional[int] = None
     limits: list[str] = Field(default_factory=list)
     note: str = ""
-    # YouTube: last yt-dlp/ffmpeg soft-fail reason (search can still work).
+    # Spotify librespot / YouTube yt-dlp|ffmpeg soft-fail reason.
     last_error: Optional[str] = None
+    install_hint: Optional[str] = None
     running: Optional[bool] = None
 
 

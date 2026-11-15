@@ -241,6 +241,8 @@ class PipeWireBackend(AudioBackend):
         self._cast_soft_warn: str = ""
         # YouTube yt-dlp|ffmpeg → feeder soft-fail (search may still work).
         self._youtube_soft_warn: str = ""
+        # Spotify Connect / librespot soft-fail (never plays on the phone).
+        self._spotify_soft_warn: str = ""
         # Soft BT reconnect throttle (demo reboot: paired but A2DP not up yet).
         self._last_bt_reconnect_at: float = 0.0
         self._bt_reconnect_min_interval_s: float = 8.0
@@ -1678,24 +1680,39 @@ class PipeWireBackend(AudioBackend):
         )
 
     def _start_spotify_into_feeder(self, locator: str) -> None:
-        """librespot Connect → PULSE_SINK=musync_feeder; Web API transfers the track."""
+        """librespot Connect → PULSE_SINK=musync_feeder; Web API transfers the track.
+
+        Refuses phone fallback. On Connect/librespot failure, raises ValueError so
+        the API/UI shows the reason (sourceError). Optional 30s mpv preview only
+        when ``MUSYNC_SPOTIFY_PREVIEW_FALLBACK=1``.
+        """
         from ..streaming import get_streaming_service
+        from ..streaming.spotify import preview_fallback_enabled
 
         self._ensure_feeder()
         svc = get_streaming_service()
         if self._env_dry_run():
             log.info("Dry-run Spotify play %s → %s", locator, self._feeder)
+            self._spotify_soft_warn = ""
             return
         try:
             result = svc.play_spotify(locator, feeder=self._feeder)
+            self._spotify_soft_warn = ""
             log.info("Spotify Connect play: %s", result)
         except ValueError as exc:
-            # Degraded: 30s preview via mpv when Connect device missing.
-            preview = svc.spotify.preview_url_for(locator)
-            if preview:
-                log.warning("Spotify Connect failed (%s) — preview via mpv", exc)
-                self._start_mpv_into_feeder(preview, position_ms=0)
-                return
+            self._spotify_soft_warn = f"Spotify play soft-fail: {exc}"
+            log.warning("%s", self._spotify_soft_warn)
+            # Opt-in only — default is raise so UI shows librespot/Connect errors.
+            if preview_fallback_enabled():
+                preview = svc.spotify.preview_url_for(locator)
+                if preview:
+                    log.warning(
+                        "Spotify Connect failed (%s) — preview via mpv "
+                        "(MUSYNC_SPOTIFY_PREVIEW_FALLBACK=1)",
+                        exc,
+                    )
+                    self._start_mpv_into_feeder(preview, position_ms=0)
+                    return
             raise
 
     def _resolve_airplay_source_ref(self) -> Optional[str]:
@@ -2407,6 +2424,12 @@ class PipeWireBackend(AudioBackend):
                     if soft_warn
                     else self._youtube_soft_warn
                 )
+            if self._spotify_soft_warn:
+                soft_warn = (
+                    f"{soft_warn}; {self._spotify_soft_warn}"
+                    if soft_warn
+                    else self._spotify_soft_warn
+                )
             try:
                 self.refresh_sink_map()
                 self._sync_spp_listeners()
@@ -3094,6 +3117,8 @@ class PipeWireBackend(AudioBackend):
                 hint += f"; {soft_warn}"
             if self._youtube_soft_warn:
                 hint += f"; {self._youtube_soft_warn}"
+            if self._spotify_soft_warn:
+                hint += f"; {self._spotify_soft_warn}"
             if self._bt_adapters_detail:
                 hint += f"; {self._bt_adapters_detail}"
             avrcp = self._avrcp.status

@@ -184,3 +184,37 @@ def test_wait_for_connect_device_retries(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr("musync.streaming.spotify.time.sleep", lambda _s: None)
     assert client._wait_for_connect_device(attempts=5, delay_s=0.01) == "dev-1"
     assert calls["n"] >= 3
+
+
+def test_librespot_bin_finds_cargo_home(tmp_path, monkeypatch) -> None:
+    """After cargo install, ~/.cargo/bin/librespot is found even off PATH."""
+    from musync.streaming import spotify as spotify_mod
+
+    cargo_bin = tmp_path / ".cargo" / "bin"
+    cargo_bin.mkdir(parents=True)
+    fake = cargo_bin / "librespot"
+    fake.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    fake.chmod(0o755)
+
+    monkeypatch.delenv("MUSYNC_LIBRESPOT_BIN", raising=False)
+    monkeypatch.delenv("CARGO_HOME", raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("PATH", "/usr/bin")  # no librespot here
+    monkeypatch.setattr(spotify_mod.shutil, "which", lambda _name: None)
+
+    found = spotify_mod._librespot_bin()
+    assert found is not None
+    assert found.endswith("librespot")
+    assert str(tmp_path) in found
+
+
+def test_play_uri_error_mentions_install_hint(tmp_path, monkeypatch) -> None:
+    _token_env(tmp_path, monkeypatch)
+    client = SpotifyClient()
+    monkeypatch.setattr(client, "ensure_librespot", lambda feeder=None: None)
+    monkeypatch.setattr(client, "_wait_for_connect_device", lambda **kwargs: None)
+    client._librespot_last_error = "librespot binary not found on PATH or ~/.cargo/bin."
+
+    with pytest.raises(ValueError, match="libasound2-dev") as excinfo:
+        client.play_uri("spotify:track:abcdefghij0123456789ab")
+    assert "refusing to play on the phone" in str(excinfo.value)

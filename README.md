@@ -64,6 +64,7 @@ config/
   devices.example.yaml            # full 6-sink template
 docs/pi-pipewire.md
 docs/demo-checklist.md                # Qudelix + Phone SPP demo path
+docs/pi-bringup.md                    # Spotify librespot + YouTube yt-dlp on Pi
 docs/spp-network-sink.md              # phone as SPP TCP *output*
 docs/cast-nest-mini.md                # Nest Mini / Chromecast Cast *output*
 docs/phone-bt-source-vs-spp-sink.md   # phone as BT A2DP *source* vs SPP sink
@@ -198,7 +199,8 @@ Missing or broken `devices.yaml` is fine — MuSync boots with **Phone SPP** def
 
 **mDNS:** the hub advertises **`musync.local`** for UI LAN discovery ([docs/mdns.md](docs/mdns.md)). Spotify OAuth cannot use `.local` / `localhost` — register both `127.0.0.1:8080` and `:8081` callbacks ([docs/spotify-apple.md](docs/spotify-apple.md)).
 
-**Demo day:** short Qudelix + Phone SPP checklist → **[docs/demo-checklist.md](docs/demo-checklist.md)**.
+**Demo day:** short Qudelix + Phone SPP checklist → **[docs/demo-checklist.md](docs/demo-checklist.md)**.  
+**Spotify / YouTube on Pi:** librespot (`libasound2-dev` + cargo) + current yt-dlp → **[docs/pi-bringup.md](docs/pi-bringup.md)**.
 
 ### 4. Device setup in the web UI (no YAML copy)
 

@@ -532,11 +532,13 @@ class SourceSession:
                     )
             if current == TransportState.PLAYING:
                 return
+            # Start feeder before flipping to PLAYING so Spotify/YouTube Connect
+            # failures (ValueError) leave transport stopped and surface to the UI.
+            if self._on_feeder_start:
+                self._on_feeder_start()
             self._play_started_wall = time.monotonic()
             self._play_started_pos = self._transport.position_ms
             self._transport.state = TransportState.PLAYING
-            if self._on_feeder_start:
-                self._on_feeder_start()
         elif state == TransportState.PAUSED:
             self._tick_position()
             self._play_started_wall = None

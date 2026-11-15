@@ -43,4 +43,13 @@ export MUSYNC_BACKEND=pipewire
 | Header dry-run | PipeWire down / missing tools — install packages in README |
 | Wrong phone host | Use Pi LAN/Tailscale IP from Wi‑Fi panel, not listen host `0.0.0.0` |
 
-Details: [spp-network-sink.md](spp-network-sink.md), [pi-pipewire.md](pi-pipewire.md).
+## Spotify + YouTube (hub PCM)
+
+If local / A2DP work but Spotify or YouTube do not, follow the full bring-up:
+
+**[pi-bringup.md](pi-bringup.md)** — `libasound2-dev` + `cargo install librespot`,
+current `yt-dlp`, restart MuSync, then verify Connect device **MuSync** and one
+YouTube play.
+
+Details: [spp-network-sink.md](spp-network-sink.md), [pi-pipewire.md](pi-pipewire.md),
+[spotify-apple.md](spotify-apple.md), [youtube.md](youtube.md).

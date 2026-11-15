@@ -67,9 +67,12 @@ sudo yt-dlp -U
 # pipx upgrade yt-dlp
 # python3 -m pip install -U yt-dlp   # only if you manage PATH carefully
 
+# MuSync / run_pi.sh also auto-find ~/.local/bin/yt-dlp (pipx) if PATH is thin.
 which yt-dlp ffmpeg
 yt-dlp --version   # need ≥ 2025.10.14 (see MUSYNC_YTDLP_MIN_VERSION)
 ```
+
+Full Pi checklist (Spotify + YouTube): [pi-bringup.md](./pi-bringup.md).
 
 MuSync plays as:
 

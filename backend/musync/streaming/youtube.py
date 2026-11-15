@@ -51,18 +51,43 @@ def _api_key() -> str:
     return (os.environ.get("MUSYNC_YOUTUBE_API_KEY") or "").strip()
 
 
-def _ytdlp_bin() -> Optional[str]:
-    override = (os.environ.get("MUSYNC_YTDLP_BIN") or "").strip()
+def _is_executable(path: Path) -> bool:
+    try:
+        return path.is_file() and os.access(path, os.X_OK)
+    except OSError:
+        return False
+
+
+def _resolve_tool_bin(name: str, *, env_key: str) -> Optional[str]:
+    """Resolve a tool: env override → PATH → ``~/.local/bin`` (pipx)."""
+    override = (os.environ.get(env_key) or "").strip()
     if override:
-        return override
-    return shutil.which("yt-dlp")
+        as_path = Path(override).expanduser()
+        if _is_executable(as_path):
+            try:
+                return str(as_path.resolve())
+            except OSError:
+                return str(as_path)
+        which = shutil.which(override)
+        return which or override
+    found = shutil.which(name)
+    if found:
+        return found
+    local = Path.home() / ".local" / "bin" / name
+    if _is_executable(local):
+        try:
+            return str(local.resolve())
+        except OSError:
+            return str(local)
+    return None
+
+
+def _ytdlp_bin() -> Optional[str]:
+    return _resolve_tool_bin("yt-dlp", env_key="MUSYNC_YTDLP_BIN")
 
 
 def _ffmpeg_bin() -> Optional[str]:
-    override = (os.environ.get("MUSYNC_FFMPEG_BIN") or "").strip()
-    if override:
-        return override
-    return shutil.which("ffmpeg")
+    return _resolve_tool_bin("ffmpeg", env_key="MUSYNC_FFMPEG_BIN")
 
 
 def _feeder_sink() -> str:

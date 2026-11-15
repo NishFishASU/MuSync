@@ -3033,14 +3033,23 @@
 							{streaming?.spotify?.librespot_running
 								? `running · ${streaming.spotify.librespot_name || 'MuSync'}`
 								: streaming?.spotify?.librespot_available
-									? `on PATH · ${streaming.spotify.librespot_name || 'MuSync'} (starts on Play)`
+									? `found · ${streaming.spotify.librespot_name || 'MuSync'} (starts on Play)`
 									: 'missing — Pi hub PCM needs librespot'}
 						</span>
+						{#if streaming?.spotify?.librespot_bin}
+							<code class="path-chip">{streaming.spotify.librespot_bin}</code>
+						{/if}
 					</p>
 					{#if streaming?.spotify?.librespot_available === false}
 						<p class="hint muted">
-							Laptop mock can search/auth without librespot; on the Pi install
-							<code>librespot</code> for Premium Connect → <code>musync_feeder</code>.
+							On the Pi: <code>sudo apt install -y libasound2-dev && cargo install librespot</code>
+							then restart MuSync (auto-finds <code>~/.cargo/bin/librespot</code>). Premium
+							Connect → <code>musync_feeder</code>. See <code>docs/pi-bringup.md</code>.
+						</p>
+					{/if}
+					{#if streaming?.spotify?.last_error}
+						<p class="hint" role="status">
+							librespot: {streaming.spotify.last_error}
 						</p>
 					{/if}
 					{#if streaming?.spotify?.oauth_hint}

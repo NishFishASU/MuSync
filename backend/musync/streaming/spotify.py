@@ -5,10 +5,11 @@ Env (never commit secrets):
   MUSYNC_SPOTIFY_CLIENT_SECRET
   MUSYNC_SPOTIFY_REDIRECT_URI   (default http://127.0.0.1:8080/api/streaming/spotify/callback)
   MUSYNC_SPOTIFY_TOKEN_PATH     (default config/spotify_tokens.json)
-  MUSYNC_LIBRESPOT_BIN          (default: librespot on PATH)
+  MUSYNC_LIBRESPOT_BIN          (default: librespot on PATH, else ~/.cargo/bin)
   MUSYNC_LIBRESPOT_NAME         (Connect device name, default MuSync)
   MUSYNC_LIBRESPOT_BITRATE      (96|160|320, default 160)
   MUSYNC_PW_FEEDER              (Pulse/PipeWire sink librespot targets)
+  MUSYNC_SPOTIFY_PREVIEW_FALLBACK  (1 = allow 30s mpv preview when Connect fails)
 """
 
 from __future__ import annotations
@@ -31,6 +32,14 @@ import httpx
 from ..config import repo_root
 
 log = logging.getLogger(__name__)
+
+# cargo install librespot drops the binary here when ~/.cargo/bin is not on PATH
+# (common under systemd / non-login shells on the Pi).
+_LIBRESPOT_INSTALL_HINT = (
+    "On the Pi: sudo apt install -y libasound2-dev && cargo install librespot "
+    "(binary lands in ~/.cargo/bin — MuSync auto-finds it). "
+    "Restart MuSync after install. Premium required. See docs/spotify-apple.md"
+)
 
 SPOTIFY_AUTH = "https://accounts.spotify.com"
 SPOTIFY_API = "https://api.spotify.com/v1"
@@ -399,11 +408,66 @@ def _token_path() -> Path:
     return (repo_root() / "config" / "spotify_tokens.json").resolve()
 
 
+def _is_executable(path: Path) -> bool:
+    try:
+        return path.is_file() and os.access(path, os.X_OK)
+    except OSError:
+        return False
+
+
+def _cargo_home_librespot() -> Optional[str]:
+    """Find ``librespot`` under CARGO_HOME / ``~/.cargo/bin`` (post ``cargo install``)."""
+    candidates: list[Path] = []
+    cargo_home = (os.environ.get("CARGO_HOME") or "").strip()
+    if cargo_home:
+        candidates.append(Path(cargo_home).expanduser() / "bin" / "librespot")
+    candidates.append(Path.home() / ".cargo" / "bin" / "librespot")
+    seen: set[str] = set()
+    for path in candidates:
+        try:
+            resolved = str(path.resolve())
+        except OSError:
+            resolved = str(path)
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        if _is_executable(path):
+            return resolved
+    return None
+
+
 def _librespot_bin() -> Optional[str]:
+    """Resolve librespot: env override → PATH → ``~/.cargo/bin/librespot``."""
     override = (os.environ.get("MUSYNC_LIBRESPOT_BIN") or "").strip()
     if override:
-        return override if Path(override).exists() or shutil.which(override) else override
-    return shutil.which("librespot")
+        as_path = Path(override).expanduser()
+        if _is_executable(as_path):
+            try:
+                return str(as_path.resolve())
+            except OSError:
+                return str(as_path)
+        which = shutil.which(override)
+        if which:
+            return which
+        # Keep the override so spawn fails with a clear "No such file" path.
+        return override
+    found = shutil.which("librespot")
+    if found:
+        return found
+    return _cargo_home_librespot()
+
+
+def librespot_install_hint() -> str:
+    return _LIBRESPOT_INSTALL_HINT
+
+
+def preview_fallback_enabled() -> bool:
+    return (os.environ.get("MUSYNC_SPOTIFY_PREVIEW_FALLBACK") or "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
 
 
 def _librespot_name() -> str:
@@ -444,6 +508,7 @@ class SpotifyClient:
         self._oauth_state: Optional[str] = None
         self._oauth_redirect: Optional[str] = None
         self._librespot_proc: Optional[subprocess.Popen[str]] = None
+        self._librespot_last_error: str = ""
         self._load_tokens()
 
     # --- config / status ---
@@ -474,14 +539,16 @@ class SpotifyClient:
             limits.append("Set MUSYNC_SPOTIFY_CLIENT_ID + MUSYNC_SPOTIFY_CLIENT_SECRET")
         if not librespot:
             limits.append(
-                "Install librespot for real PCM into musync_feeder "
-                "(search/auth still work; Play needs Connect device)"
+                "Install librespot for hub PCM (Connect device MuSync). "
+                + _LIBRESPOT_INSTALL_HINT
             )
         if missing:
             limits.append(
                 "Reconnect Spotify (Disconnect → Connect) to approve updated scopes: "
                 + ", ".join(missing)
             )
+        if self._librespot_last_error:
+            limits.append(self._librespot_last_error)
         if not configured:
             note = (
                 "Credentials missing — set MUSYNC_SPOTIFY_CLIENT_ID/SECRET "
@@ -495,18 +562,20 @@ class SpotifyClient:
         elif librespot and running:
             note = (
                 f"librespot running as {_librespot_name()!r} → {_feeder_sink()} "
-                "(Premium Connect)"
+                f"({librespot}; Premium Connect)"
             )
         elif librespot:
             note = (
-                f"librespot on PATH ({_librespot_name()!r}) — starts on Play → "
-                f"{_feeder_sink()}"
+                f"librespot found ({librespot}, name={_librespot_name()!r}) — "
+                f"starts on Play → {_feeder_sink()}"
             )
         else:
             note = (
-                "Connected/search OK on any host — Pi hub PCM needs librespot on PATH "
-                "(laptop mock can use MUSYNC_STREAMING_MOCK=1 without librespot)"
+                "Connected/search OK — Pi hub PCM needs librespot "
+                f"(auto-finds ~/.cargo/bin). {_LIBRESPOT_INSTALL_HINT}"
             )
+        if self._librespot_last_error:
+            note = f"{note}. Last librespot error: {self._librespot_last_error}"
         loopback = default_redirect_uri()
         effective = effective_oauth_redirect_uri()
         scheme = (urllib.parse.urlparse(effective).scheme or "").lower()
@@ -532,6 +601,7 @@ class SpotifyClient:
             "librespot_available": bool(librespot),
             "librespot_running": running,
             "librespot_name": _librespot_name(),
+            "librespot_bin": librespot,
             "feeder": _feeder_sink(),
             "redirect_uri": effective,
             "oauth_loopback_uri": loopback,
@@ -543,6 +613,8 @@ class SpotifyClient:
             "search_limit_max": _search_limit_max(),
             "limits": limits,
             "note": note,
+            "last_error": self._librespot_last_error or None,
+            "install_hint": None if librespot else _LIBRESPOT_INSTALL_HINT,
         }
 
     def configured(self) -> bool:
@@ -747,10 +819,39 @@ class SpotifyClient:
 
     # --- playback ---
 
+    def _librespot_log_path(self) -> Path:
+        path = repo_root() / "config" / "librespot.stderr.log"
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            pass
+        return path
+
+    def _tail_librespot_log(self, *, limit: int = 600) -> str:
+        path = self._librespot_log_path()
+        try:
+            raw = path.read_text(encoding="utf-8", errors="replace").strip()
+        except OSError:
+            return ""
+        if len(raw) > limit:
+            return raw[-limit:]
+        return raw
+
     def ensure_librespot(self, *, feeder: Optional[str] = None) -> Optional[str]:
         """Start librespot targeting the PipeWire/Pulse feeder sink. Returns bin or None."""
         bin_path = _librespot_bin()
         if not bin_path:
+            self._librespot_last_error = (
+                "librespot binary not found on PATH or ~/.cargo/bin. "
+                + _LIBRESPOT_INSTALL_HINT
+            )
+            return None
+        # Explicit override / bad path: fail early with a clear message.
+        if not shutil.which(bin_path) and not _is_executable(Path(bin_path)):
+            self._librespot_last_error = (
+                f"librespot binary not executable: {bin_path!r}. "
+                + _LIBRESPOT_INSTALL_HINT
+            )
             return None
         sink = (feeder or _feeder_sink()).strip() or _feeder_sink()
         with self._lock:
@@ -760,8 +861,14 @@ class SpotifyClient:
             # Pulse/PipeWire: force output onto the MuSync null-sink.
             env["PULSE_SINK"] = sink
             env.setdefault("PIPEWIRE_LATENCY", "128/48000")
+            # Ensure cargo-installed librespot can find dynamic libs when spawned.
+            cargo_bin = str(Path.home() / ".cargo" / "bin")
+            path_now = env.get("PATH") or ""
+            if cargo_bin not in path_now.split(":"):
+                env["PATH"] = f"{cargo_bin}:{path_now}" if path_now else cargo_bin
             cache = repo_root() / "config" / "librespot-cache"
             cache.mkdir(parents=True, exist_ok=True)
+            log_path = self._librespot_log_path()
             cmd = [
                 bin_path,
                 "--name",
@@ -777,25 +884,52 @@ class SpotifyClient:
                 "100",
             ]
             try:
+                log_fh = open(log_path, "wb")  # noqa: SIM115
+            except OSError:
+                log_fh = subprocess.DEVNULL  # type: ignore[assignment]
+            try:
                 self._librespot_proc = subprocess.Popen(
                     cmd,
                     stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    text=True,
+                    stderr=log_fh,
+                    text=False,
                     env=env,
                 )
                 log.info(
-                    "Started librespot %r → PULSE_SINK=%s (pid %s)",
+                    "Started librespot %r → PULSE_SINK=%s (pid %s, bin=%s)",
                     _librespot_name(),
                     sink,
                     self._librespot_proc.pid,
+                    bin_path,
                 )
             except OSError as exc:
-                log.warning("Failed to start librespot: %s", exc)
+                log.warning("Failed to start librespot (%s): %s", bin_path, exc)
                 self._librespot_proc = None
+                self._librespot_last_error = (
+                    f"Failed to start librespot ({bin_path}): {exc}. "
+                    + _LIBRESPOT_INSTALL_HINT
+                )
                 return None
+            finally:
+                if log_fh is not subprocess.DEVNULL:
+                    try:
+                        log_fh.close()
+                    except Exception:  # noqa: BLE001
+                        pass
         # Give Zeroconf a moment to advertise before device lookup.
         time.sleep(1.2)
+        if not self._librespot_alive():
+            detail = self._tail_librespot_log() or "exited with no stderr"
+            self._librespot_last_error = (
+                f"librespot exited immediately ({bin_path}): {detail}. "
+                "Check pipewire-pulse is up and PULSE_SINK=musync_feeder exists "
+                f"(pactl list sinks short). {_LIBRESPOT_INSTALL_HINT}"
+            )
+            log.warning("%s", self._librespot_last_error)
+            with self._lock:
+                self._librespot_proc = None
+            return None
+        self._librespot_last_error = ""
         return bin_path
 
     def stop_librespot(self) -> None:
@@ -833,16 +967,27 @@ class SpotifyClient:
 
         librespot = self.ensure_librespot(feeder=feeder)
         device_id = self._wait_for_connect_device(
-            attempts=5 if librespot else 2,
+            attempts=6 if librespot else 2,
             delay_s=1.0,
         )
         if not device_id:
+            spawn_detail = self._librespot_last_error
+            if not librespot:
+                raise ValueError(
+                    "No MuSync Spotify Connect device — refusing to play on the phone. "
+                    f"librespot did not start (name={_librespot_name()!r}, "
+                    f"PULSE_SINK={feeder or _feeder_sink()}). "
+                    + (f"{spawn_detail} " if spawn_detail else "")
+                    + _LIBRESPOT_INSTALL_HINT
+                )
             raise ValueError(
                 "No MuSync Spotify Connect device — refusing to play on the phone. "
-                "Install/start librespot on the Pi "
-                f"(name={_librespot_name()!r}, PULSE_SINK={feeder or _feeder_sink()}), "
-                "use Spotify Premium, then Queue & play again. "
-                "Without a Connect device, Web API play would keep phone speakers alive."
+                f"librespot is running ({librespot}, name={_librespot_name()!r}) but "
+                "Spotify Web API does not list it yet. Use Spotify Premium, wait a few "
+                "seconds, open Spotify → Devices and confirm MuSync, then Queue & play "
+                "again. Without a Connect device, Web API play would keep phone speakers "
+                "alive."
+                + (f" Last error: {spawn_detail}" if spawn_detail else "")
             )
 
         # Explicit transfer first so the phone Spotify app yields to MuSync.

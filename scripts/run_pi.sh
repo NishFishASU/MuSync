@@ -24,6 +24,20 @@ export MUSYNC_PW_FEEDER="${MUSYNC_PW_FEEDER:-musync_feeder}"
 _DEFAULT_SPOTIFY_REDIRECT="http://127.0.0.1:${MUSYNC_PORT}/api/streaming/spotify/callback"
 export MUSYNC_SPOTIFY_REDIRECT_URI="${MUSYNC_SPOTIFY_REDIRECT_URI:-$_DEFAULT_SPOTIFY_REDIRECT}"
 
+# cargo install librespot → ~/.cargo/bin; pipx yt-dlp → ~/.local/bin.
+# Non-login shells / systemd often omit these — prepend so MuSync + preflight see them.
+_path_prepend() {
+  local dir="$1"
+  [[ -d "$dir" ]] || return 0
+  case ":${PATH:-}:" in
+    *":$dir:"*) ;;
+    *) export PATH="$dir${PATH:+:$PATH}" ;;
+  esac
+}
+_path_prepend "${CARGO_HOME:-$HOME/.cargo}/bin"
+_path_prepend "$HOME/.local/bin"
+unset -f _path_prepend
+
 cd "$ROOT"
 
 # Prefer the project venv — system python3 often lacks uvicorn (ModuleNotFoundError).
@@ -77,8 +91,17 @@ else
 fi
 if command -v librespot >/dev/null 2>&1; then
   echo "  librespot: READY ($(command -v librespot))"
+elif [[ -x "${CARGO_HOME:-$HOME/.cargo}/bin/librespot" ]]; then
+  echo "  librespot: READY (${CARGO_HOME:-$HOME/.cargo}/bin/librespot) — added cargo bin to PATH"
 else
   echo "  librespot: MISSING (Spotify search/OAuth work; hub PCM needs librespot)"
+  echo "             sudo apt install -y libasound2-dev && cargo install librespot"
+  echo "             (MuSync also auto-finds ~/.cargo/bin/librespot — restart after install)"
+fi
+if command -v yt-dlp >/dev/null 2>&1; then
+  echo "  yt-dlp:   READY ($(command -v yt-dlp) · $(yt-dlp --version 2>/dev/null | head -1))"
+else
+  echo "  yt-dlp:   MISSING (YouTube search needs API key; play needs yt-dlp ≥ 2025.10.14)"
 fi
 
 if ! "$PY" -c "import uvicorn" 2>/dev/null; then
