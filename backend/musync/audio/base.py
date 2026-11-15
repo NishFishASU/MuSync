@@ -111,7 +111,7 @@ class AudioBackend(ABC):
 
     @abstractmethod
     def discover_capture_sources(self) -> CaptureDiscoverResponse:
-        """List PipeWire Audio/Source nodes (bluez_input / USB) for host binding."""
+        """List PipeWire Audio/Source nodes (bluez_input / USB / HDMI) for binding."""
         ...
 
     def bluetooth_scan_status(self) -> BluetoothScanStatus:

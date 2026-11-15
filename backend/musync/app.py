@@ -243,7 +243,7 @@ def api_list_inputs() -> list[InputHost]:
 
 @app.get("/api/inputs/discover", response_model=CaptureDiscoverResponse)
 def api_discover_inputs() -> CaptureDiscoverResponse:
-    """Discover bluez_input / USB Audio/Source nodes for host binding."""
+    """Discover bluez_input / USB / HDMI Audio/Source nodes for host binding."""
     return backend.discover_capture_sources()
 
 

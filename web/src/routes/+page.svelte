@@ -757,8 +757,8 @@
 			sources = await listSources();
 			queue = await listQueue();
 			captureMessage = discoveredCapture.length
-				? `${discoveredCapture.length} live source${discoveredCapture.length === 1 ? '' : 's'} (USB auto-bound when found)`
-				: 'No bluez_input / USB-A sources yet — plug a USB sound card (not USB-C PD) or pair phone as A2DP source';
+				? `${discoveredCapture.length} live source${discoveredCapture.length === 1 ? '' : 's'} (USB/HDMI auto-bound when found)`
+				: 'No bluez_input / USB-A / HDMI sources yet — plug a USB sound card or HDMI capture dongle, or pair phone as A2DP source';
 		} catch (err) {
 			captureMessage = err instanceof Error ? err.message : String(err);
 		} finally {
@@ -778,7 +778,7 @@
 				src.capture_path || 'bt_a2dp'
 			);
 			const kind = /** @type {import('$lib/api.js').HostKind} */ (
-				path === 'usb' ? 'pc' : 'phone'
+				path === 'usb' ? 'pc' : path === 'hdmi' ? 'other' : 'phone'
 			);
 			let host = inputs.find((h) => h.id === src.configured_id) ||
 				inputs.find((h) => h.name === src.name) ||
@@ -1507,11 +1507,11 @@
 		<section class="panel inputs-panel" aria-labelledby="inputs-heading">
 			<div class="panel-head">
 				<h2 id="inputs-heading">Inputs</h2>
-				<p class="hint">Phone / PC hosts · up to 4 · no delay/volume</p>
+				<p class="hint">Phone / PC / HDMI hosts · up to 4 · no delay/volume</p>
 			</div>
 			<p class="hint muted">
 				Pi 5 USB-C PD is power-only — PC audio needs a USB-A sound card/interface (not the PD port).
-				Phone: pair as A2DP <em>source</em>, then Refresh.
+				HDMI: plug a capture dongle, then Refresh. Phone: pair as A2DP <em>source</em>, then Refresh.
 			</p>
 			<div class="stub-actions">
 				<button

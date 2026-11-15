@@ -177,10 +177,11 @@ class MediaKind(str, Enum):
 
 
 class CapturePath(str, Enum):
-    """How a phone/PC feeds the Pi."""
+    """How a phone/PC / HDMI capture feeds the Pi."""
 
     BT_A2DP = "bt_a2dp"  # device as A2DP source → bluez_input → feeder
     USB = "usb"  # USB audio interface / UAC from PC → feeder
+    HDMI = "hdmi"  # HDMI / capture-card ALSA → PipeWire → feeder
     NETWORK = "network"  # uploaded file / network path played into feeder
 
 

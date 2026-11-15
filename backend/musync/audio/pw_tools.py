@@ -367,13 +367,43 @@ def discover_sources(
     return [], detail
 
 
+# HDMI / capture-card name fragments (USB HDMI dongles often look like UAC).
+_HDMI_CAPTURE_MARKERS = (
+    "hdmi",
+    "capture",
+    "ms2109",
+    "ms2130",
+    "ms210x",
+    "macrosilicon",
+    "live gamer",
+    "elgato",
+    "avermedia",
+    "magewell",
+    "hdmi2usb",
+    "hd video",
+    "video capture",
+    "usb3h",
+)
+
+
+def looks_like_hdmi_capture(text: str) -> bool:
+    """True when ALSA/PipeWire labels describe an HDMI or capture-card source."""
+    hay = (text or "").lower()
+    if not hay:
+        return False
+    return any(m in hay for m in _HDMI_CAPTURE_MARKERS)
+
+
 def classify_capture_source(node: PwNode) -> str:
-    """Return capture_path value: bt_a2dp | usb | network (fallback)."""
+    """Return capture_path value: bt_a2dp | hdmi | usb | network (fallback)."""
     hay = f"{node.name} {node.description}".lower()
     if "bluez_input" in hay or "bluez_source" in hay or (
         node.mac and "bluez" in hay
     ):
         return "bt_a2dp"
+    # HDMI / capture cards before generic USB — many are USB UAC dongles.
+    if looks_like_hdmi_capture(hay) or node.id.startswith("alsa:hdmi:"):
+        return "hdmi"
     # Prefer real USB sound cards / UAC — not bare onboard "analog" mics.
     if (
         "alsa_input.usb" in hay
@@ -381,6 +411,8 @@ def classify_capture_source(node: PwNode) -> str:
         or "usb audio" in hay
         or ("usb" in hay and ("alsa_input" in hay or "input" in hay))
         or hay.startswith("hw:")
+        or node.id.startswith("alsa:usb:")
+        or (node.id.startswith("alsa:") and not node.id.startswith("alsa:hdmi:"))
     ):
         return "usb"
     if "alsa_input" in hay and "usb" in hay:
@@ -389,11 +421,13 @@ def classify_capture_source(node: PwNode) -> str:
 
 
 def is_capture_candidate(node: PwNode) -> bool:
-    """Filter monitor/virtual sources; keep phone BT + USB audio inputs."""
+    """Filter monitor/virtual sources; keep BT / USB / HDMI capture inputs."""
     hay = f"{node.name} {node.description}".lower()
     if "musync_feeder" in hay or ".monitor" in hay:
         return False
     if "bluez_input" in hay or "bluez_source" in hay:
+        return True
+    if looks_like_hdmi_capture(hay) or node.id.startswith("alsa:hdmi:"):
         return True
     if "alsa_input.usb" in hay or ("usb" in hay and "alsa_input" in hay):
         return True
@@ -425,9 +459,9 @@ _ARECORD_CARD_RE = re.compile(
 )
 
 
-def parse_proc_asound_cards(text: str) -> list[AlsaUsbCard]:
-    """Parse ``/proc/asound/cards``; return USB-Audio / usb entries only."""
-    cards: list[AlsaUsbCard] = []
+def _iter_proc_asound_entries(text: str) -> list[tuple[str, str, str, str, str]]:
+    """Yield (index, card_id, rest, detail, raw) from ``/proc/asound/cards``."""
+    entries: list[tuple[str, str, str, str, str]] = []
     lines = text.splitlines()
     i = 0
     while i < len(lines):
@@ -443,32 +477,68 @@ def parse_proc_asound_cards(text: str) -> list[AlsaUsbCard]:
         ):
             detail = lines[i + 1].strip()
             i += 1
+        raw = f"{line} | {detail}".strip(" |")
+        entries.append((index, card_id, rest, detail, raw))
+        i += 1
+    return entries
+
+
+def parse_proc_asound_cards(text: str) -> list[AlsaUsbCard]:
+    """Parse ``/proc/asound/cards``; return USB-Audio entries (not HDMI capture)."""
+    cards: list[AlsaUsbCard] = []
+    for index, card_id, rest, detail, raw in _iter_proc_asound_entries(text):
         hay = f"{rest} {detail} {card_id}".lower()
+        if looks_like_hdmi_capture(hay):
+            continue
         if "usb" in hay or "usb-audio" in hay:
             name = detail or rest.split(" - ", 1)[-1].strip() or card_id
             cards.append(
-                AlsaUsbCard(
-                    index=index,
-                    id=card_id,
-                    name=name,
-                    raw=f"{line} | {detail}".strip(" |"),
-                )
+                AlsaUsbCard(index=index, id=card_id, name=name, raw=raw)
             )
-        i += 1
+    return cards
+
+
+def parse_proc_asound_hdmi_cards(text: str) -> list[AlsaUsbCard]:
+    """Parse ``/proc/asound/cards``; return HDMI / capture-card entries only."""
+    cards: list[AlsaUsbCard] = []
+    for index, card_id, rest, detail, raw in _iter_proc_asound_entries(text):
+        hay = f"{rest} {detail} {card_id}".lower()
+        if not looks_like_hdmi_capture(hay):
+            continue
+        name = detail or rest.split(" - ", 1)[-1].strip() or card_id
+        cards.append(AlsaUsbCard(index=index, id=card_id, name=name, raw=raw))
     return cards
 
 
 def parse_arecord_l(text: str) -> list[AlsaUsbCard]:
-    """Parse ``arecord -l`` capture devices; keep USB-looking cards."""
+    """Parse ``arecord -l`` capture devices; keep USB-looking cards (not HDMI)."""
     cards: list[AlsaUsbCard] = []
     seen: set[str] = set()
     for m in _ARECORD_CARD_RE.finditer(text):
         index, card_id, name = m.group(1), m.group(2), m.group(3).strip()
         hay = f"{card_id} {name} {m.group(0)}".lower()
+        if looks_like_hdmi_capture(hay):
+            continue
         if "usb" not in hay and "codec" not in hay:
             # Still accept generic UAC labels that omit the word usb.
             if "audio" not in hay:
                 continue
+        if index in seen:
+            continue
+        seen.add(index)
+        cards.append(AlsaUsbCard(index=index, id=card_id, name=name, raw=m.group(0)))
+    return cards
+
+
+def parse_arecord_l_hdmi(text: str) -> list[AlsaUsbCard]:
+    """Parse ``arecord -l``; keep HDMI / capture-card devices only."""
+    cards: list[AlsaUsbCard] = []
+    seen: set[str] = set()
+    for m in _ARECORD_CARD_RE.finditer(text):
+        index, card_id, name = m.group(1), m.group(2), m.group(3).strip()
+        hay = f"{card_id} {name} {m.group(0)}".lower()
+        if not looks_like_hdmi_capture(hay):
+            continue
         if index in seen:
             continue
         seen.add(index)
@@ -516,6 +586,46 @@ def discover_alsa_usb_cards(
     return cards, "; ".join(detail_parts) or "no ALSA USB cards"
 
 
+def discover_alsa_hdmi_cards(
+    *,
+    arecord: Optional[str] = None,
+    proc_asound_path: str = "/proc/asound/cards",
+) -> tuple[list[AlsaUsbCard], str]:
+    """Prefer ``/proc/asound/cards``; fall back to ``arecord -l`` for HDMI/capture."""
+    cards: list[AlsaUsbCard] = []
+    detail_parts: list[str] = []
+    try:
+        from pathlib import Path
+
+        path = Path(proc_asound_path)
+        if path.is_file():
+            text = path.read_text(encoding="utf-8", errors="replace")
+            cards = parse_proc_asound_hdmi_cards(text)
+            detail_parts.append(f"asound cards → {len(cards)} HDMI/capture")
+    except OSError as exc:
+        detail_parts.append(f"asound HDMI unread: {exc}")
+
+    if cards:
+        return cards, "; ".join(detail_parts)
+
+    bin_arecord = arecord if arecord is not None else which("arecord")
+    if not bin_arecord:
+        detail_parts.append("arecord missing")
+        return [], "; ".join(detail_parts) or "no ALSA HDMI/capture cards"
+    try:
+        proc = run_cmd([bin_arecord, "-l"], timeout=4.0)
+        if proc.returncode == 0 and proc.stdout.strip():
+            cards = parse_arecord_l_hdmi(proc.stdout)
+            detail_parts.append(f"arecord -l → {len(cards)} HDMI/capture")
+            return cards, "; ".join(detail_parts)
+        detail_parts.append(
+            (proc.stderr or proc.stdout or "arecord -l failed").strip()
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        detail_parts.append(f"arecord HDMI error: {exc}")
+    return cards, "; ".join(detail_parts) or "no ALSA HDMI/capture cards"
+
+
 def alsa_usb_to_pw_node(card: AlsaUsbCard) -> PwNode:
     """Synthesize a PipeWire-ish source name from an ALSA USB card."""
     # PipeWire pulse/ALSA typically: alsa_input.usb-<vendor>_<product>-00...
@@ -523,9 +633,27 @@ def alsa_usb_to_pw_node(card: AlsaUsbCard) -> PwNode:
     safe_name = re.sub(r"[^A-Za-z0-9]+", "_", card.name).strip("_") or safe_id
     pw_name = f"alsa_input.usb-{safe_name}-00"
     return PwNode(
-        id=f"alsa:{card.index}",
+        id=f"alsa:usb:{card.index}",
         name=pw_name,
         description=card.name,
+        mac="",
+        media_class="Audio/Source",
+    )
+
+
+def alsa_hdmi_to_pw_node(card: AlsaUsbCard) -> PwNode:
+    """Synthesize a PipeWire-ish source name from an ALSA HDMI/capture card."""
+    safe_id = re.sub(r"[^A-Za-z0-9]+", "_", card.id).strip("_") or "HDMI"
+    safe_name = re.sub(r"[^A-Za-z0-9]+", "_", card.name).strip("_") or safe_id
+    # Keep usb- prefix when the dongle is UAC; classify still returns hdmi.
+    if "usb" in f"{card.id} {card.name} {card.raw}".lower():
+        pw_name = f"alsa_input.usb-{safe_name}-00"
+    else:
+        pw_name = f"alsa_input.hdmi-{safe_name}-00"
+    return PwNode(
+        id=f"alsa:hdmi:{card.index}",
+        name=pw_name,
+        description=card.name if looks_like_hdmi_capture(card.name) else f"HDMI {card.name}",
         mac="",
         media_class="Audio/Source",
     )
@@ -551,6 +679,32 @@ def merge_alsa_usb_into_sources(
             continue
         # Also skip if any alsa_input.usb already covers a single-card case later.
         synth = alsa_usb_to_pw_node(card)
+        out.append(synth)
+        existing += f" {synth.name} {synth.description}".lower()
+    return out
+
+
+def merge_alsa_hdmi_into_sources(
+    nodes: list[PwNode],
+    cards: list[AlsaUsbCard],
+) -> list[PwNode]:
+    """Append ALSA-only HDMI/capture cards not already in PipeWire sources."""
+    if not cards:
+        return nodes
+    existing = " ".join(f"{n.name} {n.description}".lower() for n in nodes)
+    out = list(nodes)
+    for card in cards:
+        needles = [
+            card.name.lower(),
+            card.id.lower(),
+            f"hdmi-{card.id}".lower(),
+            f"card {card.index}",
+        ]
+        if any(n and n in existing for n in needles):
+            continue
+        if looks_like_hdmi_capture(existing) and card.name.lower() in existing:
+            continue
+        synth = alsa_hdmi_to_pw_node(card)
         out.append(synth)
         existing += f" {synth.name} {synth.description}".lower()
     return out
@@ -593,6 +747,8 @@ def match_capture_source(
             aliases.extend(["s21", "galaxy", "samsung"])
         if "laptop" in want_name or "usb" in want_name or "pc" in want_name:
             aliases.extend(["usb", "audio", "codec", "headset"])
+        if "hdmi" in want_name or "capture" in want_name:
+            aliases.extend(["hdmi", "capture", "ms2109", "macrosilicon", "elgato"])
         for n in nodes:
             hay = f"{n.description} {n.name}".lower()
             if any(a in hay for a in aliases):
@@ -618,7 +774,7 @@ def build_capture_loopback_commands(
     source_ref: str,
     tools: dict[str, Optional[str]],
 ) -> tuple[list[list[str]], list[str]]:
-    """Wire a PipeWire source into musync_feeder (phone A2DP / USB → fan-out)."""
+    """Wire a PipeWire source into musync_feeder (BT / USB / HDMI → fan-out)."""
     cmds: list[list[str]] = []
     notes: list[str] = []
     pactl = tools.get("pactl")

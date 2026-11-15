@@ -70,6 +70,7 @@ scripts/build_web.sh  run_dev.sh  run_pi.sh  pair_bt600.sh
 
 Phone **input** (S21 FE → `bluez_input` → feeder): [docs/phone-bt-source-vs-spp-sink.md](docs/phone-bt-source-vs-spp-sink.md).  
 USB / PC capture (ALSA auto-detect → feeder): [docs/usb-pc-capture.md](docs/usb-pc-capture.md).  
+HDMI / capture card → feeder: [docs/hdmi-capture.md](docs/hdmi-capture.md).  
 SPP phone **sink**: enable Phone SPP in Device setup, connect Simple Protocol Player to Pi IP:port — [docs/spp-network-sink.md](docs/spp-network-sink.md).  
 **Spotify** (OAuth Connect link in UI → librespot → `musync_feeder`) + **Apple Music** (best-effort search/AirPlay): [docs/spotify-apple.md](docs/spotify-apple.md) · env template `config/streaming.env.example` → `~/musync.env` (auto-loaded by `run_pi.sh`).  
 USB/PC capture needs a **USB-A sound card** — Pi 5 USB-C PD is power-only: [docs/usb-pc-capture.md](docs/usb-pc-capture.md).
@@ -97,8 +98,8 @@ USB/PC capture needs a **USB-A sound card** — Pi 5 USB-C PD is power-only: [do
 | `GET` | `/api/streaming/spotify/login` | Start Spotify OAuth |
 | `GET` | `/api/streaming/search` | `?provider=spotify\|apple&q=` |
 | `POST` | `/api/streaming/queue` | Queue a searched track (`activate` optional) |
-| `GET`/`POST` | `/api/inputs` | Register ≤4 phone/PC hosts (`capture_path`: `bt_a2dp`\|`usb`\|`network`) |
-| `GET` | `/api/inputs/discover` | Live PipeWire sources (`bluez_input` / USB) for host binding |
+| `GET`/`POST` | `/api/inputs` | Register ≤4 hosts (`capture_path`: `bt_a2dp`\|`usb`\|`hdmi`\|`network`) |
+| `GET` | `/api/inputs/discover` | Live PipeWire sources (`bluez_input` / USB / HDMI) for host binding |
 | `POST` | `/api/inputs/{id}/upload` | Network path: upload file that plays into the feeder |
 | `PATCH`/`DELETE` | `/api/inputs/{id}` | Arm / bind endpoint / remove host |
 | `GET` | `/api/wifi` | Wi-Fi status + IPv4 (for SPP / LAN) |
@@ -227,8 +228,8 @@ sudo systemctl enable --now musync
 
 ## Out of scope (this MVP)
 
-HDMI capture / lip-sync picture path, HDMI-local UI, Uno Q / Grove, wired outs, guided clap calibration.
-(Local video audio → feeder is supported; Spotify / Apple / phone-PC capture land as they are wired.)
+Lip-sync picture path (HDMI video display), HDMI-local UI, Uno Q / Grove, wired outs, guided clap calibration.
+(Local video + HDMI/capture **audio** → feeder are supported; picture stays local to the capture/display path.)
 
 ## License
 

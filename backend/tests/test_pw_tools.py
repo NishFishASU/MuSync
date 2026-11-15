@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from musync.audio.pw_tools import (
+    alsa_hdmi_to_pw_node,
     alsa_usb_to_pw_node,
     bluetoothctl_connect,
     build_capture_loopback_commands,
@@ -10,11 +11,15 @@ from musync.audio.pw_tools import (
     find_feeder_null_sink_ids,
     find_musync_loopback_ids,
     is_capture_candidate,
+    looks_like_hdmi_capture,
     match_device_node,
+    merge_alsa_hdmi_into_sources,
     merge_alsa_usb_into_sources,
     normalize_mac,
     parse_arecord_l,
+    parse_arecord_l_hdmi,
     parse_proc_asound_cards,
+    parse_proc_asound_hdmi_cards,
     parse_wpctl_sources,
     parse_wpctl_status,
     PwNode,
@@ -34,6 +39,7 @@ Audio
  │      51. Mic
  │      61. bluez_input.AA_BB_CC_DD_EE_21 [vol: 1.00]
  │      62. alsa_input.usb-Generic_USB_Audio-00.analog-stereo
+ │      63. alsa_input.usb-MACROSILICON_HDMI-00.analog-stereo
  │
  ├─ Filters:
  │
@@ -114,15 +120,19 @@ def test_find_feeder_null_sink_ids_and_listed() -> None:
 def test_parse_wpctl_sources_and_classify() -> None:
     sources = parse_wpctl_sources(SAMPLE_WPCTL)
     bluez = next(s for s in sources if "bluez_input" in s.name)
-    usb = next(s for s in sources if "alsa_input" in s.name)
+    usb = next(s for s in sources if "Generic_USB_Audio" in s.name)
+    hdmi = next(s for s in sources if "HDMI" in s.name)
     mic = next(s for s in sources if s.name == "Mic")
     assert bluez.mac == "AA:BB:CC:DD:EE:21"
     assert classify_capture_source(bluez) == "bt_a2dp"
     assert classify_capture_source(usb) == "usb"
+    assert classify_capture_source(hdmi) == "hdmi"
     assert classify_capture_source(mic) == "network"
     assert is_capture_candidate(bluez)
     assert is_capture_candidate(usb)
+    assert is_capture_candidate(hdmi)
     assert not is_capture_candidate(mic)
+    assert looks_like_hdmi_capture("MACROSILICON HDMI")
 
 
 def test_parse_alsa_usb_cards_and_merge() -> None:
@@ -131,25 +141,43 @@ def test_parse_alsa_usb_cards_and_merge() -> None:
                       bcm2835 Headphones
  1 [CODEC          ]: USB-Audio - USB Audio CODEC
                       Generic USB Audio CODEC at usb-0000:01:00.0-1.2, full speed
+ 2 [MS2109         ]: USB-Audio - USB Video
+                      MACROSILICON USB Video at usb-0000:01:00.0-1.3, high speed
 """
     cards = parse_proc_asound_cards(asound)
     assert len(cards) == 1
     assert cards[0].index == "1"
     assert "USB" in cards[0].name or "CODEC" in cards[0].id
 
+    hdmi_cards = parse_proc_asound_hdmi_cards(asound)
+    assert len(hdmi_cards) == 1
+    assert hdmi_cards[0].index == "2"
+    assert looks_like_hdmi_capture(f"{hdmi_cards[0].id} {hdmi_cards[0].name}")
+
     arecord = """
 **** List of CAPTURE Hardware Devices ****
 card 1: CODEC [USB Audio CODEC], device 0: USB Audio [USB Audio]
+  Subdevices: 1/1
+  Subdevice #0: subdevice #0
+card 2: MS2109 [USB Video], device 0: USB Audio [USB Audio]
   Subdevices: 1/1
   Subdevice #0: subdevice #0
 """
     from_arecord = parse_arecord_l(arecord)
     assert len(from_arecord) == 1
     assert from_arecord[0].name == "USB Audio CODEC"
+    from_hdmi = parse_arecord_l_hdmi(arecord)
+    assert len(from_hdmi) == 1
+    assert "MS2109" in from_hdmi[0].id or "Video" in from_hdmi[0].name
 
     synth = alsa_usb_to_pw_node(cards[0])
     assert synth.name.startswith("alsa_input.usb-")
+    assert synth.id.startswith("alsa:usb:")
     assert classify_capture_source(synth) == "usb"
+
+    hdmi_synth = alsa_hdmi_to_pw_node(hdmi_cards[0])
+    assert hdmi_synth.id.startswith("alsa:hdmi:")
+    assert classify_capture_source(hdmi_synth) == "hdmi"
 
     # Already present PipeWire USB node → do not duplicate.
     existing = [
@@ -166,7 +194,11 @@ card 1: CODEC [USB Audio CODEC], device 0: USB Audio [USB Audio]
     # ALSA-only card fills gap when PipeWire has no USB yet.
     empty_merge = merge_alsa_usb_into_sources([], cards)
     assert len(empty_merge) == 1
-    assert empty_merge[0].id.startswith("alsa:")
+    assert empty_merge[0].id.startswith("alsa:usb:")
+
+    hdmi_merge = merge_alsa_hdmi_into_sources([], hdmi_cards)
+    assert len(hdmi_merge) == 1
+    assert hdmi_merge[0].id.startswith("alsa:hdmi:")
 
 
 def test_build_capture_loopback_commands() -> None:
@@ -192,6 +224,17 @@ def test_build_capture_loopback_commands() -> None:
     assert any("alsa_input.usb-Generic_USB_Audio-00" in line for line in usb_flat)
     assert any("sink=musync_feeder" in line for line in usb_flat)
     assert usb_notes
+
+    hdmi_cmds, hdmi_notes = build_capture_loopback_commands(
+        host_id="input-3",
+        feeder="musync_feeder",
+        source_ref="alsa_input.usb-MACROSILICON_HDMI-00",
+        tools={"pactl": "/usr/bin/pactl", "pw-link": None},
+    )
+    hdmi_flat = [" ".join(c) for c in hdmi_cmds]
+    assert any("MACROSILICON_HDMI" in line for line in hdmi_flat)
+    assert any("sink=musync_feeder" in line for line in hdmi_flat)
+    assert hdmi_notes
 
 
 def test_bluetoothctl_connect_success(monkeypatch) -> None:
