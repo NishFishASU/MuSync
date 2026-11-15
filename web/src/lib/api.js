@@ -95,6 +95,25 @@
  * @property {string} [detail]
  */
 
+
+/**
+ * @typedef {Object} WifiStatus
+ * @property {'mock' | 'nmcli'} backend
+ * @property {boolean} connected
+ * @property {string | null} [ssid]
+ * @property {string[]} ips
+ * @property {string | null} [interface]
+ * @property {string} [detail]
+ */
+
+/**
+ * @typedef {Object} WifiNetwork
+ * @property {string} ssid
+ * @property {boolean} saved
+ * @property {boolean} active
+ * @property {boolean} has_password
+ */
+
 export const SOURCE_TYPES = /** @type {const} */ (['local', 'spotify', 'apple', 'input']);
 export const CAPTURE_PATHS = /** @type {const} */ (['bt_a2dp', 'usb', 'network']);
 export const HOST_KINDS = /** @type {const} */ (['phone', 'pc', 'other']);
@@ -256,6 +275,49 @@ export function setActiveQueueItem(id) {
 	return api('/api/queue/active', {
 		method: 'PUT',
 		body: JSON.stringify({ id })
+	});
+}
+
+
+/** @returns {Promise<WifiStatus>} */
+export function getWifiStatus() {
+	return api('/api/wifi');
+}
+
+/** @returns {Promise<WifiNetwork[]>} */
+export function listWifiNetworks() {
+	return api('/api/wifi/networks');
+}
+
+/**
+ * @param {{ ssid: string, password?: string }} body
+ * @returns {Promise<WifiNetwork>}
+ */
+export function saveWifiNetwork(body) {
+	return api('/api/wifi/networks', {
+		method: 'POST',
+		body: JSON.stringify(body)
+	});
+}
+
+/**
+ * @param {{ ssid: string, password?: string }} body
+ * @returns {Promise<WifiStatus>}
+ */
+export function connectWifi(body) {
+	return api('/api/wifi/connect', {
+		method: 'POST',
+		body: JSON.stringify(body)
+	});
+}
+
+/**
+ * @param {string} ssid
+ * @returns {Promise<null>}
+ */
+export function forgetWifiNetwork(ssid) {
+	return api(`/api/wifi/networks/${encodeURIComponent(ssid)}`, {
+		method: 'DELETE'
 	});
 }
 

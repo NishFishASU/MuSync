@@ -35,6 +35,8 @@ cd web && npm install && npm run dev   # terminal 2 — Vite on :5173
 
 Open the UI on a phone or PC on the same network (bind `MUSYNC_HOST=0.0.0.0` if needed).
 
+Portable hotspot join (pre-save SSID, join, show IP for SPP): [docs/wifi-join.md](docs/wifi-join.md).
+
 ### Tests
 
 ```bash
@@ -59,6 +61,8 @@ config/
   devices.example.yaml            # full 6-sink template
 docs/pi-pipewire.md
 docs/spp-network-sink.md   # Simple Protocol Player TCP output
+docs/wifi-join.md          # phone hotspot join (nmcli)
+backend/musync/wifi/       # nmcli on Pi; mock on laptop
 scripts/build_web.sh  run_dev.sh  run_pi.sh  pair_bt600.sh
 ```
 
@@ -80,6 +84,9 @@ SPP phone sink: enable `spp-1` (`kind: network_spp`) in devices config, Play a l
 | `DELETE` | `/api/queue/{id}` | Remove a queue item |
 | `GET`/`POST` | `/api/inputs` | Register ≤4 phone/PC hosts (`capture_path`: `bt_a2dp`\|`usb`\|`network`) |
 | `PATCH`/`DELETE` | `/api/inputs/{id}` | Arm / change capture path / remove host |
+| `GET` | `/api/wifi` | Wi-Fi status + IPv4 (for SPP / LAN) |
+| `GET`/`POST`/`DELETE` | `/api/wifi/networks` | List / pre-save / forget SSIDs (no passwords returned) |
+| `POST` | `/api/wifi/connect` | Join SSID (`password` optional if saved) |
 
 ## Serving the built UI
 
@@ -196,6 +203,7 @@ sudo systemctl enable --now musync
 | `MUSYNC_PW_DRY_RUN` | auto | `1` force plan-only; `0` force live CLI; unset = dry-run when PipeWire down |
 | `MUSYNC_RELOAD` | unset | Set `1` for uvicorn reload |
 | `MUSYNC_API_PROXY` | `http://127.0.0.1:8080` | Vite dev proxy target (`web/`) |
+| `MUSYNC_WIFI_BACKEND` | `auto` | `auto` / `nmcli` / `mock` — phone-hotspot join ([docs/wifi-join.md](docs/wifi-join.md)) |
 
 ## Out of scope (this MVP)
 

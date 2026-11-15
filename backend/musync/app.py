@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from urllib.parse import unquote
 
 from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.responses import FileResponse, JSONResponse
@@ -26,9 +27,15 @@ from .models import (
     Source,
     Transport,
     TransportPut,
+    WifiConnectRequest,
+    WifiNetwork,
+    WifiSaveRequest,
+    WifiStatus,
 )
+from .wifi import WifiBackend, create_wifi_backend
 
 backend: AudioBackend = create_backend()
+wifi_backend: WifiBackend = create_wifi_backend()
 
 app = FastAPI(
     title="MuSync",
@@ -45,6 +52,12 @@ async def key_error_handler(_request: Request, exc: KeyError) -> JSONResponse:
 @app.exception_handler(ValueError)
 async def value_error_handler(_request: Request, exc: ValueError) -> JSONResponse:
     return JSONResponse(status_code=400, content={"detail": str(exc)})
+
+
+@app.exception_handler(RuntimeError)
+async def runtime_error_handler(_request: Request, exc: RuntimeError) -> JSONResponse:
+    # nmcli / system failures (passwords already redacted in wifi backends)
+    return JSONResponse(status_code=502, content={"detail": str(exc)})
 
 
 @app.get("/api/health", response_model=Health)
@@ -138,6 +151,36 @@ def api_delete_input(host_id: str) -> Response:
     return Response(status_code=204)
 
 
+@app.get("/api/wifi", response_model=WifiStatus)
+def api_wifi_status() -> WifiStatus:
+    """Current Wi-Fi association and IPv4 addresses (for SPP / LAN access)."""
+    return wifi_backend.status()
+
+
+@app.get("/api/wifi/networks", response_model=list[WifiNetwork])
+def api_wifi_list_networks() -> list[WifiNetwork]:
+    """Saved SSIDs only — passwords are never returned."""
+    return wifi_backend.list_networks()
+
+
+@app.post("/api/wifi/networks", response_model=WifiNetwork)
+def api_wifi_save_network(body: WifiSaveRequest) -> WifiNetwork:
+    """Pre-save an SSID (+ optional password) without requiring an immediate join."""
+    return wifi_backend.save_network(body.ssid, body.password)
+
+
+@app.post("/api/wifi/connect", response_model=WifiStatus)
+def api_wifi_connect(body: WifiConnectRequest) -> WifiStatus:
+    """Join a network; omit password when the profile was pre-saved."""
+    return wifi_backend.connect(body.ssid, body.password)
+
+
+@app.delete("/api/wifi/networks/{ssid}", status_code=204)
+def api_wifi_forget_network(ssid: str) -> Response:
+    wifi_backend.forget_network(unquote(ssid))
+    return Response(status_code=204)
+
+
 def _index_html() -> Path:
     return web_root() / "index.html"
 
@@ -159,9 +202,14 @@ if _web.is_dir():
     app.mount("/", StaticFiles(directory=str(_web), html=True), name="web")
 
 
-def create_app(audio_backend: AudioBackend | None = None) -> FastAPI:
-    """Test helper: swap the module-level backend used by route handlers."""
-    global backend
+def create_app(
+    audio_backend: AudioBackend | None = None,
+    wifi: WifiBackend | None = None,
+) -> FastAPI:
+    """Test helper: swap the module-level backends used by route handlers."""
+    global backend, wifi_backend
     if audio_backend is not None:
         backend = audio_backend
+    if wifi is not None:
+        wifi_backend = wifi
     return app

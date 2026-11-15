@@ -188,6 +188,10 @@ body {
 	grid-template-columns: 1fr auto auto auto auto;
 }
 
+.wifi-panel {
+	animation-delay: 0.26s;
+}
+
 .panel-head {
 	display: flex;
 	flex-wrap: wrap;
@@ -551,4 +555,117 @@ input[type='range'] {
 	accent-color: var(--accent);
 	width: 1.05rem;
 	height: 1.05rem;
+}
+
+.wifi-status {
+	margin-bottom: 1rem;
+	padding: 0.75rem 0.85rem;
+	border-radius: 10px;
+	border: 1px solid var(--line);
+	background: rgba(255, 255, 255, 0.03);
+}
+
+.wifi-status[data-ok='true'] {
+	border-color: rgba(94, 207, 154, 0.35);
+}
+
+.wifi-status[data-ok='false'] {
+	border-color: rgba(212, 162, 76, 0.35);
+}
+
+.wifi-line {
+	margin: 0 0 0.35rem;
+	font-size: 0.92rem;
+}
+
+.wifi-line:last-child {
+	margin-bottom: 0;
+}
+
+.wifi-label {
+	display: inline-block;
+	min-width: 2.4rem;
+	margin-right: 0.55rem;
+	color: var(--ink-muted);
+	font-size: 0.78rem;
+	text-transform: uppercase;
+	letter-spacing: 0.04em;
+}
+
+.wifi-ip {
+	font-family: ui-monospace, 'SF Mono', Menlo, monospace;
+	font-size: 0.95rem;
+	color: var(--accent);
+}
+
+.wifi-detail {
+	margin: 0.45rem 0 0;
+	color: var(--ink-muted);
+	font-size: 0.8rem;
+}
+
+.wifi-form {
+	display: grid;
+	gap: 0.15rem;
+	margin-bottom: 0.75rem;
+}
+
+.wifi-form input[type='text'],
+.wifi-form input[type='password'] {
+	width: 100%;
+	padding: 0.55rem 0.7rem;
+	border-radius: 10px;
+	border: 1px solid var(--line);
+	background: rgba(0, 0, 0, 0.25);
+	color: var(--ink);
+	font: inherit;
+}
+
+.wifi-form input:focus {
+	outline: 1px solid rgba(212, 162, 76, 0.55);
+	border-color: rgba(212, 162, 76, 0.45);
+}
+
+.wifi-actions {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 0.55rem;
+	margin: 0.35rem 0 0.25rem;
+}
+
+.wifi-message {
+	margin: 0 0 0.75rem;
+	color: var(--accent);
+	font-size: 0.88rem;
+}
+
+.wifi-list {
+	list-style: none;
+	margin: 0;
+	padding: 0;
+	display: grid;
+	gap: 0.45rem;
+}
+
+.wifi-row {
+	display: grid;
+	grid-template-columns: 1fr auto;
+	gap: 0.5rem 0.75rem;
+	align-items: center;
+	padding: 0.7rem 0.8rem;
+	border-radius: 10px;
+	border: 1px solid transparent;
+	background: rgba(255, 255, 255, 0.03);
+}
+
+.wifi-row-actions {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 0.35rem;
+}
+
+.wifi-empty {
+	color: var(--ink-muted);
+	font-size: 0.88rem;
+	padding: 0.35rem 0.15rem;
 }
