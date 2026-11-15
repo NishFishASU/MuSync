@@ -80,7 +80,7 @@ HDMI / capture card → feeder: [docs/hdmi-capture.md](docs/hdmi-capture.md).
 SPP phone **sink**: enable Phone SPP in Device setup, connect Simple Protocol Player to Pi IP:port — [docs/spp-network-sink.md](docs/spp-network-sink.md).  
 **Nest Mini / Cast** (Wi‑Fi, higher latency than BT): enable in Device setup after Refresh — [docs/cast-nest-mini.md](docs/cast-nest-mini.md).  
 
-**Spotify** (OAuth Connect → librespot → `musync_feeder`) + **AirPlay receive** (shairport-sync → feeder) + **YouTube** (Data API search + yt-dlp → ffmpeg → feeder): [docs/spotify-apple.md](docs/spotify-apple.md), [docs/airplay-receive.md](docs/airplay-receive.md), [docs/youtube.md](docs/youtube.md) · env template `config/streaming.env.example` → `~/musync.env` (auto-loaded by `run_pi.sh`). Pi UI via `musync.local` → Streaming **Connect from laptop** copies `ssh -L` (or `scripts/spotify_oauth_tunnel.sh`).  
+**Spotify** (OAuth Connect → librespot → `musync_feeder`) + **AirPlay receive** (shairport-sync → feeder) + **YouTube** (Data API search + yt-dlp → ffmpeg → feeder): [docs/spotify-apple.md](docs/spotify-apple.md), [docs/airplay-receive.md](docs/airplay-receive.md), [docs/youtube.md](docs/youtube.md) · env template `config/streaming.env.example` → `~/musync.env` (auto-loaded by `run_pi.sh`). Spotify redirect is `127.0.0.1` or `https://…` only (not Pi LAN IP) — Streaming **Connect from laptop** (`ssh -L`) or **Connect from phone** (Cloudflare Tunnel / `scripts/spotify_oauth_https_tunnel.sh`).  
 USB/PC capture needs a **USB-A sound card** — Pi 5 USB-C PD is power-only: [docs/usb-pc-capture.md](docs/usb-pc-capture.md).
 
 ## API (minimum)
@@ -114,6 +114,7 @@ USB/PC capture needs a **USB-A sound card** — Pi 5 USB-C PD is power-only: [do
 | `GET`/`PUT` | `/api/streaming/credentials` | Masked Spotify/YouTube keys → `~/musync.env` (never raw secrets) |
 | `GET` | `/api/streaming/spotify/login` | Start Spotify OAuth |
 | `GET` | `/api/streaming/spotify/ssh-tunnel` | Copyable `ssh -L` for laptop Connect (+ `.sh` / `.ps1`) |
+| `GET` | `/api/streaming/spotify/https-tunnel` | Cloudflare / HTTPS tunnel steps for phone Connect (+ `.sh`) |
 | `GET` | `/api/streaming/search` | `?provider=spotify\|youtube&q=` |
 | `POST` | `/api/streaming/queue` | Queue a searched Spotify/YouTube track (`activate` optional) |
 | `GET`/`POST` | `/api/inputs` | Register ≤4 hosts (`capture_path`: `bt_a2dp`\|`usb`\|`hdmi`\|`airplay`\|`network`) |

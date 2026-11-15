@@ -202,7 +202,15 @@ def normalize_spotify_redirect_uri(
         )
 
     parsed = urllib.parse.urlparse(raw)
+    scheme = (parsed.scheme or "http").lower()
+    path = parsed.path or _CALLBACK_PATH
     if parsed.port is None:
+        # HTTPS public tunnels (Cloudflare, etc.) must keep default :443 omitted —
+        # injecting MUSYNC_PORT would break Dashboard exact-match (…:8080 ≠ …).
+        if scheme == "https":
+            return urllib.parse.urlunparse(
+                (scheme, parsed.netloc, path, "", "", "")
+            )
         host = parsed.hostname or "127.0.0.1"
         # Preserve IPv6 brackets when rebuilding.
         if ":" in host and not host.startswith("["):
@@ -214,15 +222,11 @@ def normalize_spotify_redirect_uri(
                 userinfo += f":{parsed.password}"
             userinfo += "@"
         netloc = f"{userinfo}{host}:{listen}"
-        path = parsed.path or _CALLBACK_PATH
-        return urllib.parse.urlunparse(
-            (parsed.scheme or "http", netloc, path, "", "", "")
-        )
+        return urllib.parse.urlunparse((scheme, netloc, path, "", "", ""))
 
     # Already has a real port — keep scheme/host/port/path; drop query/fragment.
-    path = parsed.path or _CALLBACK_PATH
     return urllib.parse.urlunparse(
-        (parsed.scheme or "http", parsed.netloc, path, "", "", "")
+        (scheme, parsed.netloc, path, "", "", "")
     )
 
 
@@ -248,13 +252,74 @@ def is_forbidden_oauth_host(host: Optional[str]) -> bool:
     return False
 
 
+def is_loopback_oauth_host(host: Optional[str]) -> bool:
+    """True for ``127.0.0.1`` / ``::1`` (Spotify's only allowed plain-HTTP hosts)."""
+    h = (host or "").strip().lower().rstrip(".")
+    if not h:
+        return False
+    if h in {"127.0.0.1", "::1"}:
+        return True
+    # Other 127.0.0.0/8 — Spotify Dashboard only documents 127.0.0.1; treat as loopback-ish.
+    if h.startswith("127."):
+        return True
+    return False
+
+
+def spotify_redirect_rejection_reason(uri: str) -> Optional[str]:
+    """Why Spotify Developer Dashboard will reject this redirect, or ``None`` if OK.
+
+    Spotify allows only:
+    - ``http://127.0.0.1:<port>/…`` (or ``::1``)
+    - ``https://<any-host>/…``
+
+    Plain ``http://<LAN-IP>:8080/…`` is **Invalid redirect URI** — never tell users
+    to register a Pi LAN IP for Spotify OAuth.
+    """
+    raw = (uri or "").strip()
+    if not raw:
+        return "Redirect URI is empty"
+    fixed = normalize_spotify_redirect_uri(raw)
+    parsed = urllib.parse.urlparse(fixed)
+    scheme = (parsed.scheme or "").lower()
+    host = parsed.hostname
+    if is_forbidden_oauth_host(host):
+        return (
+            "Spotify forbids localhost and *.local redirect hosts — "
+            "use http://127.0.0.1:<port>/… or https://…"
+        )
+    if scheme == "https":
+        if not host:
+            return "HTTPS redirect URI needs a hostname"
+        return None
+    if scheme == "http":
+        if is_loopback_oauth_host(host) and parsed.port:
+            return None
+        if host and not is_loopback_oauth_host(host):
+            return (
+                f"Spotify rejects plain http://{host} redirects (Invalid redirect URI). "
+                "Use http://127.0.0.1:<port>/… with an SSH tunnel, or "
+                "https://<tunnel>/api/streaming/spotify/callback (Cloudflare Tunnel). "
+                f"Pi LAN IP is for the UI only (http://{host}:{parsed.port or api_listen_port()}/)."
+            )
+        return "HTTP Spotify redirect must be http://127.0.0.1:<port>/…"
+    return "Spotify redirect must be http://127.0.0.1:… or https://…"
+
+
+def is_spotify_allowed_redirect_uri(uri: str) -> bool:
+    """True when Dashboard will accept this URI (loopback HTTP or HTTPS)."""
+    return spotify_redirect_rejection_reason(uri) is None
+
+
 def redirect_uri_for_request_base(
     base_url: str, *, force_loopback: bool = False
 ) -> str:
-    """Build callback from a request base URL, rewriting forbidden hosts to loopback.
+    """Build callback from a request base URL, rewriting invalid hosts to loopback.
 
     ``force_loopback=True`` always returns ``http://127.0.0.1:<port>/…`` (Pi Connect
     from a musync.local / LAN browser tab still OAuths via loopback — same as laptop mock).
+
+    Non-loopback ``http://`` (Pi LAN IP) is rewritten to loopback — Spotify rejects
+    ``http://<LAN-IP>`` as Invalid redirect URI.
     """
     if force_loopback:
         return default_redirect_uri()
@@ -263,30 +328,68 @@ def redirect_uri_for_request_base(
         return default_redirect_uri()
     candidate = f"{raw}{_CALLBACK_PATH}"
     parsed = urllib.parse.urlparse(candidate)
-    if is_forbidden_oauth_host(parsed.hostname):
-        # Keep listen port from request when present; else MUSYNC_PORT / 8080.
-        port = parsed.port or api_listen_port()
-        return normalize_spotify_redirect_uri(
-            f"http://127.0.0.1:{port}{_CALLBACK_PATH}", port=port
-        )
+    port = parsed.port or api_listen_port()
+    scheme = (parsed.scheme or "http").lower()
+    # Vite / preview ports never receive the OAuth callback.
     for bad in (":5173", ":4173"):
         if bad in raw:
             return default_redirect_uri()
+    if scheme == "https" and parsed.hostname and not is_forbidden_oauth_host(
+        parsed.hostname
+    ):
+        return normalize_spotify_redirect_uri(candidate)
+    # Plain HTTP: only loopback is Spotify-legal.
+    if is_forbidden_oauth_host(parsed.hostname) or not is_loopback_oauth_host(
+        parsed.hostname
+    ):
+        return normalize_spotify_redirect_uri(
+            f"http://127.0.0.1:{port}{_CALLBACK_PATH}", port=port
+        )
     return normalize_spotify_redirect_uri(candidate)
 
 
 def _redirect_uri() -> str:
+    """Effective env redirect — Spotify-illegal values fall back to loopback."""
     configured = (os.environ.get("MUSYNC_SPOTIFY_REDIRECT_URI") or "").strip()
     if not configured:
         return default_redirect_uri()
     fixed = normalize_spotify_redirect_uri(configured)
-    parsed = urllib.parse.urlparse(fixed)
-    if is_forbidden_oauth_host(parsed.hostname):
-        # Env accidentally set to musync.local / localhost — force loopback.
+    reason = spotify_redirect_rejection_reason(fixed)
+    if reason:
+        log.warning(
+            "MUSYNC_SPOTIFY_REDIRECT_URI rejected (%s) — using loopback instead",
+            reason.split("—")[0].strip() if "—" in reason else reason[:80],
+        )
+        parsed = urllib.parse.urlparse(fixed)
         return normalize_spotify_redirect_uri(
             f"http://127.0.0.1:{parsed.port or api_listen_port()}{_CALLBACK_PATH}"
         )
     return fixed
+
+
+def effective_oauth_redirect_uri(*, prefer_loopback: bool = False) -> str:
+    """URI Connect should send to Spotify.
+
+    - Spotify-legal ``MUSYNC_SPOTIFY_REDIRECT_URI`` wins: ``https://…`` (phone /
+      Cloudflare Tunnel) or ``http://127.0.0.1:…`` (SSH tunnel / on-Pi).
+    - Illegal values (``http://<LAN-IP>``, localhost, ``*.local``) fall back to
+      loopback — never invent a LAN-IP callback.
+    - ``prefer_loopback`` is reserved for callers that already chose the Connect
+      default; HTTPS env is never demoted to loopback.
+    """
+    configured = (os.environ.get("MUSYNC_SPOTIFY_REDIRECT_URI") or "").strip()
+    if configured:
+        fixed = normalize_spotify_redirect_uri(configured)
+        if is_spotify_allowed_redirect_uri(fixed):
+            scheme = (urllib.parse.urlparse(fixed).scheme or "").lower()
+            if scheme == "https":
+                # Off-device path — never demote HTTPS to loopback for Connect.
+                return fixed
+            if is_loopback_oauth_host(urllib.parse.urlparse(fixed).hostname):
+                return fixed
+    if prefer_loopback:
+        return default_redirect_uri()
+    return _redirect_uri()
 
 
 def _token_path() -> Path:
@@ -405,6 +508,22 @@ class SpotifyClient:
                 "(laptop mock can use MUSYNC_STREAMING_MOCK=1 without librespot)"
             )
         loopback = default_redirect_uri()
+        effective = effective_oauth_redirect_uri()
+        scheme = (urllib.parse.urlparse(effective).scheme or "").lower()
+        if scheme == "https":
+            oauth_hint = (
+                "Connect uses HTTPS redirect "
+                f"{effective} — register that exact URI in the Spotify Dashboard. "
+                "Keep the Cloudflare (or similar) tunnel up while authorizing. "
+                "Pi LAN IP is UI-only; Spotify rejects http://<LAN-IP> redirects."
+            )
+        else:
+            oauth_hint = (
+                "Connect uses loopback "
+                f"{loopback} — open the callback on the Pi (SSH -L / local UI) at "
+                "127.0.0.1, or set an https:// tunnel URI for phone Connect. "
+                "Spotify rejects http://<LAN-IP> and musync.local redirects."
+            )
         return {
             "provider": "spotify",
             "configured": configured,
@@ -414,13 +533,9 @@ class SpotifyClient:
             "librespot_running": running,
             "librespot_name": _librespot_name(),
             "feeder": _feeder_sink(),
-            "redirect_uri": _redirect_uri(),
+            "redirect_uri": effective,
             "oauth_loopback_uri": loopback,
-            "oauth_hint": (
-                "Connect uses loopback "
-                f"{loopback} — open the callback on the Pi (or SSH -L) at 127.0.0.1; "
-                "musync.local is UI-only. Register that URI in the Spotify Dashboard."
-            ),
+            "oauth_hint": oauth_hint,
             "premium_required": True,
             "scopes": sorted(self.granted_scopes()),
             "missing_scopes": missing,

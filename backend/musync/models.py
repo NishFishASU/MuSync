@@ -571,12 +571,31 @@ class SpotifySshTunnelInfo(BaseModel):
     hint: str = ""
 
 
+class SpotifyHttpsTunnelInfo(BaseModel):
+    """Cloudflare / HTTPS public tunnel helper for phone Spotify Connect."""
+
+    port: int = 8080
+    ready: bool = True
+    command: str = ""
+    example_redirect_uri: str = ""
+    loopback_uri: str = ""
+    callback_path: str = "/api/streaming/spotify/callback"
+    script_sh: str = "/api/streaming/spotify/https-tunnel.sh"
+    steps: list[str] = Field(default_factory=list)
+    hint: str = ""
+    docs: str = ""
+
+
 class StreamingStatus(BaseModel):
     spotify: StreamingProviderStatus
     airplay: AirplayStatus
     youtube: StreamingProviderStatus
     mock_playback: bool = False
     ssh_tunnel: Optional[SpotifySshTunnelInfo] = None
+    https_tunnel: Optional[SpotifyHttpsTunnelInfo] = None
+    # Pi LAN for UI / SPP — not for Spotify OAuth redirects.
+    lan_ip: Optional[str] = None
+    lan_ui_url: Optional[str] = None
 
 
 class StreamingSearchHit(BaseModel):
@@ -641,6 +660,13 @@ class StreamingCredentialsStatus(BaseModel):
     saved: bool = False
     # True only when this PUT created ~/musync.env (seeded PORT + redirect).
     created: bool = False
+    # Pi LAN for UI / SPP — Spotify rejects http://LAN-IP OAuth redirects.
+    lan_ip: str = ""
+    lan_ui_url: str = ""
+    hub_port: int = 8080
+    oauth_loopback_uri: str = ""
+    redirect_uri_allowed: bool = True
+    redirect_uri_warning: str = ""
 
 
 class StreamingCredentialsPut(BaseModel):

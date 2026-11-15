@@ -152,7 +152,13 @@ def _field_status(key: str, *, plaintext: bool = False) -> dict[str, Any]:
 
 def credentials_status() -> dict[str, Any]:
     """Masked credential snapshot for the Streaming UI (no raw secrets)."""
-    from .spotify import default_redirect_uri, normalize_spotify_redirect_uri
+    from ..lan_url import hub_port, lan_ui_url, pick_lan_ip
+    from .spotify import (
+        default_redirect_uri,
+        is_spotify_allowed_redirect_uri,
+        normalize_spotify_redirect_uri,
+        spotify_redirect_rejection_reason,
+    )
 
     path = musync_env_path()
     spotify_id = _env_get("MUSYNC_SPOTIFY_CLIENT_ID")
@@ -161,6 +167,7 @@ def credentials_status() -> dict[str, Any]:
     redirect = _field_status("MUSYNC_SPOTIFY_REDIRECT_URI", plaintext=True)
     # Prefill / repair: never hand the UI ``http://host:/path`` (empty port).
     raw_redirect = (redirect.get("value") or "").strip()
+    redirect_warning = ""
     if not raw_redirect:
         redirect = {
             "set": False,
@@ -169,11 +176,23 @@ def credentials_status() -> dict[str, Any]:
         }
     else:
         fixed = normalize_spotify_redirect_uri(raw_redirect)
+        reason = spotify_redirect_rejection_reason(fixed)
+        if reason:
+            redirect_warning = reason
         redirect = {
             "set": True,
             "masked": "",
             "value": fixed,
         }
+    lan_ip = ""
+    try:
+        from ..wifi import create_wifi_backend
+
+        lan_ip = pick_lan_ip(create_wifi_backend().status().ips)
+    except Exception:  # noqa: BLE001 — credentials GET must never fail soft
+        lan_ip = pick_lan_ip()
+    port = hub_port()
+    lan_url = lan_ui_url([lan_ip] if lan_ip else None, port=port) or ""
     return {
         "env_path": str(path),
         "env_exists": path.is_file(),
@@ -183,6 +202,14 @@ def credentials_status() -> dict[str, Any]:
         "youtube_api_key": _field_status("MUSYNC_YOUTUBE_API_KEY"),
         "spotify_configured": bool(spotify_id and spotify_secret),
         "youtube_configured": bool(yt_key),
+        "lan_ip": lan_ip,
+        "lan_ui_url": lan_url,
+        "hub_port": port,
+        "oauth_loopback_uri": default_redirect_uri(),
+        "redirect_uri_allowed": is_spotify_allowed_redirect_uri(
+            (redirect.get("value") or "")
+        ),
+        "redirect_uri_warning": redirect_warning,
     }
 
 
@@ -266,6 +293,7 @@ def save_streaming_credentials(
         DEFAULT_API_PORT,
         normalize_spotify_redirect_uri,
         redirect_uri_has_empty_port,
+        spotify_redirect_rejection_reason,
     )
 
     mapping: dict[str, Optional[str]] = {
@@ -283,6 +311,7 @@ def save_streaming_credentials(
     # Refuse empty-port redirect (host:/path); persist the normalized form.
     # Only touches the redirect key when the caller is saving it — never
     # rewrites an existing file's redirect as a side effect of other keys.
+    # Hard-block Spotify-illegal http://LAN-IP (Dashboard: Invalid redirect URI).
     redir_key = "MUSYNC_SPOTIFY_REDIRECT_URI"
     if redir_key in updates and updates[redir_key]:
         candidate = updates[redir_key] or ""
@@ -292,7 +321,11 @@ def save_streaming_credentials(
                 candidate,
                 DEFAULT_API_PORT,
             )
-        updates[redir_key] = normalize_spotify_redirect_uri(candidate)
+        fixed = normalize_spotify_redirect_uri(candidate)
+        reason = spotify_redirect_rejection_reason(fixed)
+        if reason:
+            raise ValueError(reason)
+        updates[redir_key] = fixed
 
     if not updates:
         # Soft-fail empty POST — no file write, return current masked status.
@@ -304,8 +337,9 @@ def save_streaming_credentials(
 
     path = musync_env_path()
     creating = not path.is_file()
-    # First create only: seed MUSYNC_PORT=8080 + default redirect. Never
-    # inject these into an existing musync.env (preserve Pi-IP / :8081 / etc.).
+    # First create only: seed MUSYNC_PORT=8080 + loopback redirect (never LAN IP —
+    # Spotify rejects http://<LAN-IP>). Never inject into an existing musync.env
+    # (preserve :8081 / https tunnel URI / etc.).
     if creating:
         if not (updates.get("MUSYNC_PORT") or "").strip():
             updates["MUSYNC_PORT"] = str(DEFAULT_API_PORT)

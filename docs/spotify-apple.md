@@ -27,11 +27,17 @@ Secrets stay in environment variables / local files. Never commit client secrets
 | UI host | `musync.local` or Pi IP OK for browsing | `127.0.0.1` |
 | Hub PCM | Needs **librespot** on PATH + Premium | Optional (`MUSYNC_STREAMING_MOCK=1` plays without librespot) |
 
-**Connect Spotify always uses loopback** (`?loopback=1`) so opening the UI via
-`http://musync.local:8080` still authorizes with `127.0.0.1` — matching the laptop mock
-and the Dashboard URI. After Spotify redirects to the Pi’s `127.0.0.1` callback, finish
-OAuth in a browser **on the Pi** (local display / VNC) or via an SSH tunnel from your
-laptop (Streaming tab → **Connect from laptop**, or the commands below).
+**Connect Spotify** uses `MUSYNC_SPOTIFY_REDIRECT_URI` when it is Spotify-legal
+(`http://127.0.0.1:…` or `https://…`). Otherwise it defaults to loopback. Opening the UI
+via `http://musync.local:8080` or `http://<Pi-IP>:8080` is fine for browsing — but Spotify
+**rejects** those hosts as redirect URIs (Dashboard: **Invalid redirect URI**). Finish
+OAuth with either:
+
+1. **Laptop (zero cost):** SSH local-forward so `127.0.0.1` on the laptop hits the Pi
+   (Streaming → **Connect from laptop**), or
+2. **Phone / hotspot:** HTTPS public tunnel (Cloudflare quick tunnel) and set
+   `MUSYNC_SPOTIFY_REDIRECT_URI=https://…/api/streaming/spotify/callback`
+   (Streaming → **Connect from phone**).
 
 ### 1. Spotify Developer app
 
@@ -39,17 +45,20 @@ laptop (Streaming tab → **Connect from laptop**, or the commands below).
 2. Add **both** loopback redirect URIs (Spotify allows multiple; must match the port you run):
    - `http://127.0.0.1:8080/api/streaming/spotify/callback`
    - `http://127.0.0.1:8081/api/streaming/spotify/callback`
-3. Optional Pi LAN OAuth (phone browser on the hub IP — **not** mDNS); use Connect with
-   `?loopback=0` only if this URI is registered:
-   - `http://<Pi-IP>:8080/api/streaming/spotify/callback`
-4. **Do not** register `localhost` or `musync.local` — Spotify forbids those redirect hosts.
+3. Optional phone / off-Pi Connect — add your HTTPS tunnel callback (exact host from
+   `cloudflared`):
+   - `https://YOUR-SUBDOMAIN.trycloudflare.com/api/streaming/spotify/callback`
+4. **Do not** register `localhost`, `musync.local`, or plain `http://<Pi-IP>:8080/…` —
+   Spotify forbids those (LAN IP → **Invalid redirect URI**). Pi IP is for the **UI URL**
+   only (Wi‑Fi tab / Streaming shows it clearly).
 5. Copy **Client ID** and **Client Secret**.
 
 ### 2. Env on the Pi
 
 **Defaults:** `MUSYNC_PORT=8080` and
 `MUSYNC_SPOTIFY_REDIRECT_URI=http://127.0.0.1:8080/api/streaming/spotify/callback`
-(`run_pi.sh` and `deploy/systemd/musync.service` set these when unset).
+(`run_pi.sh` and `deploy/systemd/musync.service` set these when unset). First-run
+Streaming **Save** seeds the same loopback URI — never a LAN IP.
 
 ```bash
 # Prefer a file that is never committed, e.g. ~/musync.env
@@ -57,7 +66,8 @@ export MUSYNC_SPOTIFY_CLIENT_ID="…"
 export MUSYNC_SPOTIFY_CLIENT_SECRET="…"
 # Pi default (omit to use run_pi.sh / systemd default):
 # export MUSYNC_SPOTIFY_REDIRECT_URI="http://127.0.0.1:8080/api/streaming/spotify/callback"
-# Browser on another device → use http://<Pi-IP>:8080/... instead (also in Dashboard).
+# Phone Connect (while cloudflared is up) — also register in Spotify Dashboard:
+# export MUSYNC_SPOTIFY_REDIRECT_URI="https://YOUR-SUBDOMAIN.trycloudflare.com/api/streaming/spotify/callback"
 # optional:
 # export MUSYNC_SPOTIFY_TOKEN_PATH="$HOME/MuSync/config/spotify_tokens.json"
 # export MUSYNC_LIBRESPOT_BIN=librespot
@@ -99,9 +109,9 @@ export MUSYNC_BACKEND=pipewire
 3. **Streaming** → paste Client ID/Secret → **Save to musync.env**
    (redirect defaults to `http://127.0.0.1:8080/…`). Status shows **OAuth callback**,
    **librespot** (on PATH / running), and scopes.
-4. **Connect Spotify** — authorize URL uses **loopback** `127.0.0.1` (not musync.local).
-   Complete the Spotify redirect in a browser that can open `http://127.0.0.1:8080`
-   on the Pi (local UI, VNC, or SSH tunnel from a laptop — see below).
+4. **Connect Spotify** — uses loopback `127.0.0.1` or your saved `https://…` redirect
+   (never `musync.local` / Pi LAN IP). Complete OAuth via SSH tunnel (laptop) or
+   HTTPS tunnel (phone) — see below.
 5. **Queue** → search a track → **Queue & play**
 6. Confirm **librespot** status turns running on Play; audio on Qudelix / SPP
 
@@ -111,8 +121,9 @@ form or edit `~/musync.env`, then **Connect Spotify** again. Empty keys soft-fai
 
 ### Connect from laptop (SSH tunnel)
 
-Spotify’s callback is always `http://127.0.0.1:<port>/…`. When you browse the hub at
-`musync.local` / Pi IP, tunnel that port to your laptop:
+Zero-cost path when `MUSYNC_SPOTIFY_REDIRECT_URI` is loopback. When you browse the hub at
+`musync.local` / Pi IP, tunnel that port to your laptop so Spotify’s `127.0.0.1`
+callback lands on the Pi:
 
 1. Streaming → **Connect from laptop (SSH tunnel)** → **Copy** (or download `.sh` / `.ps1`).
 2. On the laptop (keep the window open):
@@ -127,6 +138,32 @@ Spotify’s callback is always `http://127.0.0.1:<port>/…`. When you browse th
 
 Override SSH user with `MUSYNC_SSH_USER` (default `pi`). API:
 `GET /api/streaming/spotify/ssh-tunnel` (+ `.sh` / `.ps1` downloads).
+
+### Connect from phone (HTTPS tunnel)
+
+Spotify will **not** accept `http://<Pi-IP>:8080/api/streaming/spotify/callback` in the
+Developer Dashboard. For Connect from a phone on the hotspot:
+
+1. On the Pi (hub already running):
+
+   ```bash
+   # install cloudflared once, then:
+   ./scripts/spotify_oauth_https_tunnel.sh
+   # or: cloudflared tunnel --url http://127.0.0.1:8080
+   ```
+
+2. Copy the printed `https://….trycloudflare.com` URL.
+3. Spotify Dashboard → Redirect URIs → add
+   `https://….trycloudflare.com/api/streaming/spotify/callback` (exact host).
+4. Phone (or any browser): open the Pi UI (`http://<Pi-IP>:8080` from Wi‑Fi / QR) →
+   Streaming → paste that full HTTPS callback into **Spotify redirect URI** →
+   **Save to musync.env**.
+5. Keep the tunnel running → **Connect Spotify** → approve.
+6. After Connect succeeds you can stop `cloudflared`; tokens stay on the Pi.
+   Search/play from the phone over LAN/hotspot as usual.
+
+Streaming → **Connect from phone (HTTPS tunnel)** shows the same steps + copyable
+command. API: `GET /api/streaming/spotify/https-tunnel` (+ `.sh` download).
 
 ### Pi test checklist
 
