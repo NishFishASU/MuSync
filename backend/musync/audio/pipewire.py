@@ -1230,9 +1230,11 @@ class PipeWireBackend(AudioBackend):
         try:
             from ..streaming import get_streaming_service
 
-            get_streaming_service().stop_spotify()
+            svc = get_streaming_service()
+            svc.stop_spotify()
+            svc.stop_youtube()
         except Exception as exc:  # noqa: BLE001
-            log.debug("Spotify stop: %s", exc)
+            log.debug("Streaming stop: %s", exc)
         if self._player_proc is None:
             return
         proc = self._player_proc
@@ -1390,6 +1392,18 @@ class PipeWireBackend(AudioBackend):
         self._active_capture_host_id = "apple-airplay"
         log.info("Apple AirPlay capture %s → %s", source_ref, self._feeder)
 
+    def _start_youtube_into_feeder(self, locator: str) -> None:
+        """yt-dlp audio → ffmpeg → Pulse sink musync_feeder."""
+        from ..streaming import get_streaming_service
+
+        self._ensure_feeder()
+        svc = get_streaming_service()
+        if self._env_dry_run():
+            log.info("Dry-run YouTube play %s → %s", locator, self._feeder)
+            return
+        result = svc.play_youtube(locator, feeder=self._feeder)
+        log.info("YouTube play: %s", result)
+
     def _start_player_process(self) -> None:
         """Start feeder: local mpv, streaming, network upload, or BT/USB capture.
 
@@ -1407,6 +1421,11 @@ class PipeWireBackend(AudioBackend):
         if transport.source_type == SourceType.APPLE:
             # Honest DRM limits — raise so UI shows AirPlay / MusicKit guidance.
             self._start_apple_into_feeder()
+            return
+
+        if transport.source_type == SourceType.YOUTUBE:
+            locator = self._session.active_locator() or ""
+            self._start_youtube_into_feeder(locator)
             return
 
         if transport.source_type == SourceType.INPUT and transport.input_id:
@@ -2405,6 +2424,7 @@ class PipeWireBackend(AudioBackend):
                 graph_dry_run=dry,
                 spotify_ready=stream.spotify.authenticated,
                 apple_ready=stream.apple.authenticated,
+                youtube_ready=stream.youtube.configured,
                 detail=(
                     f"{detail}; mapped={mapped}/{len(devices)}; "
                     f"planned_links={links}; dry_run={dry}; "

@@ -30,6 +30,7 @@ def _backend(tmp_path, monkeypatch) -> MockAudioBackend:
     monkeypatch.delenv("MUSYNC_APPLE_KEY_ID", raising=False)
     monkeypatch.delenv("MUSYNC_APPLE_PRIVATE_KEY_PATH", raising=False)
     monkeypatch.delenv("MUSYNC_APPLE_AIRPLAY_SOURCE", raising=False)
+    monkeypatch.delenv("MUSYNC_YOUTUBE_API_KEY", raising=False)
     monkeypatch.delenv("MUSYNC_STREAMING_MOCK", raising=False)
     reset_streaming_service()
     return MockAudioBackend(
@@ -56,8 +57,11 @@ def test_streaming_status_without_credentials(tmp_path, monkeypatch) -> None:
     assert body["spotify"]["configured"] is False
     assert body["spotify"]["authenticated"] is False
     assert body["apple"]["configured"] is False
+    assert body["youtube"]["configured"] is False
     note = body["spotify"]["note"].lower()
     assert "missing" in note or "credential" in note or "unavailable" in note or "stub" in note
+    yt_note = body["youtube"]["note"].lower()
+    assert "key" in yt_note or "missing" in yt_note or "unavailable" in yt_note
 
 
 def test_mock_local_still_works_without_streaming_creds(tmp_path, monkeypatch) -> None:
@@ -531,7 +535,7 @@ def test_now_playing_api_for_local(tmp_path, monkeypatch) -> None:
     assert res.status_code == 200
     body = res.json()
     assert "title" in body
-    assert body.get("source_type") in {None, "local", "spotify", "apple", "input"}
+    assert body.get("source_type") in {None, "local", "spotify", "apple", "youtube", "input"}
     # Mock laptop path always surfaces sample title / artist / album / cover.
     assert body.get("title")
     assert body.get("artist")
@@ -620,3 +624,169 @@ def test_patch_to_spotify_hub_without_uri_stays_stub(tmp_path, monkeypatch) -> N
     )
     assert patched.source_type == SourceType.SPOTIFY
     assert patched.available is False
+
+
+def test_youtube_search_requires_api_key(tmp_path, monkeypatch) -> None:
+    from musync.app import create_app
+
+    backend = _backend(tmp_path, monkeypatch)
+    client = TestClient(create_app(audio_backend=backend))
+    res = client.get("/api/streaming/search", params={"provider": "youtube", "q": "lofi"})
+    assert res.status_code == 400
+    detail = res.json()["detail"].lower()
+    assert "youtube" in detail and ("api" in detail or "key" in detail or "musync.env" in detail)
+
+
+def test_youtube_queue_playable_with_mock(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("MUSYNC_YOUTUBE_API_KEY", "test-key")
+    monkeypatch.setenv("MUSYNC_STREAMING_MOCK", "1")
+    monkeypatch.setenv("MUSYNC_DEVICES_CONFIG", str(tmp_path / "devices.yaml"))
+    monkeypatch.setenv("MUSYNC_MEDIA_DIR", str(tmp_path / "media"))
+    reset_streaming_service()
+
+    backend = MockAudioBackend(
+        devices=[
+            Device(
+                id="sink-1",
+                name="Living Room",
+                mac="AA:BB:CC:DD:EE:01",
+                hci="hci0",
+                connected=True,
+            )
+        ]
+    )
+    from musync.streaming import get_streaming_service
+
+    assert get_streaming_service().youtube_ready() is True
+    assert get_streaming_service().youtube_playable() is True
+
+    item = backend.add_queue_item(
+        QueueItemCreate(
+            source_type=SourceType.YOUTUBE,
+            locator="youtube:dQw4w9WgXcQ",
+            title="Never Gonna Give You Up",
+            artist="Rick Astley",
+            duration_ms=213_000,
+        )
+    )
+    assert item.available is True
+    transport = backend.set_active_queue_item(item.id)
+    playing = backend.set_transport(TransportPut(state=TransportState.PLAYING))
+    assert playing.state == TransportState.PLAYING
+    assert transport.source_type == SourceType.YOUTUBE
+
+
+def test_youtube_hub_without_video_stays_stub(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("MUSYNC_YOUTUBE_API_KEY", "test-key")
+    monkeypatch.setenv("MUSYNC_STREAMING_MOCK", "1")
+    monkeypatch.setenv("MUSYNC_DEVICES_CONFIG", str(tmp_path / "devices.yaml"))
+    monkeypatch.setenv("MUSYNC_MEDIA_DIR", str(tmp_path / "media"))
+    reset_streaming_service()
+
+    backend = MockAudioBackend(
+        devices=[
+            Device(
+                id="sink-1",
+                name="Living Room",
+                mac="AA:BB:CC:DD:EE:01",
+                hci="hci0",
+                connected=True,
+            )
+        ]
+    )
+    item = backend.add_queue_item(
+        QueueItemCreate(source_type=SourceType.YOUTUBE, title="Hub placeholder")
+    )
+    assert item.available is False
+    assert item.locator == "youtube:hub"
+
+
+def test_youtube_search_mocked_api(tmp_path, monkeypatch) -> None:
+    from unittest.mock import MagicMock, patch
+
+    from musync.app import create_app
+
+    backend = _backend(tmp_path, monkeypatch)
+    monkeypatch.setenv("MUSYNC_YOUTUBE_API_KEY", "test-key")
+    reset_streaming_service()
+    client = TestClient(create_app(audio_backend=backend))
+
+    search_resp = MagicMock()
+    search_resp.status_code = 200
+    search_resp.raise_for_status = MagicMock()
+    search_resp.json.return_value = {
+        "items": [
+            {
+                "id": {"videoId": "dQw4w9WgXcQ"},
+                "snippet": {
+                    "title": "Never Gonna Give You Up",
+                    "channelTitle": "Rick Astley",
+                    "thumbnails": {
+                        "medium": {"url": "https://i.ytimg.com/vi/dQw4w9WgXcQ/mqdefault.jpg"}
+                    },
+                },
+            }
+        ]
+    }
+
+    videos_resp = MagicMock()
+    videos_resp.status_code = 200
+    videos_resp.raise_for_status = MagicMock()
+    videos_resp.json.return_value = {
+        "items": [
+            {
+                "id": "dQw4w9WgXcQ",
+                "contentDetails": {"duration": "PT3M33S"},
+            }
+        ]
+    }
+
+    mock_client = MagicMock()
+    mock_client.__enter__.return_value = mock_client
+    mock_client.__exit__.return_value = False
+
+    def _get(url, params=None):  # noqa: ANN001
+        if "search" in url:
+            return search_resp
+        return videos_resp
+
+    mock_client.get.side_effect = _get
+
+    with patch("musync.streaming.youtube.httpx.Client", return_value=mock_client):
+        res = client.get(
+            "/api/streaming/search", params={"provider": "youtube", "q": "rick"}
+        )
+    assert res.status_code == 200
+    body = res.json()
+    assert body["provider"] == "youtube"
+    assert len(body["hits"]) == 1
+    assert body["hits"][0]["uri"] == "youtube:dQw4w9WgXcQ"
+    assert body["hits"][0]["duration_ms"] == 213_000
+
+    queued = client.post(
+        "/api/streaming/queue",
+        json={
+            "provider": "youtube",
+            "uri": "youtube:dQw4w9WgXcQ",
+            "title": "Never Gonna Give You Up",
+            "artist": "Rick Astley",
+            "activate": True,
+        },
+    )
+    assert queued.status_code == 201
+    qbody = queued.json()
+    assert qbody["source_type"] == "youtube"
+    assert qbody["locator"] == "youtube:dQw4w9WgXcQ"
+
+
+def test_parse_youtube_locator_helpers() -> None:
+    from musync.streaming.youtube import parse_iso8601_duration_ms, parse_video_id
+
+    assert parse_video_id("youtube:dQw4w9WgXcQ") == "dQw4w9WgXcQ"
+    assert parse_video_id("https://www.youtube.com/watch?v=dQw4w9WgXcQ") == "dQw4w9WgXcQ"
+    assert parse_video_id("https://youtu.be/dQw4w9WgXcQ") == "dQw4w9WgXcQ"
+    assert parse_video_id("https://www.youtube.com/shorts/dQw4w9WgXcQ") == "dQw4w9WgXcQ"
+    assert parse_video_id("not-a-real-id") is None
+    assert parse_video_id("short") is None
+    assert parse_iso8601_duration_ms("PT1H2M3S") == ((1 * 3600) + (2 * 60) + 3) * 1000
+    assert parse_iso8601_duration_ms("PT45S") == 45_000

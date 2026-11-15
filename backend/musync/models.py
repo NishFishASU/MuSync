@@ -209,6 +209,7 @@ class SourceType(str, Enum):
     LOCAL = "local"
     SPOTIFY = "spotify"
     APPLE = "apple"
+    YOUTUBE = "youtube"
     INPUT = "input"
 
 
@@ -238,9 +239,15 @@ MAX_INPUT_HOSTS = 4
 
 # Source types that can feed PCM when their prerequisites are met.
 # INPUT is playable when the bound host is live (connected capture endpoint).
-# SPOTIFY / APPLE become playable when streaming credentials (+ player) are ready.
+# SPOTIFY / APPLE / YOUTUBE become playable when streaming credentials (+ player) are ready.
 PLAYABLE_SOURCE_TYPES = frozenset(
-    {SourceType.LOCAL, SourceType.INPUT, SourceType.SPOTIFY, SourceType.APPLE}
+    {
+        SourceType.LOCAL,
+        SourceType.INPUT,
+        SourceType.SPOTIFY,
+        SourceType.APPLE,
+        SourceType.YOUTUBE,
+    }
 )
 
 
@@ -445,16 +452,19 @@ class Health(BaseModel):
     graph_dry_run: bool = True
     spotify_ready: bool = False
     apple_ready: bool = False
+    youtube_ready: bool = False
 
 
 class StreamingProviderStatus(BaseModel):
-    provider: Literal["spotify", "apple"]
+    provider: Literal["spotify", "apple", "youtube"]
     configured: bool = False
     authenticated: bool = False
     display_name: Optional[str] = None
     librespot_available: Optional[bool] = None
     librespot_running: Optional[bool] = None
     librespot_name: Optional[str] = None
+    ytdlp_available: Optional[bool] = None
+    ffmpeg_available: Optional[bool] = None
     feeder: Optional[str] = None
     redirect_uri: Optional[str] = None
     premium_required: Optional[bool] = None
@@ -468,11 +478,12 @@ class StreamingProviderStatus(BaseModel):
 class StreamingStatus(BaseModel):
     spotify: StreamingProviderStatus
     apple: StreamingProviderStatus
+    youtube: StreamingProviderStatus
     mock_playback: bool = False
 
 
 class StreamingSearchHit(BaseModel):
-    provider: Literal["spotify", "apple"]
+    provider: Literal["spotify", "apple", "youtube"]
     id: str
     uri: str
     title: str
@@ -483,7 +494,7 @@ class StreamingSearchHit(BaseModel):
 
 
 class StreamingSearchResponse(BaseModel):
-    provider: Literal["spotify", "apple"]
+    provider: Literal["spotify", "apple", "youtube"]
     query: str
     hits: list[StreamingSearchHit] = Field(default_factory=list)
 
@@ -491,7 +502,7 @@ class StreamingSearchResponse(BaseModel):
 class StreamingQueueAdd(BaseModel):
     """Add a searched streaming track to the song queue (hub, no host binding)."""
 
-    provider: Literal["spotify", "apple"]
+    provider: Literal["spotify", "apple", "youtube"]
     uri: str
     title: Optional[str] = None
     artist: Optional[str] = None

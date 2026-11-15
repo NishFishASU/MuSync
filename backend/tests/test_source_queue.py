@@ -1,4 +1,4 @@
-"""Song-level source switching: local | spotify | apple | input."""
+"""Song-level source switching: local | spotify | apple | youtube | input."""
 
 from __future__ import annotations
 
@@ -58,11 +58,12 @@ def test_catalog_has_typed_sources(tmp_path, monkeypatch) -> None:
     assert SourceType.LOCAL in types
     assert SourceType.SPOTIFY in types
     assert SourceType.APPLE in types
+    assert SourceType.YOUTUBE in types
     assert SourceType.INPUT in types
     non_local = [s for s in sources if s.type != SourceType.LOCAL]
     assert non_local
-    assert all(s.type.value in {"spotify", "apple", "input"} for s in non_local)
-    # Hub Spotify/Apple placeholders stay unavailable until OAuth/track URI;
+    assert all(s.type.value in {"spotify", "apple", "youtube", "input"} for s in non_local)
+    # Hub stream placeholders stay unavailable until credentials/track URI;
     # live BT input is available on mock.
     assert all(not s.available for s in non_local if s.type != SourceType.INPUT)
     assert any(s.available for s in non_local if s.type == SourceType.INPUT)

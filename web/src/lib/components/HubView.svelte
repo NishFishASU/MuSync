@@ -635,6 +635,11 @@
 				'Apple MusicKit keys not set — add Team/Key/.p8 to ~/musync.env (search only; no DRM hub player)';
 			return;
 		}
+		if (streamProvider === 'youtube' && !streaming?.youtube?.configured) {
+			streamMessage =
+				'YouTube not configured — set MUSYNC_YOUTUBE_API_KEY in ~/musync.env (docs/youtube.md)';
+			return;
+		}
 		if (streamProvider === 'spotify' && !streaming?.spotify?.authenticated) {
 			streamMessage = 'Connect Spotify on the Streaming tab, then search here';
 			return;
@@ -1030,7 +1035,7 @@
 		}
 	}
 
-	/** @param {'spotify' | 'apple' | 'input'} sourceType */
+	/** @param {'spotify' | 'apple' | 'youtube' | 'input'} sourceType */
 	async function addQueueShortcut(sourceType) {
 		try {
 			sourceError = '';
@@ -1061,6 +1066,17 @@
 					? 'Search Apple below, then Queue & play (AirPlay capture)'
 					: 'Search Apple below (catalog only — hub PCM needs AirPlay)';
 				goto('/queue/');
+				return;
+			}
+			if (sourceType === 'youtube') {
+				if (!streaming?.youtube?.configured) {
+					sourceError =
+						'YouTube unavailable — set MUSYNC_YOUTUBE_API_KEY in ~/musync.env (docs/youtube.md)';
+					return;
+				}
+				streamProvider = 'youtube';
+				streamMessage = 'Search YouTube above, then Queue & play — yt-dlp → ffmpeg → feeder';
+				goto('/streaming/');
 				return;
 			}
 			// + Live — quick-add first live host
@@ -2355,6 +2371,37 @@
 						<p class="hint muted">{streaming.apple.note}</p>
 					{/if}
 				</div>
+				<div class="stream-card">
+					<strong>YouTube</strong>
+					<span class="status-pill {streaming?.youtube?.configured ? 'linked' : 'missing'}">
+						{streaming?.youtube?.configured
+							? streaming.youtube.playback_mode === 'ytdlp_ffmpeg'
+								? 'search + play'
+								: 'API key · need yt-dlp/ffmpeg'
+							: 'not configured'}
+					</span>
+					<p class="hint muted">
+						Data API key in <code>~/musync.env</code> (<code>MUSYNC_YOUTUBE_API_KEY</code>).
+						Hub PCM: <code>yt-dlp</code> → <code>ffmpeg</code> →
+						<code>musync_feeder</code> — see docs/youtube.md.
+					</p>
+					{#if streaming?.youtube?.ytdlp_available === false}
+						<p class="hint muted">Install <code>yt-dlp</code> on the Pi for hub PCM.</p>
+					{/if}
+					{#if streaming?.youtube?.ffmpeg_available === false}
+						<p class="hint muted">Install <code>ffmpeg</code> on the Pi for hub PCM.</p>
+					{/if}
+					{#if !streaming?.youtube?.configured}
+						<p class="hint muted">
+							Setup: enable YouTube Data API v3, create an API key, add
+							<code>MUSYNC_YOUTUBE_API_KEY</code> to <code>~/musync.env</code>, restart
+							<code>./scripts/run_pi.sh</code>.
+						</p>
+					{/if}
+					{#if streaming?.youtube?.note}
+						<p class="hint muted">{streaming.youtube.note}</p>
+					{/if}
+				</div>
 			</div>
 			{#if streamMessage && !streaming?.spotify?.authenticated}
 				<p class="hint" role="status">{streamMessage}</p>
@@ -2381,6 +2428,7 @@
 					<select bind:value={streamProvider} aria-label="Streaming provider">
 						<option value="spotify">Spotify</option>
 						<option value="apple">Apple Music</option>
+						<option value="youtube">YouTube</option>
 					</select>
 				</label>
 				<input
@@ -2484,6 +2532,13 @@
 				>
 					+ Apple
 				</button>
+				<button
+					type="button"
+					class="btn btn-ghost btn-small"
+					onclick={() => addQueueShortcut('youtube')}
+				>
+					+ YouTube
+				</button>
 			</div>
 			{#if !liveHosts.length}
 				<p class="hint muted">
@@ -2528,7 +2583,10 @@
 										(t === 'spotify' && streaming?.spotify?.authenticated) ||
 										(t === 'apple' &&
 											streaming?.apple?.configured &&
-											streaming?.apple?.playback_mode === 'airplay_capture')
+											streaming?.apple?.playback_mode === 'airplay_capture') ||
+										(t === 'youtube' &&
+											streaming?.youtube?.configured &&
+											streaming?.youtube?.playback_mode === 'ytdlp_ffmpeg')
 											? ''
 											: ' (unavailable)'}</option
 									>
