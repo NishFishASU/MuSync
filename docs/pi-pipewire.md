@@ -28,6 +28,7 @@ USB / PC capture (ALSA auto-detect → feeder): [usb-pc-capture.md](./usb-pc-cap
 | Discovery | `wpctl status` / `bluetoothctl` → UI by friendly name (MAC auto-filled) |
 | Feeder | One `musync_feeder` null-sink — startup purges orphan `MuSync_Feeder` modules |
 | Streaming | Spotify librespot → feeder; AirPlay receive (shairport) — [spotify-apple.md](spotify-apple.md), [airplay-receive.md](airplay-receive.md) |
+| AVRCP | Headset Absolute Volume → MuSync sliders; play/pause/skip → active source (soft-fail if unsupported) |
 
 ## Cloud vs Pi
 

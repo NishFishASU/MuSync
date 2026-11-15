@@ -894,6 +894,34 @@ class SourceSession:
                 self._play_started_pos = 0
             return self._transport.model_copy(deep=True)
 
+    def skip_relative(self, delta: int) -> Transport:
+        """AVRCP Next/Previous → adjacent queue item (wrap). Sinks stay linked.
+
+        Previous with position > 3s restarts the current cue (common headset UX).
+        Soft no-op when the queue is empty.
+        """
+        with self._lock:
+            self._tick_position()
+            if not self._queue:
+                return self._transport.model_copy(deep=True)
+            if delta < 0 and self._transport.position_ms > 3000:
+                self._transport.position_ms = 0
+                if self._transport.state == TransportState.PLAYING:
+                    self._play_started_wall = time.monotonic()
+                    self._play_started_pos = 0
+                    if self._on_feeder_start:
+                        self._on_feeder_start()
+                return self._transport.model_copy(deep=True)
+
+            ids = [q.id for q in self._queue]
+            qid = self._transport.queue_item_id
+            if qid in ids:
+                idx = ids.index(qid)
+            else:
+                idx = 0 if delta >= 0 else len(ids) - 1
+            nxt = (idx + int(delta)) % len(ids)
+            return self.set_active_queue_item(ids[nxt])
+
     def set_active_source(self, source_id: str) -> Transport:
         """Catalog picker: ensure a queue item for this source, then activate it.
 

@@ -18,6 +18,9 @@ from .streaming.spotify import default_redirect_uri
 from .models import (
     ActiveQueuePut,
     ActiveSourcePut,
+    AvrcpCommandPut,
+    AvrcpStatus,
+    AvrcpVolumePut,
     BluetoothConnectRequest,
     BluetoothConnectResponse,
     BluetoothScanStatus,
@@ -251,6 +254,49 @@ def api_get_transport() -> Transport:
 @app.put("/api/transport", response_model=Transport)
 def api_put_transport(body: TransportPut) -> Transport:
     return backend.set_transport(body)
+
+
+@app.get("/api/avrcp", response_model=AvrcpStatus)
+def api_avrcp_status() -> AvrcpStatus:
+    """BT Absolute Volume + headset transport relay status (soft-fail when unsupported)."""
+    try:
+        return backend.get_avrcp_status()
+    except Exception as exc:  # noqa: BLE001
+        return AvrcpStatus(
+            supported=False,
+            watching=False,
+            detail=f"AVRCP soft-fail: {exc}",
+            last_error=str(exc),
+        )
+
+
+@app.post("/api/avrcp/command", response_model=Transport)
+def api_avrcp_command(body: AvrcpCommandPut) -> Transport:
+    """Relay play/pause/skip from a headset (or test client) to the active source."""
+    try:
+        return backend.relay_avrcp_command(body.action)
+    except NotImplementedError as exc:
+        raise HTTPException(
+            status_code=501,
+            detail=f"AVRCP transport relay unsupported: {exc}",
+        ) from exc
+    except ValueError as exc:
+        # Soft-fail unavailable play / bad action — keep hub up; surface reason.
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@app.post("/api/avrcp/volume", response_model=Device)
+def api_avrcp_volume(body: AvrcpVolumePut) -> Device:
+    """Simulate Absolute Volume → MuSync slider (mock/tests; Pi uses BlueZ poll)."""
+    try:
+        return backend.inject_avrcp_volume(body.device_id, body.volume)
+    except NotImplementedError as exc:
+        raise HTTPException(
+            status_code=501,
+            detail=f"AVRCP volume inject unsupported: {exc}",
+        ) from exc
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
 @app.get("/api/now-playing", response_model=NowPlaying)

@@ -43,6 +43,7 @@ from ..models import (
     Transport,
     TransportPut,
 )
+from .avrcp import AvrcpAction, AvrcpBridge, parse_action, relay_action_to_session
 
 # Laptop/dev discovery fixtures — friendly names, no real bluez.
 _MOCK_DISCOVERED = [
@@ -234,6 +235,18 @@ class MockAudioBackend(AudioBackend):
         # Seed S21 FE as live BT A2DP so Play works for live input on laptop.
         self._inputs = InputRegistry(hosts=_mock_live_hosts(), lock=self._lock)
         self._session = SourceSession(inputs=self._inputs, lock=self._lock)
+        # Laptop: Absolute Volume / headset buttons via inject API (no BlueZ).
+        self._avrcp = AvrcpBridge(
+            on_volume=self._on_avrcp_volume,
+            on_action=self._on_avrcp_action,
+        )
+        self._avrcp.update_targets(
+            mac_by_device={
+                d.id: d.mac
+                for d in self._devices.values()
+                if d.kind == DeviceKind.BLUETOOTH and d.mac
+            }
+        )
 
     def _adapter_snapshot(self) -> tuple[list[BluetoothAdapter], int, str]:
         adapters = [a.model_copy(deep=True) for a in self._bt_adapters]
@@ -323,6 +336,11 @@ class MockAudioBackend(AudioBackend):
             trial = [updated if d.id == device_id else d for d in self._devices.values()]
             validate_devices(trial)
             self._devices[device_id] = updated
+            if "volume" in updates and updates["volume"] is not None:
+                try:
+                    self._avrcp.note_ui_volume(device_id, updated.volume)
+                except Exception:  # noqa: BLE001
+                    pass
             self._persist()
             return updated.model_copy(deep=True)
 
@@ -747,6 +765,51 @@ class MockAudioBackend(AudioBackend):
         # Laptop mock always returns title / artist / album / cover for the header.
         return apply_mock_sample_metadata(build_now_playing(self._session), self._session)
 
+    def _on_avrcp_volume(self, device_id: str, volume: float) -> None:
+        with self._lock:
+            device = self._devices.get(device_id)
+            if device is None:
+                return
+            vol = clamp_volume(volume)
+            if abs(device.volume - vol) < 0.001:
+                return
+            self._devices[device_id] = device.model_copy(update={"volume": vol})
+            self._persist()
+
+    def _on_avrcp_action(self, action: AvrcpAction) -> None:
+        try:
+            relay_action_to_session(self._session, action)
+        except ValueError:
+            # Soft-fail unavailable play — mock stays up.
+            pass
+
+    def get_avrcp_status(self):
+        from ..models import AvrcpStatus
+
+        snap = self._avrcp.status
+        # Mock always "supports" inject path even before first event.
+        return AvrcpStatus(
+            supported=True,
+            watching=False,
+            detail=snap.detail or "Mock AVRCP — inject volume/command (no BlueZ)",
+            last_volume_sync=dict(snap.last_volume_sync),
+            last_action=snap.last_action,
+            last_error=snap.last_error,
+        )
+
+    def relay_avrcp_command(self, action: str):
+        parsed = parse_action(action)
+        # Status only — apply once below (toggle/next must not fire twice).
+        self._avrcp.inject_action(parsed, deliver=False)
+        return relay_action_to_session(self._session, parsed)
+
+    def inject_avrcp_volume(self, device_id: str, volume: float):
+        with self._lock:
+            if device_id not in self._devices:
+                raise KeyError(f"Unknown device: {device_id}")
+        self._avrcp.inject_volume(device_id, clamp_volume(volume))
+        return self.get_device(device_id)
+
     def health(self) -> Health:
         with self._lock:
             from ..streaming import get_streaming_service
@@ -761,6 +824,7 @@ class MockAudioBackend(AudioBackend):
             )
             if soft_warn:
                 detail = f"{detail}; {soft_warn}"
+            detail = f"{detail}; AVRCP inject ready (mock)"
             return Health(
                 ok=True,
                 backend="mock",
@@ -776,5 +840,6 @@ class MockAudioBackend(AudioBackend):
                 spotify_ready=stream.spotify.authenticated,
                 apple_ready=stream.airplay.configured,
                 youtube_ready=stream.youtube.configured,
+                avrcp_supported=True,
                 detail=detail,
             )
