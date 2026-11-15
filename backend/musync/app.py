@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from fastapi import FastAPI, Request
+from pathlib import Path
+
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -78,12 +80,22 @@ def api_set_active_source(body: ActiveSourcePut) -> Transport:
     return backend.set_active_source(body.id)
 
 
+def _index_html() -> Path:
+    return web_root() / "index.html"
+
+
 @app.get("/")
 def index() -> FileResponse:
-    return FileResponse(web_root() / "index.html")
+    path = _index_html()
+    if not path.is_file():
+        raise HTTPException(
+            status_code=503,
+            detail="UI not built — run: cd web && npm ci && npm run build",
+        )
+    return FileResponse(path)
 
 
-# Static assets (CSS/JS) after API routes so /api/* stays exclusive.
+# Built SvelteKit assets (_app/*, favicon, SPA fallback) after API routes.
 _web = web_root()
 if _web.is_dir():
     app.mount("/", StaticFiles(directory=str(_web), html=True), name="web")

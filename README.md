@@ -2,7 +2,7 @@
 
 Multi-room Bluetooth audio sync on a **Raspberry Pi 5**: one local-file transport fans out through **PipeWire** to up to **6× ASUS BT600** A2DP sinks, with per-sink delay/volume from a responsive web UI on the LAN.
 
-Phase 0 MVP scaffold — cloud/dev runs on a **MockAudioBackend**; the Pi swaps in **PipeWireBackend**.
+Phase 0 MVP scaffold — cloud/dev runs on a **MockAudioBackend**; the Pi swaps in **PipeWireBackend**. The control UI is a **SvelteKit** static SPA (`@sveltejs/adapter-static`) served by FastAPI.
 
 ## Quick start (laptop / cloud)
 
@@ -11,9 +11,12 @@ python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 
+# Build the UI once (Node 20+); output → web/build/
+./scripts/build_web.sh
+
 # Mock backend (default) — no PipeWire or BT hardware required
 ./scripts/run_dev.sh
-# → http://127.0.0.1:8080
+# → http://127.0.0.1:8080  (API + built SPA)
 ```
 
 Or:
@@ -24,12 +27,21 @@ export MUSYNC_BACKEND=mock
 python3 -m musync
 ```
 
+### UI hot reload (optional)
+
+```bash
+./scripts/run_dev.sh          # terminal 1 — API on :8080
+cd web && npm install && npm run dev   # terminal 2 — Vite on :5173
+# Vite proxies /api → http://127.0.0.1:8080 (override with MUSYNC_API_PROXY)
+```
+
 Open the UI on a phone or PC on the same network (bind `MUSYNC_HOST=0.0.0.0` if needed).
 
 ### Tests
 
 ```bash
 pip install -r requirements.txt
+./scripts/build_web.sh   # needed for index smoke test
 pytest
 ```
 
@@ -40,7 +52,9 @@ backend/musync/          # FastAPI app + audio backends
   audio/base.py          # AudioBackend interface
   audio/mock.py          # Fake ≤6 sinks + local playback clock
   audio/pipewire.py      # Pi-ready wpctl/pw-cli hooks + docs
-web/                     # Static responsive UI (no Node build)
+web/                     # SvelteKit SPA (adapter-static)
+  src/                   # UI source
+  build/                 # Production assets FastAPI serves
 config/devices.example.yaml
 media/                   # Drop WAV/FLAC/MP3 here
 deploy/systemd/musync.service
@@ -56,6 +70,16 @@ deploy/systemd/musync.service
 | `GET`/`PUT` | `/api/transport` | `{ state, position_ms, source_id? }` |
 | `GET` | `/api/sources` | Local files + disabled later stubs |
 | `PUT` | `/api/sources/active` | `{ id }` source picker |
+
+## Serving the built UI
+
+1. `cd web && npm ci && npm run build` → `web/build/` (SPA with `index.html` fallback).
+2. FastAPI sets `MUSYNC_WEB_DIR` default to `web/build` and mounts it after `/api/*`.
+3. Same origin: browser loads `/`, assets under `/_app/…`, API under `/api/…`.
+
+Reverse proxy (optional): serve `web/build` as `/` and proxy `/api` to uvicorn — same contract.
+
+Pi tip: build on a laptop (or once on the Pi with Node), commit or rsync `web/build/`, then run without Node at runtime.
 
 ## Mock vs PipeWire
 
@@ -82,10 +106,14 @@ export MUSYNC_BACKEND=pipewire  # Pi
    sudo apt update
    sudo apt install -y python3-pip python3-venv pipewire wireplumber \
      pipewire-audio-client-libraries mpv bluez
+   # Node only if you build the UI on-device:
+   # curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash -
+   # sudo apt install -y nodejs
    git clone https://github.com/NishFishASU/MuSync.git
    cd MuSync
    python3 -m venv .venv && source .venv/bin/activate
    pip install -r requirements.txt
+   ./scripts/build_web.sh   # or copy a prebuilt web/build/
    cp config/devices.example.yaml config/devices.yaml
    ```
 3. **BT600 setup (see below)** — pair speakers, fill MAC ↔ `hciN` in `config/devices.yaml`.
@@ -129,8 +157,9 @@ export MUSYNC_BACKEND=pipewire  # Pi
 | `MUSYNC_PORT` | `8080` | HTTP port |
 | `MUSYNC_DEVICES_CONFIG` | `config/devices.yaml` | Device profile path |
 | `MUSYNC_MEDIA_DIR` | `media/` | Local library root |
-| `MUSYNC_WEB_DIR` | `web/` | Static UI root |
+| `MUSYNC_WEB_DIR` | `web/build/` | Built SvelteKit static root |
 | `MUSYNC_RELOAD` | unset | Set `1` for uvicorn reload |
+| `MUSYNC_API_PROXY` | `http://127.0.0.1:8080` | Vite dev proxy target (`web/`) |
 
 ## Out of scope (this MVP)
 

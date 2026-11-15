@@ -70,5 +70,26 @@ def test_transport_and_sources(client: TestClient) -> None:
 
 def test_index_served(client: TestClient) -> None:
     res = client.get("/")
-    assert res.status_code == 200
+    assert res.status_code == 200, res.text
     assert "MuSync" in res.text
+    # SvelteKit adapter-static emits hashed assets under /_app/
+    assert "/_app/" in res.text or "sveltekit" in res.text.lower()
+
+
+def test_static_asset_smoke(client: TestClient) -> None:
+    """Minimal UI smoke: built SPA index + at least one JS chunk."""
+    index = client.get("/")
+    assert index.status_code == 200
+    html = index.text
+    # Grab first /_app/... reference if present
+    marker = '/_app/'
+    if marker not in html:
+        pytest.skip("Built UI has no /_app/ assets (unexpected SPA shell)")
+    start = html.index(marker)
+    end = html.find('"', start)
+    if end < 0:
+        end = html.find("'", start)
+    asset_path = html[start:end]
+    asset = client.get(asset_path)
+    assert asset.status_code == 200
+    assert len(asset.content) > 0

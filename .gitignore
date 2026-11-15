@@ -5,6 +5,8 @@ __pycache__/
 .eggs/
 dist/
 build/
+!web/build/
+!web/build/**
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
@@ -20,3 +22,5 @@ media/library/
 !media/samples/.gitkeep
 .coverage
 htmlcov/
+web/node_modules/
+web/.svelte-kit/
