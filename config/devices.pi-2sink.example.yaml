@@ -1,0 +1,28 @@
+# Minimal Pi demo profile — start with TWO BT600 ↔ speaker pairs.
+# Copy to devices.yaml and replace MACs after pairing:
+#   cp config/devices.pi-2sink.example.yaml config/devices.yaml
+#
+# Scale later by appending sink-3..sink-6 (max 6). Keep ids/mac/hci unique.
+version: 1
+max_sinks: 6
+devices:
+  - id: sink-1
+    name: Speaker A
+    mac: "AA:BB:CC:DD:EE:01"   # bluetoothctl replace with real MAC
+    hci: hci0                  # first BT600 adapter
+    connected: false
+    delay_ms: 0
+    volume: 0.85
+    mute: false
+    enabled: true
+    pw_node: ""                # optional WirePlumber node id override after connect
+  - id: sink-2
+    name: Speaker B
+    mac: "AA:BB:CC:DD:EE:02"
+    hci: hci1                  # second BT600 adapter
+    connected: false
+    delay_ms: 40
+    volume: 0.85
+    mute: false
+    enabled: true
+    pw_node: ""

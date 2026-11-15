@@ -16,6 +16,7 @@ env/
 .DS_Store
 config/devices.yaml
 config/profiles.yaml
+config/pipewire-graph.plan.sh
 media/library/
 !media/samples/.gitkeep
 .coverage

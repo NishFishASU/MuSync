@@ -217,5 +217,7 @@ class MockAudioBackend(AudioBackend):
                 sink_count=len(devices),
                 enabled_count=sum(1 for d in devices if d.enabled),
                 hci_map=hci_map,
+                mapped_sinks=0,
+                graph_dry_run=True,
                 detail="MockAudioBackend — simulated sinks; no PipeWire",
             )
