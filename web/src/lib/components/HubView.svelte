@@ -627,7 +627,7 @@
 		if (!q || streamBusy) return;
 		if (streamProvider === 'spotify' && !streaming?.spotify?.configured) {
 			streamMessage =
-				'Spotify not configured — set MUSYNC_SPOTIFY_CLIENT_ID/SECRET in ~/musync.env, restart, then Connect Spotify';
+				'Spotify not configured — set MUSYNC_SPOTIFY_CLIENT_ID/SECRET in ~/musync.env, restart, then Connect on Streaming';
 			return;
 		}
 		if (streamProvider === 'apple' && !streaming?.apple?.configured) {
@@ -636,7 +636,7 @@
 			return;
 		}
 		if (streamProvider === 'spotify' && !streaming?.spotify?.authenticated) {
-			streamMessage = 'Connect Spotify first (OAuth link above), then search';
+			streamMessage = 'Connect Spotify on the Streaming tab, then search here';
 			return;
 		}
 		streamBusy = true;
@@ -1037,31 +1037,30 @@
 			if (sourceType === 'spotify') {
 				if (!streaming?.spotify?.configured) {
 					sourceError =
-						'Spotify unavailable — set CLIENT_ID/SECRET in ~/musync.env, then Connect Spotify';
+						'Spotify unavailable — set CLIENT_ID/SECRET in ~/musync.env, then Connect on Streaming';
 					return;
 				}
 				if (!streaming?.spotify?.authenticated) {
-					sourceError = 'Connect Spotify first, then search & Queue & play a track';
+					sourceError = 'Connect Spotify on the Streaming tab, then search here on Queue';
 					return;
 				}
 				sourceError = '';
-				streamMessage = 'Search Spotify above, then Queue & play — that adds a real track';
 				streamProvider = 'spotify';
-				goto('/streaming/');
+				streamMessage = 'Search Spotify below, then Queue & play — that adds a real track';
+				goto('/queue/');
 				return;
 			}
 			if (sourceType === 'apple') {
-				if (
-					streaming?.apple?.configured &&
-					streaming?.apple?.playback_mode === 'airplay_capture'
-				) {
-					streamProvider = 'apple';
-					streamMessage = 'Search Apple above, then Queue & play (AirPlay capture)';
-					goto('/streaming/');
+				if (!streaming?.apple?.configured) {
+					sourceError =
+						'Apple MusicKit keys not set — add Team/Key/.p8 on Streaming / ~/musync.env';
 					return;
 				}
-				sourceError =
-					'Apple hub play unavailable (DRM) — use MusicKit search + AirPlay, Spotify, or +Device';
+				streamProvider = 'apple';
+				streamMessage = streaming?.apple?.playback_mode === 'airplay_capture'
+					? 'Search Apple below, then Queue & play (AirPlay capture)'
+					: 'Search Apple below (catalog only — hub PCM needs AirPlay)';
+				goto('/queue/');
 				return;
 			}
 			// + Live — quick-add first live host
@@ -2284,7 +2283,7 @@
 		<section class="panel streaming-panel" aria-labelledby="streaming-heading">
 			<div class="panel-head">
 				<h2 id="streaming-heading">Streaming</h2>
-				<p class="hint">OAuth Connect link · no password form in MuSync</p>
+				<p class="hint">OAuth / account connect only · search lives on Queue</p>
 			</div>
 			<div class="stream-status">
 				<div class="stream-card">
@@ -2305,6 +2304,9 @@
 						>
 							Disconnect
 						</button>
+						<p class="hint muted">
+							Connected — search &amp; queue tracks on the <a href="/queue/">Queue</a> tab.
+						</p>
 					{:else}
 						<button
 							type="button"
@@ -2317,7 +2319,7 @@
 						<p class="hint muted">
 							Opens Spotify login → returns here with tokens. App Client ID/Secret stay in
 							<code>~/musync.env</code> (Windows: <code>%USERPROFILE%\musync.env</code>) — not
-							typed here.
+							typed here. After connect, use Queue to search.
 						</p>
 					{/if}
 					{#if streaming?.spotify?.librespot_available === false}
@@ -2340,19 +2342,32 @@
 					<span class="status-pill {streaming?.apple?.configured ? 'linked' : 'missing'}">
 						{streaming?.apple?.configured
 							? streaming.apple.playback_mode === 'airplay_capture'
-								? 'search + AirPlay'
-								: 'search only'
+								? 'keys + AirPlay'
+								: 'keys set'
 							: 'not configured'}
 					</span>
 					<p class="hint muted">
 						No Spotify-style user OAuth for hub PCM on Linux (DRM). MusicKit keys in
-						<code>~/musync.env</code> enable catalog search; full play needs AirPlay →
+						<code>~/musync.env</code> enable catalog search on Queue; full play needs AirPlay →
 						shairport → feeder — see docs/spotify-apple.md.
 					</p>
 					{#if streaming?.apple?.note}
 						<p class="hint muted">{streaming.apple.note}</p>
 					{/if}
 				</div>
+			</div>
+			{#if streamMessage && !streaming?.spotify?.authenticated}
+				<p class="hint" role="status">{streamMessage}</p>
+			{/if}
+		</section>
+
+{/if}
+
+{#if section === 'queue'}
+		<section class="panel queue-panel" aria-labelledby="queue-heading">
+			<div class="panel-head">
+				<h2 id="queue-heading">Song queue</h2>
+				<p class="hint">Search Spotify/Apple · per-song type · sinks stay linked</p>
 			</div>
 			<form
 				class="stream-search"
@@ -2370,7 +2385,7 @@
 				</label>
 				<input
 					type="search"
-					placeholder="Search tracks"
+					placeholder="Search tracks (e.g. Shape Of You)"
 					bind:value={streamQuery}
 					aria-label="Search tracks"
 				/>
@@ -2379,7 +2394,18 @@
 				</button>
 			</form>
 			{#if streamMessage}
-				<p class="hint" role="status">{streamMessage}</p>
+				<p
+					class="hint"
+					class:muted={!/fail|error|forbidden|rejected|not configured|connect spotify/i.test(
+						streamMessage
+					)}
+					class:stream-error={/fail|error|forbidden|rejected|not configured|connect spotify/i.test(
+						streamMessage
+					)}
+					role="status"
+				>
+					{streamMessage}
+				</p>
 			{/if}
 			<ul class="queue-list stream-hits">
 				{#each streamHits as hit (hit.uri)}
@@ -2401,19 +2427,15 @@
 						</button>
 					</li>
 				{:else}
-					<li class="empty-group">Search to pick a track</li>
+					<li class="empty-group">
+						{#if streaming?.spotify?.authenticated || streaming?.apple?.configured}
+							Search Spotify or Apple Music to pick a track
+						{:else}
+							Connect Spotify on Streaming (or set Apple MusicKit keys), then search here
+						{/if}
+					</li>
 				{/each}
 			</ul>
-		</section>
-
-{/if}
-
-{#if section === 'queue'}
-		<section class="panel queue-panel" aria-labelledby="queue-heading">
-			<div class="panel-head">
-				<h2 id="queue-heading">Song queue</h2>
-				<p class="hint">Per-song type · sinks stay linked</p>
-			</div>
 			<div class="stub-actions queue-add-actions">
 				<div class="device-add">
 					<label class="sr-only" for="device-pick">Live input for +Device</label>

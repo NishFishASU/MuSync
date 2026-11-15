@@ -522,7 +522,7 @@ def api_streaming_search(
     q: str = Query(..., min_length=1),
     limit: int = Query(15, ge=1, le=25),
 ) -> StreamingSearchResponse:
-    """Search Spotify/Apple. Returns a clear 400 when credentials are missing."""
+    """Search Spotify/Apple. Always returns 400 with a real message — never bare 500."""
     p = (provider or "").strip().lower()
     svc = get_streaming_service()
     if p == "spotify" and not svc.spotify.configured():
@@ -531,13 +531,21 @@ def api_streaming_search(
             "set MUSYNC_SPOTIFY_CLIENT_ID + MUSYNC_SPOTIFY_CLIENT_SECRET, "
             "then restart ./scripts/run_pi.sh (see docs/spotify-apple.md)"
         )
+    if p == "spotify" and not svc.spotify.authenticated():
+        raise ValueError("Connect Spotify first (Streaming tab), then search from Queue")
     if p in {"apple", "apple_music", "music"} and not svc.apple.configured():
         raise ValueError(
             "Apple Music not configured — set MUSYNC_APPLE_TEAM_ID, "
             "MUSYNC_APPLE_KEY_ID, MUSYNC_APPLE_PRIVATE_KEY_PATH in ~/musync.env "
             "(search only; hub PCM needs AirPlay — docs/spotify-apple.md)"
         )
-    return svc.search(provider, q, limit=limit)
+    try:
+        return svc.search(provider, q, limit=limit)
+    except ValueError:
+        raise
+    except Exception as exc:  # noqa: BLE001 — surface provider failures in the UI
+        label = "Spotify" if p == "spotify" else "Apple Music" if p.startswith("apple") else "Streaming"
+        raise ValueError(f"{label} search failed: {exc}") from exc
 
 
 @app.post("/api/streaming/queue", response_model=QueueItem, status_code=201)

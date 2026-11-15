@@ -149,6 +149,149 @@ def test_streaming_queue_api_requires_auth_for_search(tmp_path, monkeypatch) -> 
     assert "not configured" in detail or "musync.env" in detail
 
 
+def test_spotify_search_requires_connect_when_configured(tmp_path, monkeypatch) -> None:
+    from musync.app import create_app
+
+    backend = _backend(tmp_path, monkeypatch)
+    monkeypatch.setenv("MUSYNC_SPOTIFY_CLIENT_ID", "cid")
+    monkeypatch.setenv("MUSYNC_SPOTIFY_CLIENT_SECRET", "csecret")
+    reset_streaming_service()
+    client = TestClient(create_app(audio_backend=backend))
+    res = client.get(
+        "/api/streaming/search",
+        params={"provider": "spotify", "q": "Shape Of You"},
+    )
+    assert res.status_code == 400
+    detail = res.json()["detail"].lower()
+    assert "connect" in detail
+    assert res.status_code != 500
+
+
+def test_spotify_search_api_error_is_400_not_500(tmp_path, monkeypatch) -> None:
+    """Spotify Web API 403/401 must surface as JSON detail — never Internal Server Error."""
+    from unittest.mock import MagicMock, patch
+
+    from musync.app import create_app
+
+    token_path = tmp_path / "spotify_tokens.json"
+    token_path.write_text(
+        json.dumps(
+            {
+                "access_token": "test-access",
+                "refresh_token": "test-refresh",
+                "expires_at": 9999999999,
+                "display_name": "Test User",
+            }
+        ),
+        encoding="utf-8",
+    )
+    backend = _backend(tmp_path, monkeypatch)
+    monkeypatch.setenv("MUSYNC_SPOTIFY_CLIENT_ID", "cid")
+    monkeypatch.setenv("MUSYNC_SPOTIFY_CLIENT_SECRET", "csecret")
+    monkeypatch.setenv("MUSYNC_SPOTIFY_TOKEN_PATH", str(token_path))
+    reset_streaming_service()
+    client = TestClient(create_app(audio_backend=backend))
+
+    search_resp = MagicMock()
+    search_resp.status_code = 403
+    search_resp.json.return_value = {
+        "error": {"status": 403, "message": "Forbidden"}
+    }
+    search_resp.text = '{"error":{"status":403,"message":"Forbidden"}}'
+
+    mock_client = MagicMock()
+    mock_client.__enter__.return_value = mock_client
+    mock_client.__exit__.return_value = False
+    mock_client.get.return_value = search_resp
+
+    with patch("musync.streaming.spotify.httpx.Client", return_value=mock_client):
+        res = client.get(
+            "/api/streaming/search",
+            params={"provider": "spotify", "q": "Shape Of You"},
+        )
+
+    assert res.status_code == 400
+    detail = res.json()["detail"].lower()
+    assert "forbidden" in detail or "403" in detail or "allowlist" in detail
+    assert "internal server error" not in detail
+
+
+def test_spotify_search_shape_of_you_maps_hits(tmp_path, monkeypatch) -> None:
+    from unittest.mock import MagicMock, patch
+
+    from musync.app import create_app
+
+    token_path = tmp_path / "spotify_tokens.json"
+    token_path.write_text(
+        json.dumps(
+            {
+                "access_token": "test-access",
+                "refresh_token": "test-refresh",
+                "expires_at": 9999999999,
+                "display_name": "Test User",
+            }
+        ),
+        encoding="utf-8",
+    )
+    backend = _backend(tmp_path, monkeypatch)
+    monkeypatch.setenv("MUSYNC_SPOTIFY_CLIENT_ID", "cid")
+    monkeypatch.setenv("MUSYNC_SPOTIFY_CLIENT_SECRET", "csecret")
+    monkeypatch.setenv("MUSYNC_SPOTIFY_TOKEN_PATH", str(token_path))
+    reset_streaming_service()
+    client = TestClient(create_app(audio_backend=backend))
+
+    search_resp = MagicMock()
+    search_resp.status_code = 200
+    search_resp.json.return_value = {
+        "tracks": {
+            "items": [
+                {
+                    "id": "7qiZfU4dY1lWllzX7mPBI3",
+                    "uri": "spotify:track:7qiZfU4dY1lWllzX7mPBI3",
+                    "name": "Shape of You",
+                    "duration_ms": 233713,
+                    "preview_url": None,
+                    "artists": [{"name": "Ed Sheeran"}],
+                    "album": {
+                        "name": "÷ (Deluxe)",
+                        "images": [
+                            {"url": "https://example.com/cover-lg.jpg"},
+                            {"url": "https://example.com/cover.jpg"},
+                        ],
+                    },
+                },
+                None,
+            ]
+        }
+    }
+    search_resp.text = "{}"
+
+    mock_client = MagicMock()
+    mock_client.__enter__.return_value = mock_client
+    mock_client.__exit__.return_value = False
+    mock_client.get.return_value = search_resp
+
+    with patch("musync.streaming.spotify.httpx.Client", return_value=mock_client):
+        res = client.get(
+            "/api/streaming/search",
+            params={"provider": "spotify", "q": "Shape Of You"},
+        )
+
+    assert res.status_code == 200
+    body = res.json()
+    assert body["provider"] == "spotify"
+    assert body["query"] == "Shape Of You"
+    assert len(body["hits"]) == 1
+    hit = body["hits"][0]
+    assert hit["title"] == "Shape of You"
+    assert hit["artist"] == "Ed Sheeran"
+    assert hit["uri"].startswith("spotify:track:")
+    # market=from_token must be sent so catalog resolves for the signed-in user
+    _args, kwargs = mock_client.get.call_args
+    assert kwargs["params"]["market"] == "from_token"
+    assert kwargs["params"]["q"] == "Shape Of You"
+
+
 def test_spotify_login_redirects_when_not_configured(tmp_path, monkeypatch) -> None:
     """Link-style OAuth: missing env → redirect back to SPA with error (not a form)."""
     from musync.app import create_app
