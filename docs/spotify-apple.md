@@ -2,7 +2,7 @@
 
 Hub streaming into the existing PipeWire fan-out: **source → `musync_feeder` → Qudelix / SPP sinks**.
 
-**Spotify is fully supported** (Premium + librespot Connect). **Apple Music is best-effort on Linux** (catalog search + optional AirPlay capture).
+**Spotify is fully supported** (Premium + librespot Connect). **Apple Music is best-effort on Linux** (catalog search + optional AirPlay capture). **YouTube** (Data API + yt-dlp/ffmpeg) is documented in [docs/youtube.md](youtube.md).
 
 Secrets stay in environment variables / local files. Never commit client secrets, tokens, or `.p8` keys (see `.gitignore`).
 

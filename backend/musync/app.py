@@ -518,11 +518,11 @@ def api_spotify_logout() -> StreamingStatus:
 
 @app.get("/api/streaming/search", response_model=StreamingSearchResponse)
 def api_streaming_search(
-    provider: str = Query(..., description="spotify or apple"),
+    provider: str = Query(..., description="spotify, apple, or youtube"),
     q: str = Query(..., min_length=1),
     limit: int = Query(15, ge=1, le=25),
 ) -> StreamingSearchResponse:
-    """Search Spotify/Apple. Returns a clear 400 when credentials are missing."""
+    """Search Spotify/Apple/YouTube. Returns a clear 400 when credentials are missing."""
     p = (provider or "").strip().lower()
     svc = get_streaming_service()
     if p == "spotify" and not svc.spotify.configured():
@@ -537,13 +537,24 @@ def api_streaming_search(
             "MUSYNC_APPLE_KEY_ID, MUSYNC_APPLE_PRIVATE_KEY_PATH in ~/musync.env "
             "(search only; hub PCM needs AirPlay — docs/spotify-apple.md)"
         )
+    if p in {"youtube", "yt", "ytb"} and not svc.youtube.configured():
+        raise ValueError(
+            "YouTube not configured — set MUSYNC_YOUTUBE_API_KEY in ~/musync.env "
+            "(YouTube Data API v3), install yt-dlp + ffmpeg, then restart "
+            "./scripts/run_pi.sh (see docs/youtube.md)"
+        )
     return svc.search(provider, q, limit=limit)
 
 
 @app.post("/api/streaming/queue", response_model=QueueItem, status_code=201)
 def api_streaming_queue_add(body: StreamingQueueAdd) -> QueueItem:
     """Add a searched track to the hub queue and optionally activate it."""
-    source_type = SourceType.SPOTIFY if body.provider == "spotify" else SourceType.APPLE
+    if body.provider == "spotify":
+        source_type = SourceType.SPOTIFY
+    elif body.provider == "youtube":
+        source_type = SourceType.YOUTUBE
+    else:
+        source_type = SourceType.APPLE
     # Keep title clean; artist/album/cover live on dedicated fields for now-playing.
     title = body.title or body.uri
     item = backend.add_queue_item(

@@ -37,6 +37,12 @@ STREAMING_SAMPLES: dict[SourceType, dict[str, str]] = {
         "album": "Streaming Mock",
         "cover_url": MOCK_COVER_PATH,
     },
+    SourceType.YOUTUBE: {
+        "title": "Mock YouTube Video",
+        "artist": "MuSync YouTube",
+        "album": "Streaming Mock",
+        "cover_url": MOCK_COVER_PATH,
+    },
 }
 
 
@@ -119,6 +125,22 @@ def build_now_playing(session: "SourceSession") -> NowPlaying:
                 note = note or get_streaming_service().apple_play_note()
         except Exception as exc:  # noqa: BLE001
             log.debug("apple now-playing enrich: %s", exc)
+
+    # YouTube Data API metadata.
+    if source_type == SourceType.YOUTUBE and locator:
+        try:
+            from .streaming import get_streaming_service
+
+            meta = get_streaming_service().youtube.track_metadata(locator)
+            if meta:
+                title = title or meta.title
+                artist = artist or meta.artist
+                album = album or meta.album
+                if meta.cover_url:
+                    cover_url = meta.cover_url
+                    has_cover = True
+        except Exception as exc:  # noqa: BLE001
+            log.debug("youtube now-playing enrich: %s", exc)
 
     # Live input / BT AVRCP best-effort: host name + capture path.
     if source_type == SourceType.INPUT:

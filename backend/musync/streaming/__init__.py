@@ -1,4 +1,4 @@
-"""Hub streaming providers (Spotify Connect + best-effort Apple Music)."""
+"""Hub streaming providers (Spotify, Apple Music, YouTube)."""
 
 from __future__ import annotations
 
