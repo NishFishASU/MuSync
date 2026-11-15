@@ -327,6 +327,8 @@ export function spaPollRequestsPerSecond(cadence) {
  * @property {boolean | null} [librespot_running]
  * @property {string | null} [librespot_name]
  * @property {boolean | null} [ytdlp_available]
+ * @property {string | null} [ytdlp_version]
+ * @property {boolean | null} [ytdlp_outdated]
  * @property {boolean | null} [ffmpeg_available]
  * @property {string | null} [feeder]
  * @property {string | null} [redirect_uri]
@@ -340,6 +342,8 @@ export function spaPollRequestsPerSecond(cadence) {
  * @property {number | null} [search_limit_max]
  * @property {string[]} [limits]
  * @property {string} [note]
+ * @property {string | null} [last_error]
+ * @property {boolean | null} [running]
  */
 
 /**

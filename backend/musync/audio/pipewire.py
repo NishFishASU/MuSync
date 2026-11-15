@@ -231,6 +231,8 @@ class PipeWireBackend(AudioBackend):
         self._cast_procs: dict[str, subprocess.Popen[str]] = {}
         self._cast_source_keys: dict[str, str] = {}
         self._cast_soft_warn: str = ""
+        # YouTube yt-dlp|ffmpeg → feeder soft-fail (search may still work).
+        self._youtube_soft_warn: str = ""
         # Soft BT reconnect throttle (demo reboot: paired but A2DP not up yet).
         self._last_bt_reconnect_at: float = 0.0
         self._bt_reconnect_min_interval_s: float = 8.0
@@ -1719,16 +1721,29 @@ class PipeWireBackend(AudioBackend):
         log.info("AirPlay capture %s → %s", source_ref, self._feeder)
 
     def _start_youtube_into_feeder(self, locator: str) -> None:
-        """yt-dlp audio → ffmpeg → Pulse sink musync_feeder."""
+        """yt-dlp (-g) → ffmpeg → Pulse sink musync_feeder.
+
+        Soft-fails with a clear message when yt-dlp/ffmpeg cannot feed PCM —
+        BT / SPP / Cast sinks stay up (search still works). Raises ValueError
+        so the API/UI can show the reason (sourceError).
+        """
         from ..streaming import get_streaming_service
 
         self._ensure_feeder()
         svc = get_streaming_service()
         if self._env_dry_run():
             log.info("Dry-run YouTube play %s → %s", locator, self._feeder)
+            self._youtube_soft_warn = ""
             return
-        result = svc.play_youtube(locator, feeder=self._feeder)
-        log.info("YouTube play: %s", result)
+        try:
+            result = svc.play_youtube(locator, feeder=self._feeder)
+            self._youtube_soft_warn = ""
+            log.info("YouTube play: %s", result)
+        except ValueError as exc:
+            # Soft-fail: keep feeder + sink graph; surface a clear play error.
+            self._youtube_soft_warn = f"YouTube play soft-fail: {exc}"
+            log.warning("%s", self._youtube_soft_warn)
+            raise
 
     def _start_player_process(self) -> None:
         """Start feeder: local mpv, streaming, network upload, or capture.
@@ -2331,6 +2346,12 @@ class PipeWireBackend(AudioBackend):
                     if soft_warn
                     else self._cast_soft_warn
                 )
+            if self._youtube_soft_warn:
+                soft_warn = (
+                    f"{soft_warn}; {self._youtube_soft_warn}"
+                    if soft_warn
+                    else self._youtube_soft_warn
+                )
             try:
                 self.refresh_sink_map()
                 self._sync_spp_listeners()
@@ -2914,6 +2935,8 @@ class PipeWireBackend(AudioBackend):
             healthy_n = sum(1 for a in adapters if a.healthy)
             if soft_warn:
                 hint += f"; {soft_warn}"
+            if self._youtube_soft_warn:
+                hint += f"; {self._youtube_soft_warn}"
             if self._bt_adapters_detail:
                 hint += f"; {self._bt_adapters_detail}"
             avrcp = self._avrcp.status

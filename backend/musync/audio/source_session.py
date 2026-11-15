@@ -139,7 +139,7 @@ def unavailable_note(source_type: SourceType) -> Optional[str]:
                 "(docs/youtube.md)"
             )
         if svc.youtube_ready():
-            return "Pick a YouTube video in Streaming — yt-dlp → ffmpeg → musync_feeder"
+            return "Pick a YouTube video in Streaming — yt-dlp -g → ffmpeg → musync_feeder"
         return UNAVAILABLE_NOTES[SourceType.YOUTUBE]
     return UNAVAILABLE_NOTES.get(source_type)
 

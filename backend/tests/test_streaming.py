@@ -1338,3 +1338,154 @@ def test_parse_youtube_locator_helpers() -> None:
     assert parse_video_id("short") is None
     assert parse_iso8601_duration_ms("PT1H2M3S") == ((1 * 3600) + (2 * 60) + 3) * 1000
     assert parse_iso8601_duration_ms("PT45S") == 45_000
+
+
+def test_summarize_ytdlp_bot_check() -> None:
+    from musync.streaming.youtube import _summarize_ytdlp_stderr, clear_ytdlp_version_cache
+
+    clear_ytdlp_version_cache()
+    msg = _summarize_ytdlp_stderr(
+        "ERROR: [youtube] abc: Sign in to confirm you’re not a bot. Use --cookies",
+        ytdlp_version=(2026, 10, 26),
+    )
+    assert "bot check" in msg.lower()
+    assert "cookies" in msg.lower()
+    assert "upgrade yt-dlp" not in msg.lower()
+
+
+def test_summarize_ytdlp_outdated_prefixes_upgrade() -> None:
+    from musync.streaming.youtube import _summarize_ytdlp_stderr
+
+    msg = _summarize_ytdlp_stderr(
+        "ERROR: [youtube] abc: Sign in to confirm you’re not a bot.",
+        ytdlp_version=(2025, 4, 30),
+    )
+    assert "upgrade yt-dlp" in msg.lower()
+    assert "2025.04.30" in msg
+
+
+def test_youtube_play_rejects_outdated_ytdlp(monkeypatch) -> None:
+    """Pi apt 2025.04.30 must soft-fail Play with a clear upgrade error."""
+    from musync.streaming.youtube import YouTubeClient, clear_ytdlp_version_cache
+
+    monkeypatch.setenv("MUSYNC_YTDLP_BIN", "/usr/bin/yt-dlp")
+    monkeypatch.setenv("MUSYNC_FFMPEG_BIN", "/usr/bin/ffmpeg")
+    monkeypatch.delenv("MUSYNC_YTDLP_ALLOW_OLD", raising=False)
+    clear_ytdlp_version_cache()
+    monkeypatch.setattr(
+        "musync.streaming.youtube.probe_ytdlp_version",
+        lambda _bin=None: (2025, 4, 30),
+    )
+
+    client = YouTubeClient()
+    with pytest.raises(ValueError) as excinfo:
+        client.play_uri("youtube:dQw4w9WgXcQ", feeder="musync_feeder")
+    detail = str(excinfo.value)
+    assert "Upgrade yt-dlp" in detail
+    assert "2025.04.30" in detail
+    assert client.last_error()
+    st = client.status()
+    assert st["ytdlp_outdated"] is True
+    assert st["ytdlp_version"] == "2025.04.30"
+
+
+def test_youtube_play_uri_resolve_soft_fail(monkeypatch) -> None:
+    """yt-dlp -g failure must raise a clear ValueError (no silent ok)."""
+    from types import SimpleNamespace
+
+    from musync.streaming.youtube import YouTubeClient, clear_ytdlp_version_cache
+
+    monkeypatch.setenv("MUSYNC_YTDLP_BIN", "/usr/bin/yt-dlp")
+    monkeypatch.setenv("MUSYNC_FFMPEG_BIN", "/usr/bin/ffmpeg")
+    monkeypatch.setenv("MUSYNC_YTDLP_ALLOW_OLD", "1")
+    clear_ytdlp_version_cache()
+    monkeypatch.setattr(
+        "musync.streaming.youtube.probe_ytdlp_version",
+        lambda _bin=None: (2026, 10, 26),
+    )
+
+    def _fake_run(*_a, **_k):  # noqa: ANN001
+        return SimpleNamespace(
+            returncode=1,
+            stderr=(
+                "ERROR: [youtube] dQw4w9WgXcQ: Sign in to confirm you’re not a bot."
+            ),
+            stdout="",
+        )
+
+    monkeypatch.setattr("musync.streaming.youtube.subprocess.run", _fake_run)
+
+    client = YouTubeClient()
+    with pytest.raises(ValueError) as excinfo:
+        client.play_uri("youtube:dQw4w9WgXcQ", feeder="musync_feeder")
+    detail = str(excinfo.value).lower()
+    assert "bot" in detail or "yt-dlp" in detail
+    assert client.last_error()
+    assert "Last play soft-fail" in client.status()["note"]
+
+
+def test_youtube_play_uri_ffmpeg_into_feeder(monkeypatch, tmp_path) -> None:
+    """Happy path: resolve URL then keep ffmpeg alive into the feeder sink."""
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+
+    from musync.streaming import youtube as yt_mod
+    from musync.streaming.youtube import YouTubeClient, clear_ytdlp_version_cache
+
+    monkeypatch.setenv("MUSYNC_YTDLP_BIN", "/usr/bin/yt-dlp")
+    monkeypatch.setenv("MUSYNC_FFMPEG_BIN", "/usr/bin/ffmpeg")
+    monkeypatch.setattr(yt_mod, "_STARTUP_SETTLE_S", 0.0)
+    clear_ytdlp_version_cache()
+    monkeypatch.setattr(
+        "musync.streaming.youtube.probe_ytdlp_version",
+        lambda _bin=None: (2026, 10, 26),
+    )
+
+    log_dir = tmp_path / "config"
+    log_dir.mkdir()
+    monkeypatch.setattr(
+        YouTubeClient,
+        "_ffmpeg_log_path",
+        lambda self, video_id: log_dir / f"youtube-{video_id}.ffmpeg.log",
+    )
+
+    def _fake_run(*_a, **_k):  # noqa: ANN001
+        return SimpleNamespace(
+            returncode=0,
+            stderr="",
+            stdout="https://cdn.example/audio.m4a\n",
+        )
+
+    monkeypatch.setattr("musync.streaming.youtube.subprocess.run", _fake_run)
+
+    alive = MagicMock()
+    alive.poll.return_value = None
+    alive.pid = 4242
+    popen = MagicMock(return_value=alive)
+    monkeypatch.setattr("musync.streaming.youtube.subprocess.Popen", popen)
+
+    client = YouTubeClient()
+    result = client.play_uri("youtube:dQw4w9WgXcQ", feeder="musync_feeder")
+    assert result["ok"] is True
+    assert result["feeder"] == "musync_feeder"
+    assert result["mode"] == "ytdlp_ffmpeg"
+    assert client.running() is True
+    argv = popen.call_args[0][0]
+    assert argv[0] == "/usr/bin/ffmpeg"
+    assert "https://cdn.example/audio.m4a" in argv
+    assert argv[-2:] == ["pulse", "musync_feeder"]
+    client.stop()
+
+
+def test_parse_ytdlp_version_helpers() -> None:
+    from musync.streaming.youtube import (
+        format_ytdlp_version,
+        parse_ytdlp_version,
+        ytdlp_version_outdated,
+    )
+
+    assert parse_ytdlp_version("2025.04.30") == (2025, 4, 30)
+    assert parse_ytdlp_version("yt-dlp 2025.04.30\n") == (2025, 4, 30)
+    assert format_ytdlp_version((2025, 4, 30)) == "2025.04.30"
+    assert ytdlp_version_outdated((2025, 4, 30)) is True
+    assert ytdlp_version_outdated((2026, 10, 26)) is False

@@ -1,6 +1,6 @@
 # YouTube on the Pi
 
-Hub streaming into the existing PipeWire fan-out: **YouTube Data API search → queue → `yt-dlp` | `ffmpeg` → `musync_feeder` → Qudelix / SPP sinks**.
+Hub streaming into the existing PipeWire fan-out: **YouTube Data API search → queue → `yt-dlp` `-g` → `ffmpeg` → `musync_feeder` → Qudelix / SPP sinks**.
 
 Secrets stay in environment variables / local files. Never commit API keys (see `.gitignore`).
 
@@ -51,19 +51,34 @@ Empty key soft-fails (local / Spotify / AirPlay still work).
 
 ### 3. Install yt-dlp + ffmpeg
 
+**Use a current yt-dlp.** Apt packages on Raspberry Pi OS are often months behind
+(e.g. `2025.04.30`) and fail YouTube extract / bot checks — MuSync soft-fails Play
+with a clear **Upgrade yt-dlp** message while Search still works.
+
 ```bash
 # Debian/Raspberry Pi OS examples:
 sudo apt update
 sudo apt install -y ffmpeg
-# yt-dlp — prefer a current build:
+
+# Prefer a current yt-dlp (not apt alone):
 pipx install yt-dlp
-# or: sudo apt install -y yt-dlp
+# or self-update if already installed:
+sudo yt-dlp -U
+# pipx upgrade yt-dlp
+# python3 -m pip install -U yt-dlp   # only if you manage PATH carefully
+
 which yt-dlp ffmpeg
+yt-dlp --version   # need ≥ 2025.10.14 (see MUSYNC_YTDLP_MIN_VERSION)
 ```
 
 MuSync plays as:
 
-`yt-dlp -f bestaudio/best -o - URL | ffmpeg -i pipe:0 -vn -ac 2 -ar 48000 -f pulse musync_feeder`
+1. `yt-dlp -f bestaudio/best -g URL` → direct media URL (failures surface here)
+2. `ffmpeg -i <url> -vn -ac 2 -ar 48000 -f pulse musync_feeder`
+
+If YouTube still blocks after a current yt-dlp, export browser cookies and set
+`MUSYNC_YTDLP_COOKIES=/path/to/cookies.txt` (or
+`MUSYNC_YTDLP_COOKIES_FROM_BROWSER=chromium`) in `~/musync.env`.
 
 ### 4. Run + UI
 
@@ -120,7 +135,25 @@ Locator form: `youtube:<11-char video id>` (watch URLs are also accepted when ac
 
 - **Search 400 / not configured** — set `MUSYNC_YOUTUBE_API_KEY` in `~/musync.env` or `config/streaming.local.env`, restart the API.
 - **API key invalid / 403** — enable YouTube Data API v3 on the Google Cloud project; check key restrictions and quotas.
+- **Search OK, Play soft-fails / no audio** — open Streaming status / health detail for
+  `YouTube play soft-fail: …`. Common causes:
+  - **Upgrade yt-dlp** (most common on Pi) — status shows
+    `Upgrade yt-dlp (have 2025.04.30; need ≥2025.10.14)`. Run
+    `sudo yt-dlp -U` or `pipx upgrade yt-dlp`, confirm `yt-dlp --version`,
+    restart `./scripts/run_pi.sh`. Apt-only installs stay stale.
+  - **yt-dlp bot check** (“Sign in to confirm you’re not a bot”) — upgrade first;
+    if still blocked, export cookies (`MUSYNC_YTDLP_COOKIES` or
+    `MUSYNC_YTDLP_COOKIES_FROM_BROWSER`), restart.
+  - **yt-dlp / ffmpeg missing** — install both (or set `MUSYNC_YTDLP_BIN` /
+    `MUSYNC_FFMPEG_BIN`).
+  - **ffmpeg → musync_feeder failed** — `pactl list sinks short` must show
+    `musync_feeder`; pipewire-pulse must be up. Check
+    `config/youtube-<id>.ffmpeg.log`. Local/S21 audio OK means the fan-out is fine —
+    the YouTube resolve/ffmpeg step is the problem.
 - **Play fails: yt-dlp missing** — install `yt-dlp` (or set `MUSYNC_YTDLP_BIN`).
 - **Play fails: ffmpeg missing** — install `ffmpeg` (or set `MUSYNC_FFMPEG_BIN`).
-- **No audio** — ensure `musync_feeder` exists (`pactl list sinks short`) and sinks are enabled; see `docs/pi-pipewire.md`.
+- **No audio (local also silent)** — feeder/sinks: see `docs/pi-pipewire.md`.
 - **Quota exceeded** — Data API has a daily quota; cache searches / reduce query rate during demos.
+
+Optional env: `MUSYNC_YTDLP_MIN_VERSION=2025.10.14` (floor), `MUSYNC_YTDLP_ALLOW_OLD=1`
+(skip the version gate — not recommended on the Pi).
