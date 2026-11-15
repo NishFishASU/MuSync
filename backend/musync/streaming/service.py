@@ -151,12 +151,28 @@ class StreamingService:
     def play_youtube(self, uri: str, *, feeder: str) -> dict[str, Any]:
         return self.youtube.play_uri(uri, feeder=feeder)
 
-    def stop_spotify(self) -> None:
+    def pause_competing_phone_playback(self) -> dict[str, Any]:
+        """Pause phone-side Spotify when the hub starts local/YouTube/AirPlay/….
+
+        Soft-fail. Does **not** mute arbitrary phone apps — browsers cannot
+        claim OS exclusive audio on Android/iOS. Spotify OAuth is the one
+        remote player we can pause via Web API.
+        """
+        paused = False
+        try:
+            paused = bool(self.spotify.pause_phone_playback())
+        except Exception as exc:  # noqa: BLE001
+            log.debug("pause competing phone playback: %s", exc)
+        return {"spotify_paused": paused}
+
+    def stop_spotify(self, *, keep_librespot: bool = False) -> None:
+        """Pause Spotify Web API player; optionally leave librespot running."""
         try:
             self.spotify.pause()
         except Exception as exc:  # noqa: BLE001
             log.debug("spotify pause: %s", exc)
-        self.spotify.stop_librespot()
+        if not keep_librespot:
+            self.spotify.stop_librespot()
 
     def stop_youtube(self) -> None:
         try:

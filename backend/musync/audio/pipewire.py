@@ -1533,13 +1533,26 @@ class PipeWireBackend(AudioBackend):
         if host_id is None or host_id == self._active_capture_host_id:
             self._active_capture_host_id = None
 
-    def _stop_player_process(self) -> None:
+    def _stop_player_process(
+        self, *, keep_librespot: bool = False, pause_spotify: bool = True
+    ) -> None:
+        """Tear down feeder producers.
+
+        ``pause_spotify=False`` for live BT A2DP / AirPlay capture — the phone
+        is the audio source and must keep playing into the hub.
+        """
         self._unload_capture()
         try:
             from ..streaming import get_streaming_service
 
             svc = get_streaming_service()
-            svc.stop_spotify()
+            if pause_spotify:
+                svc.stop_spotify(keep_librespot=keep_librespot)
+            elif not keep_librespot:
+                try:
+                    svc.spotify.stop_librespot()
+                except Exception as exc:  # noqa: BLE001
+                    log.debug("librespot stop: %s", exc)
             svc.stop_youtube()
         except Exception as exc:  # noqa: BLE001
             log.debug("Streaming stop: %s", exc)
@@ -1553,6 +1566,17 @@ class PipeWireBackend(AudioBackend):
                 proc.wait(timeout=2.0)
             except subprocess.TimeoutExpired:
                 proc.kill()
+
+    def _pause_competing_phone_playback(self) -> None:
+        """Soft-fail: pause Spotify on the phone when hub local/YouTube/… starts."""
+        try:
+            from ..streaming import get_streaming_service
+
+            result = get_streaming_service().pause_competing_phone_playback()
+            if result.get("spotify_paused"):
+                log.info("Phone-side Spotify paused for hub playback")
+        except Exception as exc:  # noqa: BLE001
+            log.debug("Phone-side pause soft-fail: %s", exc)
 
     def _start_mpv_into_feeder(self, path: str, *, position_ms: int = 0) -> None:
         """Play local audio or video into the feeder (video: audio-only via --no-video)."""
@@ -1749,22 +1773,34 @@ class PipeWireBackend(AudioBackend):
         """Start feeder: local mpv, streaming, network upload, or capture.
 
         Does not tear down sink loopbacks / SPP listens.
+
+        Phone-side audio: Spotify Connect play **requires** transfer onto
+        librespot (never plays on the phone). Local / YouTube / AirPlay /
+        capture starts pause competing Spotify via Web API when OAuth exists.
+        The SPA cannot mute other phone apps OS-wide (Android/iOS limit).
         """
-        self._stop_player_process()
         transport = self._session.get_transport()
 
         if transport.source_type == SourceType.SPOTIFY:
+            # Keep librespot up so Connect device stays listed; transfer moves
+            # the phone session onto MuSync instead of starting a second play.
+            self._stop_player_process(keep_librespot=True, pause_spotify=True)
             locator = self._session.active_locator() or ""
             # Surface Premium / librespot / Connect failures to the API/UI.
             self._start_spotify_into_feeder(locator)
             return
 
         if transport.source_type == SourceType.APPLE:
-            # AirPlay receive only — MusicKit catalog search removed.
+            # AirPlay receive: phone/Mac already routes media to the Pi — do not
+            # pause the phone player (that would silence the capture source).
+            self._stop_player_process(keep_librespot=False, pause_spotify=False)
             self._start_apple_into_feeder()
             return
 
         if transport.source_type == SourceType.YOUTUBE:
+            self._stop_player_process(keep_librespot=False, pause_spotify=True)
+            # Hub YouTube PCM — pause phone Spotify so speakers don't fight.
+            self._pause_competing_phone_playback()
             locator = self._session.active_locator() or ""
             self._start_youtube_into_feeder(locator)
             return
@@ -1781,9 +1817,13 @@ class PipeWireBackend(AudioBackend):
                 CapturePath.HDMI,
                 CapturePath.AIRPLAY,
             }:
+                # Live capture: phone/PC media is the source — do not pause it.
+                self._stop_player_process(keep_librespot=False, pause_spotify=False)
                 self._start_capture_into_feeder(host)
                 return
             if host.capture_path == CapturePath.NETWORK and host.endpoint:
+                self._stop_player_process(keep_librespot=False, pause_spotify=True)
+                self._pause_competing_phone_playback()
                 path = Path(host.endpoint)
                 if path.is_file():
                     self._start_mpv_into_feeder(
@@ -1795,6 +1835,9 @@ class PipeWireBackend(AudioBackend):
                 )
                 return
 
+        # Local file (and pathless software-clock cues): pause phone Spotify.
+        self._stop_player_process(keep_librespot=False, pause_spotify=True)
+        self._pause_competing_phone_playback()
         path = self._session.active_file_path()
         if not path:
             log.info(

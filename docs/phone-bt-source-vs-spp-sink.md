@@ -73,6 +73,15 @@ Opposite direction: hub plays a local track (or live capture) and the phone **li
 | PC line-in | **USB** capture path — [usb-pc-capture.md](./usb-pc-capture.md) |
 | No BT radio left for inbound A2DP | Upload file on a **network** host (plays into feeder) or SPP-only demo |
 
+## Simultaneous phone speakers + hub
+
+If the phone’s **own** speakers keep playing while hub headphones/SPP also play:
+
+1. **Spotify from MuSync Queue** — Connect must transfer to the Pi librespot device (`MuSync`). MuSync refuses Web API play without that device so the phone is not left as the active player. See [spotify-apple.md](./spotify-apple.md#phone-speakers-vs-hub-exclusive--duck).
+2. **Local file / YouTube on the hub** — MuSync soft-pauses Spotify on the linked account. It **cannot** mute YouTube Music, Files, or other apps; stop those on the phone.
+3. **Phone as A2DP source** — set the phone’s media output to the Pi (Bluetooth speaker). If media still uses phone speakers, Android/iOS routing is wrong — MuSync cannot force exclusive audio from the browser SPA.
+4. **SPP sink** — Simple Protocol Player is an *output*; turn down/mute the phone’s other media so you only hear SPP.
+
 ## Mock / laptop
 
 Without PipeWire, the mock backend seeds **Galaxy S21 FE** as a live `bt_a2dp` host (`bluez_input.AA_BB_CC_DD_EE_21` fixture) so the UI can select live input and Play. Capture discovery returns the same fixture names.
