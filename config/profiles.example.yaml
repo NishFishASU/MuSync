@@ -1,0 +1,18 @@
+# Named user volume preference profiles (silent-disco style).
+# Copy to profiles.yaml (or set MUSYNC_PROFILES_CONFIG). Gitignored at runtime.
+#
+# Applied sink volume = clamp(preferred_level × device.gain).
+# Optional output_overrides replace preferred_level for a specific sink id
+# (still multiplied by that output's gain). Delay is never touched.
+version: 1
+active_id: null
+profiles:
+  - id: user-nish
+    name: Nish
+    preferred_level: 0.75
+    output_overrides: {}
+  - id: user-guest
+    name: Guest (quiet)
+    preferred_level: 0.45
+    output_overrides:
+      spp-1: 0.55

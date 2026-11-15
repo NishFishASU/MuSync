@@ -7,11 +7,14 @@
 		addInput,
 		addQueueItem,
 		addStreamingTrack,
+		applyProfile,
 		capturePathLabel,
 		clearBluetoothDiscovery,
 		connectBluetooth,
 		connectWifi,
+		createProfile,
 		deleteInput,
+		deleteProfile,
 		deleteQueueItem,
 		discoverDevices,
 		discoverInputs,
@@ -26,18 +29,21 @@
 		getWifiStatus,
 		listDevices,
 		listInputs,
+		listProfiles,
 		listQueue,
 		listSources,
 		listWifiNetworks,
 		logoutSpotify,
 		patchDevice,
 		patchInput,
+		patchProfile,
 		patchQueueItem,
 		putDevicesConfig,
 		putTransport,
 		saveWifiNetwork,
 		searchStreaming,
 		mediaPreviewUrl,
+		setActiveProfile,
 		setActiveQueueItem,
 		setActiveSource,
 		sourceTypeLabel,
@@ -109,6 +115,15 @@
 	/** @type {ReturnType<typeof setInterval> | null} */
 	let btScanPoll = null;
 
+	/** @type {import('$lib/api.js').VolumeProfile[]} */
+	let profiles = $state([]);
+	/** @type {string | null} */
+	let activeProfileId = $state(null);
+	let newProfileName = $state('');
+	let newProfileLevel = $state(80);
+	let profileBusy = $state(false);
+	let profileMessage = $state('');
+
 	/** @type {import('$lib/api.js').StreamingStatus | null} */
 	let streaming = $state(null);
 	/** @type {import('$lib/api.js').NowPlaying | null} */
@@ -130,6 +145,9 @@
 
 	const selected = $derived(devices.find((d) => d.id === selectedId) ?? null);
 	const outputDevices = $derived(devices);
+	const activeProfile = $derived(
+		profiles.find((p) => p.id === activeProfileId) ?? null
+	);
 	const playing = $derived(transport?.state === 'playing');
 	const wifiIpLabel = $derived(wifi?.ips?.length ? wifi.ips.join(', ') : '—');
 	const activeQueueId = $derived(transport?.queue_item_id ?? null);
@@ -482,6 +500,12 @@
 		}
 	}
 
+	async function refreshProfiles() {
+		const state = await listProfiles();
+		profiles = state.profiles || [];
+		activeProfileId = state.active_id ?? null;
+	}
+
 	async function refresh() {
 		const [h, d, t, s, q, i, st, np] = await Promise.all([
 			getHealth(),
@@ -503,6 +527,7 @@
 		apiError = '';
 		if (!selectedId && d.length) selectedId = d[0].id;
 		applyTransport(t);
+		await refreshProfiles().catch(() => {});
 		await refreshWifi().catch(() => {});
 		await refreshDiscovery().catch((err) => {
 			setupMessage = err instanceof Error ? err.message : String(err);
@@ -671,9 +696,9 @@
 	}
 
 	/**
-	 * Debounced PATCH /api/devices/{id} — delay/volume live on outputs (MDAS-24).
+	 * Debounced PATCH /api/devices/{id} — delay/volume/gain live on outputs (MDAS-24).
 	 * @param {string} id
-	 * @param {Partial<Pick<import('$lib/api.js').Device, 'delay_ms' | 'volume' | 'mute' | 'enabled' | 'kind' | 'listen_host' | 'listen_port' | 'sample_rate' | 'channels'>>} partial
+	 * @param {Partial<Pick<import('$lib/api.js').Device, 'delay_ms' | 'volume' | 'gain' | 'mute' | 'enabled' | 'kind' | 'listen_host' | 'listen_port' | 'sample_rate' | 'channels'>>} partial
 	 */
 	function queueDevicePatch(id, partial) {
 		if (!id) return;
@@ -689,6 +714,120 @@
 				await refresh().catch(() => {});
 			}
 		}, 180);
+	}
+
+	async function onCreateProfile() {
+		const name = newProfileName.trim();
+		if (!name || profileBusy) return;
+		profileBusy = true;
+		profileMessage = '';
+		try {
+			const created = await createProfile({
+				name,
+				preferred_level: Math.max(0, Math.min(1, newProfileLevel / 100))
+			});
+			newProfileName = '';
+			await refreshProfiles();
+			profileMessage = `Created ${created.name}`;
+		} catch (err) {
+			profileMessage = err instanceof Error ? err.message : String(err);
+		} finally {
+			profileBusy = false;
+		}
+	}
+
+	/**
+	 * @param {string} id
+	 * @param {boolean} [apply]
+	 */
+	async function onSelectProfile(id, apply = true) {
+		if (profileBusy) return;
+		profileBusy = true;
+		profileMessage = '';
+		try {
+			const state = await setActiveProfile(id);
+			profiles = state.profiles || [];
+			activeProfileId = state.active_id ?? null;
+			if (apply) {
+				devices = await listDevices();
+				profileMessage = `Applied ${profiles.find((p) => p.id === id)?.name || id}`;
+			}
+		} catch (err) {
+			profileMessage = err instanceof Error ? err.message : String(err);
+		} finally {
+			profileBusy = false;
+		}
+	}
+
+	async function onClearProfile() {
+		if (profileBusy) return;
+		profileBusy = true;
+		profileMessage = '';
+		try {
+			const state = await setActiveProfile(null);
+			profiles = state.profiles || [];
+			activeProfileId = state.active_id ?? null;
+			profileMessage = 'Cleared active profile (outputs unchanged)';
+		} catch (err) {
+			profileMessage = err instanceof Error ? err.message : String(err);
+		} finally {
+			profileBusy = false;
+		}
+	}
+
+	/** @param {string} id */
+	async function onDeleteProfile(id) {
+		if (profileBusy) return;
+		profileBusy = true;
+		profileMessage = '';
+		try {
+			await deleteProfile(id);
+			await refreshProfiles();
+			profileMessage = 'Profile deleted';
+		} catch (err) {
+			profileMessage = err instanceof Error ? err.message : String(err);
+		} finally {
+			profileBusy = false;
+		}
+	}
+
+	/**
+	 * @param {string} id
+	 * @param {number} pct
+	 */
+	async function onProfileLevel(id, pct) {
+		const level = Math.max(0, Math.min(1, pct / 100));
+		profiles = profiles.map((p) =>
+			p.id === id ? { ...p, preferred_level: level } : p
+		);
+		clearTimeout(patchTimers[`profile:${id}`]);
+		patchTimers[`profile:${id}`] = setTimeout(async () => {
+			try {
+				const updated = await patchProfile(id, { preferred_level: level });
+				profiles = profiles.map((p) => (p.id === id ? updated : p));
+				if (activeProfileId === id) {
+					devices = await listDevices();
+				}
+			} catch (err) {
+				console.error(err);
+				await refreshProfiles().catch(() => {});
+			}
+		}, 180);
+	}
+
+	/** @param {string} id */
+	async function onReapplyProfile(id) {
+		if (profileBusy) return;
+		profileBusy = true;
+		profileMessage = '';
+		try {
+			devices = await applyProfile(id);
+			profileMessage = 'Re-applied to outputs';
+		} catch (err) {
+			profileMessage = err instanceof Error ? err.message : String(err);
+		} finally {
+			profileBusy = false;
+		}
 	}
 
 	/**
@@ -1073,6 +1212,7 @@
 	<a href="#now-playing-heading">Now playing</a>
 	<a href="#wifi-heading">Wi-Fi</a>
 	<a href="#setup-heading">Outputs</a>
+	<a href="#profiles-heading">Profiles</a>
 	<a href="#inputs-heading">Inputs</a>
 	<a href="#streaming-heading">Streaming</a>
 	<a href="#queue-heading">Sources</a>
@@ -1500,10 +1640,125 @@
 			{/if}
 		</section>
 
+		<section class="panel profiles-panel" aria-labelledby="profiles-heading">
+			<div class="panel-head">
+				<h2 id="profiles-heading">Listening profiles</h2>
+				<p class="hint">
+					Silent-disco prefs · preferred × gain
+					{#if activeProfile}
+						· active <span class="status-pill linked">{activeProfile.name}</span>
+					{/if}
+				</p>
+			</div>
+			<p class="hint muted">
+				Named users share one feeder; each profile sets loudness across headphone/IEM outputs.
+				Per-output Gain calibrates sensitivity; Delay stays independent.
+			</p>
+			<form
+				class="profile-create"
+				onsubmit={(e) => {
+					e.preventDefault();
+					onCreateProfile();
+				}}
+			>
+				<label class="field">
+					<span>Name</span>
+					<input
+						type="text"
+						bind:value={newProfileName}
+						placeholder="e.g. Nish"
+						maxlength="64"
+						autocomplete="off"
+					/>
+				</label>
+				<label class="field compact-field">
+					<span>Preferred <em>{newProfileLevel}%</em></span>
+					<input type="range" min="0" max="100" step="1" bind:value={newProfileLevel} />
+				</label>
+				<button type="submit" class="btn" disabled={profileBusy || !newProfileName.trim()}>
+					{profileBusy ? '…' : 'Create'}
+				</button>
+			</form>
+			{#if profiles.length}
+				<ul class="profile-list">
+					{#each profiles as p (p.id)}
+						<li class="profile-row" class:active={p.id === activeProfileId}>
+							<div class="profile-main">
+								<span class="source-title">{p.name}</span>
+								<label class="field compact-field">
+									<span>Preferred <em>{Math.round(p.preferred_level * 100)}%</em></span>
+									<input
+										type="range"
+										min="0"
+										max="100"
+										step="1"
+										value={Math.round(p.preferred_level * 100)}
+										oninput={(e) => {
+											onProfileLevel(
+												p.id,
+												Number(/** @type {HTMLInputElement} */ (e.currentTarget).value)
+											);
+										}}
+									/>
+								</label>
+							</div>
+							<div class="profile-actions">
+								{#if p.id === activeProfileId}
+									<button
+										type="button"
+										class="btn btn-small"
+										disabled={profileBusy}
+										onclick={() => onReapplyProfile(p.id)}
+									>
+										Re-apply
+									</button>
+									<button
+										type="button"
+										class="btn btn-ghost btn-small"
+										disabled={profileBusy}
+										onclick={() => onClearProfile()}
+									>
+										Clear
+									</button>
+								{:else}
+									<button
+										type="button"
+										class="btn btn-small"
+										disabled={profileBusy}
+										onclick={() => onSelectProfile(p.id)}
+									>
+										Use
+									</button>
+								{/if}
+								<button
+									type="button"
+									class="btn btn-ghost btn-small"
+									disabled={profileBusy}
+									onclick={() => onDeleteProfile(p.id)}
+								>
+									Delete
+								</button>
+							</div>
+						</li>
+					{/each}
+				</ul>
+			{:else}
+				<p class="hint">No profiles yet — create one to map a preferred level across outputs.</p>
+			{/if}
+			{#if profileMessage}
+				<p class="setup-msg">{profileMessage}</p>
+			{/if}
+		</section>
+
 		<section class="panel devices-panel" aria-labelledby="devices-heading">
 			<div class="panel-head">
 				<h2 id="devices-heading">Connected outputs</h2>
-				<p class="hint">Delay &amp; volume per output · PATCH /api/devices</p>
+				<p class="hint">
+					Delay · volume · gain (calibration)
+					{#if activeProfile}
+						· profile {activeProfile.name}
+					{/if}
+				</p>
 			</div>
 			<ul class="device-list output-control-list">
 				{#each outputDevices as d (d.id)}
@@ -1576,6 +1831,24 @@
 									oninput={(e) => {
 										const pct = Number(/** @type {HTMLInputElement} */ (e.currentTarget).value);
 										queueDevicePatch(d.id, { volume: pct / 100 });
+									}}
+								/>
+							</label>
+							<label class="field compact-field">
+								<span
+									>Gain <em>{(d.gain ?? 1).toFixed(2)}×</em>
+									<small class="gain-hint">headphone cal</small></span
+								>
+								<input
+									type="range"
+									min="10"
+									max="200"
+									step="5"
+									value={Math.round((d.gain ?? 1) * 100)}
+									disabled={!d.enabled}
+									oninput={(e) => {
+										const pct = Number(/** @type {HTMLInputElement} */ (e.currentTarget).value);
+										queueDevicePatch(d.id, { gain: pct / 100 });
 									}}
 								/>
 							</label>

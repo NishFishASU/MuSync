@@ -68,6 +68,7 @@ from typing import Optional
 
 from ..config import (
     clamp_delay_ms,
+    clamp_gain,
     clamp_volume,
     default_spp_device,
     devices_config_path,
@@ -1788,6 +1789,8 @@ class PipeWireBackend(AudioBackend):
                 updates["delay_ms"] = clamp_delay_ms(updates["delay_ms"])
             if "volume" in updates and updates["volume"] is not None:
                 updates["volume"] = clamp_volume(updates["volume"])
+            if "gain" in updates and updates["gain"] is not None:
+                updates["gain"] = clamp_gain(updates["gain"])
             data.update(updates)
             updated = Device.model_validate(data)
             trial = [updated if d.id == device_id else d for d in self._devices.values()]

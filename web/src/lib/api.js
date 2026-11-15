@@ -22,12 +22,27 @@
  * @property {boolean} connected
  * @property {number} delay_ms
  * @property {number} volume
+ * @property {number} [gain]
  * @property {boolean} mute
  * @property {boolean} enabled
  * @property {string} [listen_host]
  * @property {number} [listen_port]
  * @property {number} [sample_rate]
  * @property {number} [channels]
+ */
+
+/**
+ * @typedef {Object} VolumeProfile
+ * @property {string} id
+ * @property {string} name
+ * @property {number} preferred_level
+ * @property {Record<string, number>} [output_overrides]
+ */
+
+/**
+ * @typedef {Object} VolumeProfilesState
+ * @property {VolumeProfile[]} profiles
+ * @property {string | null} active_id
  */
 
 /**
@@ -367,15 +382,75 @@ export function putDevicesConfig(devices) {
 }
 
 /**
- * Per-output delay/volume/mute/enabled — same PATCH surface MDAS-24 fixes on the Pi.
+ * Per-output delay/volume/gain/mute/enabled — same PATCH surface MDAS-24 fixes on the Pi.
  * @param {string} id
- * @param {Partial<Pick<Device, 'delay_ms' | 'volume' | 'mute' | 'enabled' | 'name' | 'kind' | 'listen_host' | 'listen_port' | 'sample_rate' | 'channels'>>} patch
+ * @param {Partial<Pick<Device, 'delay_ms' | 'volume' | 'gain' | 'mute' | 'enabled' | 'name' | 'kind' | 'listen_host' | 'listen_port' | 'sample_rate' | 'channels'>>} patch
  * @returns {Promise<Device>}
  */
 export function patchDevice(id, patch) {
 	return api(`/api/devices/${encodeURIComponent(id)}`, {
 		method: 'PATCH',
 		body: JSON.stringify(patch)
+	});
+}
+
+/** @returns {Promise<VolumeProfilesState>} */
+export function listProfiles() {
+	return api('/api/profiles');
+}
+
+/**
+ * @param {{ name: string, preferred_level?: number, output_overrides?: Record<string, number> }} body
+ * @returns {Promise<VolumeProfile>}
+ */
+export function createProfile(body) {
+	return api('/api/profiles', {
+		method: 'POST',
+		body: JSON.stringify(body)
+	});
+}
+
+/**
+ * @param {string} id
+ * @param {{ name?: string, preferred_level?: number, output_overrides?: Record<string, number> }} patch
+ * @returns {Promise<VolumeProfile>}
+ */
+export function patchProfile(id, patch) {
+	return api(`/api/profiles/${encodeURIComponent(id)}`, {
+		method: 'PATCH',
+		body: JSON.stringify(patch)
+	});
+}
+
+/**
+ * @param {string} id
+ * @returns {Promise<null>}
+ */
+export function deleteProfile(id) {
+	return api(`/api/profiles/${encodeURIComponent(id)}`, { method: 'DELETE' });
+}
+
+/**
+ * Select a profile (null clears) and apply preferred × gain volumes to outputs.
+ * @param {string | null} id
+ * @returns {Promise<VolumeProfilesState>}
+ */
+export function setActiveProfile(id) {
+	return api('/api/profiles/active', {
+		method: 'PUT',
+		body: JSON.stringify({ id })
+	});
+}
+
+/**
+ * Apply a profile to all outputs without changing the active selection.
+ * @param {string} id
+ * @returns {Promise<Device[]>}
+ */
+export function applyProfile(id) {
+	return api(`/api/profiles/${encodeURIComponent(id)}/apply`, {
+		method: 'POST',
+		body: '{}'
 	});
 }
 
