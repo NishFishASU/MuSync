@@ -1,5 +1,8 @@
-# Copy to devices.yaml (or set MUSYNC_DEVICES_CONFIG) and edit for your speakers.
+# Full 6-sink template. For first Pi demo prefer devices.pi-2sink.example.yaml.
 # One ASUS BT600 adapter (hciN) ↔ one A2DP speaker (MAC). Max 6 sinks.
+# Copy to devices.yaml (or set MUSYNC_DEVICES_CONFIG) and edit.
+version: 1
+max_sinks: 6
 devices:
   - id: sink-1
     name: Living Room
@@ -10,6 +13,7 @@ devices:
     volume: 0.85
     mute: false
     enabled: true
+    pw_node: ""
   - id: sink-2
     name: Kitchen
     mac: "AA:BB:CC:DD:EE:02"
@@ -19,6 +23,7 @@ devices:
     volume: 0.75
     mute: false
     enabled: true
+    pw_node: ""
   - id: sink-3
     name: Bedroom
     mac: "AA:BB:CC:DD:EE:03"
@@ -28,6 +33,7 @@ devices:
     volume: 0.7
     mute: false
     enabled: false
+    pw_node: ""
   - id: sink-4
     name: Patio
     mac: "AA:BB:CC:DD:EE:04"
@@ -37,6 +43,7 @@ devices:
     volume: 0.9
     mute: false
     enabled: true
+    pw_node: ""
   - id: sink-5
     name: Office
     mac: "AA:BB:CC:DD:EE:05"
@@ -46,6 +53,7 @@ devices:
     volume: 0.8
     mute: false
     enabled: false
+    pw_node: ""
   - id: sink-6
     name: Garage
     mac: "AA:BB:CC:DD:EE:06"
@@ -55,3 +63,4 @@ devices:
     volume: 0.65
     mute: true
     enabled: false
+    pw_node: ""

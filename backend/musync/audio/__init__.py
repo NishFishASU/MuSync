@@ -1,4 +1,4 @@
-"""Audio backend implementations (mock for cloud; PipeWire for Pi)."""
+"""Audio backend implementations (mock for cloud; PipeWire fan-out for Pi)."""
 
 from __future__ import annotations
 

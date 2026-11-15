@@ -26,6 +26,8 @@ class Device(BaseModel):
     volume: float = Field(default=0.8, ge=0.0, le=1.0)
     mute: bool = False
     enabled: bool = True
+    # Optional WirePlumber/PipeWire node id or node.name override after connect.
+    pw_node: str = ""
 
     @field_validator("volume")
     @classmethod
@@ -39,6 +41,8 @@ class DevicePatch(BaseModel):
     mute: Optional[bool] = None
     enabled: Optional[bool] = None
     name: Optional[str] = None
+    pw_node: Optional[str] = None
+    connected: Optional[bool] = None
 
     @field_validator("volume")
     @classmethod
@@ -93,3 +97,5 @@ class Health(BaseModel):
     enabled_count: int
     hci_map: dict[str, str] = Field(default_factory=dict)
     detail: str = ""
+    mapped_sinks: int = 0
+    graph_dry_run: bool = True

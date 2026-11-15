@@ -1,46 +1,55 @@
-r"""PipeWireBackend — Pi-ready control plane via wpctl / pw-cli / pw-play.
+r"""PipeWireBackend — Pi demo control plane via wpctl / pactl / pw-link / mpv.
 
-Without hardware this backend still boots: it loads the same device profile,
-tracks transport state in software, and exposes health that reports whether
-PipeWire tools are present. Real graph mutations are implemented as documented
-subprocess hooks so the Pi path can be filled in without changing the HTTP API.
+## Fan-out graph (Phase 1)
 
-## How this will talk to PipeWire on a Pi 5
+```
+[mpv --ao=pipewire --audio-device=musync_feeder]
+        │
+        ▼
+  musync_feeder  (null/virtual sink)
+        │  module-loopback latency_msec=<delay_ms>   (per enabled sink)
+        ├──────────────► bluez_output.<MAC>   (hci0 / speaker 1)
+        ├──────────────► bluez_output.<MAC>   (hci1 / speaker 2)
+        └──────────────► … up to 6 BT600 A2DP sinks
+```
 
-Target graph (one feeder → N delayed/volumed sinks):
+Volume/mute: ``wpctl set-volume|set-mute <node-id>``.
+Delay: PipeWire pulse-compat ``pactl load-module module-loopback latency_msec=N``.
 
-    [mpv/ffplay/pw-play file] → PipeWire source/filter
-         → loop / link → [delay node N] → [volume] → bluez_output.… (hci0)
-                       → [delay node N] → [volume] → bluez_output.… (hci1)
-                       → … up to 6 BT600 A2DP sinks
+Without Bluetooth hardware this backend still boots: it plans the graph, can
+write a shell script of Pi commands, and dry-runs safely when tools are missing
+(``MUSYNC_PW_DRY_RUN=1`` or auto when PipeWire is down).
 
-Control tools (WirePlumber / PipeWire CLI):
+## Documented Pi commands (after pairing 2 speakers)
 
-| Concern | Tooling (Phase 0 plan) |
-|---------|-------------------------|
-| List sinks / default | `wpctl status`, `pw-cli ls Node` |
-| Per-sink volume / mute | `wpctl set-volume <id> <0–1>`, `wpctl set-mute <id> 0|1` |
-| Per-sink latency / delay | Prefer a PipeWire `delay` / `echo-cancel`-style filter node, or module-loopback with latency; alternatively `pw-cli set-param` on a custom filter. Exact node IDs come from WirePlumber after A2DP connect. |
-| Connect graph | `pw-link` (or WirePlumber policy) from feeder → delay → bluez sink |
-| Playback | `mpv --ao=pipewire` or `pw-play` / `ffplay` feeding the shared source |
-| BT adapter map | `bluetoothctl`, `hciconfig` / `bluetoothctl list` → persist MAC ↔ hciN in devices.yaml |
+```bash
+# Create feeder (once per boot / session)
+pactl load-module module-null-sink sink_name=musync_feeder \
+  sink_properties=device.description=MuSync_Feeder
 
-HCI ↔ speaker binding: each ASUS BT600 enumerates as its own adapter (`hci0`…`hci5`).
-Pair one speaker per adapter; store `mac` + `hci` in config. On boot, reconnect
-and map each `bluez_output.*` PipeWire sink to the configured device id.
+# Per sink (example: 40 ms delay to kitchen bluez node)
+pactl load-module module-loopback latency_msec=40 \
+  source=musync_feeder.monitor sink=bluez_output.AA_BB_CC_DD_EE_02 \
+  sink_dont_move=true source_dont_move=true
 
-This stub implements device/transport/source state + CLI probes. Methods
-`_apply_volume`, `_apply_mute`, `_apply_delay`, and `_ensure_graph` are the
-hooks that will shell out on real hardware.
+wpctl set-volume <NODE_ID> 0.75
+wpctl set-mute <NODE_ID> 0
+
+# Play into the feeder
+mpv --no-video --ao=pipewire --audio-device=musync_feeder /path/to/track.flac
+```
+
+HCI ↔ speaker: one ASUS BT600 per A2DP sink; persist MAC + hci in devices.yaml.
 """
 
 from __future__ import annotations
 
 import logging
-import shutil
+import os
 import subprocess
 import threading
 import time
+from pathlib import Path
 from typing import Optional
 
 from ..config import (
@@ -49,6 +58,7 @@ from ..config import (
     clamp_volume,
     discover_local_sources,
     load_devices,
+    repo_root,
     save_devices,
 )
 from ..models import (
@@ -62,31 +72,26 @@ from ..models import (
     TransportState,
 )
 from .base import AudioBackend
+from .pw_tools import (
+    GraphLink,
+    GraphPlan,
+    PwNode,
+    build_sink_commands,
+    discover_nodes,
+    find_musync_loopback_ids,
+    match_device_node,
+    normalize_mac,
+    run_cmd,
+    which,
+)
 
 log = logging.getLogger(__name__)
 
-
-def _which(cmd: str) -> Optional[str]:
-    return shutil.which(cmd)
-
-
-def _run(
-    args: list[str],
-    *,
-    timeout: float = 5.0,
-    check: bool = False,
-) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        args,
-        capture_output=True,
-        text=True,
-        timeout=timeout,
-        check=check,
-    )
+DEFAULT_FEEDER = "musync_feeder"
 
 
 class PipeWireBackend(AudioBackend):
-    """PipeWire-oriented backend: full state machine + CLI hooks for Pi."""
+    """PipeWire-oriented backend: graph planner + CLI execution for Pi demos."""
 
     name = "pipewire"
 
@@ -98,9 +103,17 @@ class PipeWireBackend(AudioBackend):
         }
         if len(self._devices) > 6:
             raise ValueError("MuSync supports at most 6 sinks")
+        if len(self._devices) < 1:
+            raise ValueError("At least one device profile is required")
 
-        # Optional mapping: musync device id → PipeWire / WirePlumber node id.
-        self._pw_node_ids: dict[str, str] = {}
+        self._feeder = os.environ.get("MUSYNC_PW_FEEDER", DEFAULT_FEEDER).strip() or DEFAULT_FEEDER
+        self._pw_node_ids: dict[str, str] = {
+            d.id: d.pw_node for d in self._devices.values() if d.pw_node
+        }
+        self._pw_node_names: dict[str, str] = {}
+        self._loopback_module_ids: dict[str, str] = {}
+        self._last_plan: Optional[GraphPlan] = None
+        self._discovered: list[PwNode] = []
 
         self._sources = self._build_sources()
         active = next((s for s in self._sources if s.available), None)
@@ -116,13 +129,21 @@ class PipeWireBackend(AudioBackend):
         self._player_proc: Optional[subprocess.Popen[str]] = None
 
         self._tools = {
-            "wpctl": _which("wpctl"),
-            "pw-cli": _which("pw-cli"),
-            "pw-link": _which("pw-link"),
-            "pw-play": _which("pw-play"),
-            "mpv": _which("mpv"),
-            "bluetoothctl": _which("bluetoothctl"),
+            "wpctl": which("wpctl"),
+            "pw-cli": which("pw-cli"),
+            "pw-link": which("pw-link"),
+            "pw-play": which("pw-play"),
+            "mpv": which("mpv"),
+            "pactl": which("pactl"),
+            "bluetoothctl": which("bluetoothctl"),
         }
+
+        # Refresh map / plan once at startup (no-op / dry-run without hardware).
+        try:
+            self.refresh_sink_map()
+            self._ensure_graph()
+        except Exception as exc:  # noqa: BLE001 — never block API boot
+            log.warning("Startup graph plan failed: %s", exc)
 
     def _build_sources(self) -> list[Source]:
         local = discover_local_sources()
@@ -169,7 +190,15 @@ class PipeWireBackend(AudioBackend):
         except OSError as exc:
             log.warning("Could not persist devices: %s", exc)
 
-    # --- PipeWire / WirePlumber hooks (safe no-ops without hardware) ---
+    def _env_dry_run(self) -> bool:
+        raw = os.environ.get("MUSYNC_PW_DRY_RUN", "").strip().lower()
+        if raw in {"1", "true", "yes"}:
+            return True
+        if raw in {"0", "false", "no"}:
+            return False
+        # Auto: dry-run when PipeWire tools are missing or daemon is down.
+        up, _ = self.probe_pipewire()
+        return not up
 
     def pipewire_available(self) -> bool:
         return bool(self._tools["wpctl"] or self._tools["pw-cli"])
@@ -183,69 +212,246 @@ class PipeWireBackend(AudioBackend):
 
         try:
             if wpctl:
-                proc = _run([wpctl, "status"], timeout=3.0)
+                proc = run_cmd([wpctl, "status"], timeout=3.0)
                 if proc.returncode == 0:
                     return True, "wpctl status ok"
                 return False, (proc.stderr or proc.stdout or "wpctl failed").strip()
-            proc = _run([pw_cli, "info", "0"], timeout=3.0)
+            proc = run_cmd([pw_cli, "info", "0"], timeout=3.0)
             if proc.returncode == 0:
                 return True, "pw-cli info ok"
             return False, (proc.stderr or proc.stdout or "pw-cli failed").strip()
         except (OSError, subprocess.TimeoutExpired) as exc:
             return False, f"PipeWire probe failed: {exc}"
 
+    def refresh_sink_map(self) -> dict[str, str]:
+        """Discover bluez sinks and map configured devices → PipeWire node ids."""
+        nodes, detail = discover_nodes(
+            wpctl=self._tools["wpctl"],
+            pw_cli=self._tools["pw-cli"],
+        )
+        self._discovered = nodes
+        log.info("Sink discovery: %s", detail)
+
+        mapped: dict[str, str] = {}
+        for device in self._devices.values():
+            node = match_device_node(
+                mac=device.mac,
+                hci=device.hci,
+                pw_node_override=device.pw_node or self._pw_node_ids.get(device.id, ""),
+                nodes=nodes,
+            )
+            if node:
+                self._pw_node_ids[device.id] = node.id
+                self._pw_node_names[device.id] = node.name
+                mapped[device.id] = node.id
+                # Reflect link state when we can see the node.
+                if device.mac or device.pw_node:
+                    device.connected = True
+            else:
+                # Keep manual override ids even if not currently visible.
+                if device.pw_node:
+                    self._pw_node_ids[device.id] = device.pw_node
+                    mapped[device.id] = device.pw_node
+                elif device.id in self._pw_node_ids and not nodes:
+                    mapped[device.id] = self._pw_node_ids[device.id]
+                else:
+                    self._pw_node_ids.pop(device.id, None)
+                    self._pw_node_names.pop(device.id, None)
+                    if not device.pw_node:
+                        device.connected = False
+        return mapped
+
+    def _ensure_feeder_commands(self) -> list[list[str]]:
+        pactl = self._tools["pactl"]
+        if not pactl:
+            return []
+        return [
+            [
+                pactl,
+                "load-module",
+                "module-null-sink",
+                f"sink_name={self._feeder}",
+                "sink_properties=device.description=MuSync_Feeder",
+            ]
+        ]
+
+    def plan_graph(self) -> GraphPlan:
+        """Build feeder → delay/volume → bluez plan for enabled devices."""
+        dry_run = self._env_dry_run()
+        plan = GraphPlan(feeder=self._feeder, dry_run=dry_run)
+        plan.notes.append(
+            "Create feeder once: pactl load-module module-null-sink "
+            f"sink_name={self._feeder}"
+        )
+        if not self._tools["pactl"]:
+            plan.notes.append(
+                "pactl missing — delay loopbacks unavailable; install pulseaudio-utils"
+            )
+
+        for device in self._devices.values():
+            if not device.enabled:
+                plan.skipped.append(f"{device.id} disabled")
+                continue
+
+            node_id = self._pw_node_ids.get(device.id, "")
+            node_name = self._pw_node_names.get(device.id, "")
+            if not node_id and not node_name:
+                # Still emit a plan row using expected bluez name from MAC.
+                if device.mac:
+                    suffix = normalize_mac(device.mac).replace(":", "_")
+                    node_name = f"bluez_output.{suffix}"
+                    plan.notes.append(
+                        f"{device.id}: no live PipeWire node yet — planned target {node_name}"
+                    )
+                else:
+                    plan.skipped.append(f"{device.id} missing mac/pw_node mapping")
+                    continue
+
+            cmds, notes = build_sink_commands(
+                device_id=device.id,
+                feeder=self._feeder,
+                target_node_id=node_id or node_name,
+                target_name=node_name or node_id,
+                delay_ms=device.delay_ms,
+                volume=device.volume,
+                mute=device.mute,
+                tools=self._tools,
+            )
+            plan.notes.extend(notes)
+            plan.links.append(
+                GraphLink(
+                    device_id=device.id,
+                    source=f"{self._feeder}.monitor",
+                    target=node_name or node_id,
+                    delay_ms=device.delay_ms,
+                    volume=device.volume,
+                    mute=device.mute,
+                    commands=cmds,
+                )
+            )
+        self._last_plan = plan
+        return plan
+
+    def write_graph_plan(self, path: Path | None = None) -> Path:
+        plan = self._last_plan or self.plan_graph()
+        out = path or (repo_root() / "config" / "pipewire-graph.plan.sh")
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(plan.as_shell_script(), encoding="utf-8")
+        return out
+
+    def _exec_soft(self, args: list[str]) -> subprocess.CompletedProcess[str] | None:
+        if not args:
+            return None
+        try:
+            proc = run_cmd(args, timeout=8.0)
+            if proc.returncode != 0:
+                log.debug(
+                    "cmd soft-fail %s → %s",
+                    args,
+                    (proc.stderr or proc.stdout or "").strip(),
+                )
+            return proc
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            log.debug("cmd error %s: %s", args, exc)
+            return None
+
+    def _unload_loopback(self, device_id: str) -> None:
+        pactl = self._tools["pactl"]
+        if not pactl:
+            return
+        mid = self._loopback_module_ids.pop(device_id, None)
+        if mid:
+            self._exec_soft([pactl, "unload-module", mid])
+            return
+        # Best-effort scan for leftover MuSync loopbacks.
+        proc = self._exec_soft([pactl, "list", "modules", "short"])
+        if not proc or not proc.stdout:
+            return
+        for found in find_musync_loopback_ids(proc.stdout, device_id):
+            self._exec_soft([pactl, "unload-module", found])
+
     def _apply_volume(self, device: Device) -> None:
-        """Map device.volume to WirePlumber when a node id is known."""
         node = self._pw_node_ids.get(device.id)
         wpctl = self._tools["wpctl"]
-        if not node or not wpctl:
+        if not node or not wpctl or self._env_dry_run():
             log.debug(
-                "volume deferred (no pw node): %s → %.3f", device.id, device.volume
+                "volume deferred: %s → %.3f (node=%s dry=%s)",
+                device.id,
+                device.volume,
+                node,
+                self._env_dry_run(),
             )
             return
-        # Effective volume respects mute at the API layer; still push level.
-        _run([wpctl, "set-volume", node, f"{device.volume:.3f}"])
+        self._exec_soft([wpctl, "set-volume", node, f"{device.volume:.3f}"])
 
     def _apply_mute(self, device: Device) -> None:
         node = self._pw_node_ids.get(device.id)
         wpctl = self._tools["wpctl"]
-        if not node or not wpctl:
-            log.debug("mute deferred (no pw node): %s → %s", device.id, device.mute)
+        if not node or not wpctl or self._env_dry_run():
+            log.debug("mute deferred: %s → %s", device.id, device.mute)
             return
-        _run([wpctl, "set-mute", node, "1" if device.mute else "0"])
+        self._exec_soft([wpctl, "set-mute", node, "1" if device.mute else "0"])
 
     def _apply_delay(self, device: Device) -> None:
-        """Apply per-sink delay_ms to the device's delay filter node.
-
-        On Pi: create/update a PipeWire delay/filter node linked ahead of the
-        bluez sink, then set latency from device.delay_ms. Without a mapped
-        node id this is a documented no-op so cloud/dev stays safe.
-        """
-        node = self._pw_node_ids.get(device.id)
-        if not node:
-            log.debug(
-                "delay deferred (no pw node): %s → %sms", device.id, device.delay_ms
-            )
+        """Re-wire this sink's loopback with updated latency_msec."""
+        if not device.enabled:
             return
-        # Placeholder: real implementation will pw-cli set-param / custom module.
-        log.info(
-            "TODO apply delay %sms on PipeWire node %s for %s",
-            device.delay_ms,
-            node,
-            device.id,
-        )
+        # Rebuild just this sink by running ensure_graph for all — keeps feeder shared.
+        self._ensure_graph(only_device=device.id)
 
-    def _ensure_graph(self) -> None:
-        """Ensure feeder → delay/volume → enabled sinks links exist.
+    def _ensure_graph(self, only_device: str | None = None) -> GraphPlan:
+        """Ensure feeder → delay/volume → enabled sinks.
 
-        Full implementation on Pi will:
-        1. Resolve bluez_output nodes per MAC/hci.
-        2. Create delay+volume filter chain per enabled sink.
-        3. pw-link feeder to each chain; unlink disabled sinks without
-           tearing down the whole session (single-sink loss tolerance).
+        Cloud/dev: plan + write ``config/pipewire-graph.plan.sh`` (dry-run).
+        Pi with tools: create feeder, (re)load loopbacks, apply wpctl volume/mute.
+        Losing one sink does not tear down others — we only touch changed/enabled ids.
         """
-        enabled = [d for d in self._devices.values() if d.enabled]
-        log.debug("ensure_graph: %d enabled sinks (stub)", len(enabled))
+        self.refresh_sink_map()
+        plan = self.plan_graph()
+
+        try:
+            self.write_graph_plan()
+        except OSError as exc:
+            log.debug("Could not write graph plan: %s", exc)
+
+        if plan.dry_run:
+            log.info(
+                "PipeWire graph dry-run: %d links, %d skipped (see config/pipewire-graph.plan.sh)",
+                len(plan.links),
+                len(plan.skipped),
+            )
+            return plan
+
+        # Live path — create feeder (idempotent soft-fail if exists).
+        for cmd in self._ensure_feeder_commands():
+            self._exec_soft(cmd)
+
+        for link in plan.links:
+            if only_device and link.device_id != only_device:
+                continue
+            self._unload_loopback(link.device_id)
+            for cmd in link.commands:
+                proc = self._exec_soft(cmd)
+                # Capture pactl load-module id (stdout is module index).
+                if (
+                    proc
+                    and proc.returncode == 0
+                    and len(cmd) >= 3
+                    and cmd[1] == "load-module"
+                    and cmd[2] == "module-loopback"
+                    and proc.stdout.strip().isdigit()
+                ):
+                    self._loopback_module_ids[link.device_id] = proc.stdout.strip()
+
+        # Unload loopbacks for disabled devices so a single mute/disable doesn't
+        # kill the rest of the session.
+        for device in self._devices.values():
+            if only_device and device.id != only_device:
+                continue
+            if not device.enabled:
+                self._unload_loopback(device.id)
+
+        return plan
 
     def _stop_player_process(self) -> None:
         if self._player_proc is None:
@@ -260,7 +466,7 @@ class PipeWireBackend(AudioBackend):
                 proc.kill()
 
     def _start_player_process(self) -> None:
-        """Best-effort local file playback into PipeWire when tools exist."""
+        """Play local file into the MuSync feeder (or default PipeWire)."""
         self._stop_player_process()
         src_id = self._transport.source_id
         if not src_id:
@@ -273,6 +479,14 @@ class PipeWireBackend(AudioBackend):
             log.info("No file path for %s — software clock only", src_id)
             return
 
+        if self._env_dry_run():
+            log.info(
+                "Dry-run playback: mpv --ao=pipewire --audio-device=%s %s",
+                self._feeder,
+                src.path,
+            )
+            return
+
         mpv = self._tools["mpv"]
         pw_play = self._tools["pw-play"]
         try:
@@ -282,6 +496,7 @@ class PipeWireBackend(AudioBackend):
                         mpv,
                         "--no-video",
                         "--ao=pipewire",
+                        f"--audio-device={self._feeder}",
                         f"--start={self._transport.position_ms / 1000:.3f}",
                         src.path,
                     ],
@@ -290,9 +505,8 @@ class PipeWireBackend(AudioBackend):
                     text=True,
                 )
             elif pw_play:
-                # pw-play has limited seek; used when mpv is unavailable.
                 self._player_proc = subprocess.Popen(
-                    [pw_play, src.path],
+                    [pw_play, f"--target={self._feeder}", src.path],
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL,
                     text=True,
@@ -329,16 +543,16 @@ class PipeWireBackend(AudioBackend):
             data.update(updates)
             updated = Device.model_validate(data)
             self._devices[device_id] = updated
+            if updated.pw_node:
+                self._pw_node_ids[device_id] = updated.pw_node
             self._persist()
 
             if "volume" in updates:
                 self._apply_volume(updated)
             if "mute" in updates:
                 self._apply_mute(updated)
-            if "delay_ms" in updates:
-                self._apply_delay(updated)
-            if "enabled" in updates:
-                self._ensure_graph()
+            if "delay_ms" in updates or "enabled" in updates or "pw_node" in updates:
+                self._ensure_graph(only_device=device_id)
 
             return updated.model_copy(deep=True)
 
@@ -432,6 +646,10 @@ class PipeWireBackend(AudioBackend):
             up, detail = self.probe_pipewire()
             devices = list(self._devices.values())
             hci_map = {d.hci: d.mac for d in devices if d.hci}
+            mapped = len(self._pw_node_ids)
+            dry = self._env_dry_run()
+            plan = self._last_plan
+            links = len(plan.links) if plan else 0
             tools = ", ".join(
                 f"{k}={'yes' if v else 'no'}" for k, v in self._tools.items()
             )
@@ -442,5 +660,10 @@ class PipeWireBackend(AudioBackend):
                 sink_count=len(devices),
                 enabled_count=sum(1 for d in devices if d.enabled),
                 hci_map=hci_map,
-                detail=f"{detail}; tools: {tools}",
+                mapped_sinks=mapped,
+                graph_dry_run=dry,
+                detail=(
+                    f"{detail}; mapped={mapped}/{len(devices)}; "
+                    f"planned_links={links}; dry_run={dry}; tools: {tools}"
+                ),
             )

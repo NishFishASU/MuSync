@@ -138,10 +138,45 @@ def web_root() -> Path:
     return env_path("MUSYNC_WEB_DIR", default)
 
 
-def load_devices() -> list[Device]:
+def validate_devices(devices: list[Device], *, require_min: int | None = None) -> list[Device]:
+    """Harden 2–6 BT600 profiles: unique id/mac/hci, clamp count."""
+    if len(devices) > 6:
+        raise ValueError("MuSync supports at most 6 sinks (one A2DP sink per BT600)")
+    if require_min is not None and len(devices) < require_min:
+        raise ValueError(f"Expected at least {require_min} devices, got {len(devices)}")
+
+    seen_ids: set[str] = set()
+    seen_macs: set[str] = set()
+    seen_hcis: set[str] = set()
+    for d in devices:
+        if not d.id.strip():
+            raise ValueError("Device id must be non-empty")
+        if d.id in seen_ids:
+            raise ValueError(f"Duplicate device id: {d.id}")
+        seen_ids.add(d.id)
+
+        mac = d.mac.strip().upper()
+        if mac:
+            if mac in seen_macs:
+                raise ValueError(f"Duplicate speaker MAC: {mac}")
+            seen_macs.add(mac)
+
+        hci = d.hci.strip().lower()
+        if hci:
+            if not hci.startswith("hci"):
+                raise ValueError(f"HCI adapter must look like hci0..hci5, got {d.hci!r}")
+            if hci in seen_hcis:
+                raise ValueError(f"Duplicate HCI adapter: {hci}")
+            seen_hcis.add(hci)
+
+    return devices
+
+
+def load_devices(*, require_min: int | None = None) -> list[Device]:
     path = devices_config_path()
     if not path.is_file():
-        return [Device.model_validate(d) for d in DEFAULT_MOCK_DEVICES]
+        devices = [Device.model_validate(d) for d in DEFAULT_MOCK_DEVICES]
+        return validate_devices(devices, require_min=require_min)
 
     with path.open("r", encoding="utf-8") as fh:
         data = yaml.safe_load(fh) or {}
@@ -151,15 +186,18 @@ def load_devices() -> list[Device]:
         raise ValueError(f"Invalid devices config at {path}: expected devices list")
 
     devices = [Device.model_validate(item) for item in raw_devices]
-    if len(devices) > 6:
-        raise ValueError("MuSync MVP supports at most 6 sinks")
-    return devices
+    return validate_devices(devices, require_min=require_min)
 
 
 def save_devices(devices: list[Device]) -> Path:
+    devices = validate_devices(devices)
     path = devices_config_path()
     path.parent.mkdir(parents=True, exist_ok=True)
-    payload = {"devices": [d.model_dump() for d in devices]}
+    payload = {
+        "version": 1,
+        "max_sinks": 6,
+        "devices": [d.model_dump() for d in devices],
+    }
     with path.open("w", encoding="utf-8") as fh:
         yaml.safe_dump(payload, fh, sort_keys=False)
     return path
