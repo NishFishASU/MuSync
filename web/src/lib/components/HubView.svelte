@@ -654,7 +654,15 @@
 				: 'No tracks found';
 		} catch (err) {
 			streamHits = [];
-			streamMessage = err instanceof Error ? err.message : String(err);
+			const raw = err instanceof Error ? err.message : String(err);
+			const lower = raw.toLowerCase();
+			if (lower.includes('insufficient client scope') || lower.includes('missing required scopes')) {
+				streamMessage =
+					raw +
+					' → Streaming tab: Disconnect (optional) → Reconnect Spotify and approve permissions.';
+			} else {
+				streamMessage = raw;
+			}
 		} finally {
 			streamBusy = false;
 		}
@@ -2314,15 +2322,32 @@
 					{#if streaming?.spotify?.authenticated}
 						<button
 							type="button"
+							class="btn btn-small"
+							disabled={streamBusy}
+							onclick={() => onConnectSpotify()}
+						>
+							{streaming?.spotify?.missing_scopes?.length ? 'Reconnect Spotify' : 'Reconnect'}
+						</button>
+						<button
+							type="button"
 							class="btn btn-ghost btn-small"
 							disabled={streamBusy}
 							onclick={() => onSpotifyLogout()}
 						>
 							Disconnect
 						</button>
-						<p class="hint muted">
-							Connected — search &amp; queue tracks on the <a href="/queue/">Queue</a> tab.
-						</p>
+						{#if streaming?.spotify?.missing_scopes?.length}
+							<p class="hint stream-error" role="alert">
+								Token missing scopes ({streaming.spotify.missing_scopes.join(', ')}). Click
+								<strong>Reconnect Spotify</strong> and approve the consent dialog, then search on
+								Queue.
+							</p>
+						{:else}
+							<p class="hint muted">
+								Connected — search &amp; queue tracks on the <a href="/queue/">Queue</a> tab.
+								Use Reconnect if search says insufficient client scope.
+							</p>
+						{/if}
 					{:else}
 						<button
 							type="button"
@@ -2333,9 +2358,10 @@
 							Connect Spotify
 						</button>
 						<p class="hint muted">
-							Opens Spotify login → returns here with tokens. App Client ID/Secret stay in
-							<code>~/musync.env</code> (Windows: <code>%USERPROFILE%\musync.env</code>) — not
-							typed here. After connect, use Queue to search.
+							Opens Spotify login with a consent dialog (needed scopes for search + playback). App
+							Client ID/Secret stay in <code>~/musync.env</code> (Windows:
+							<code>%USERPROFILE%\musync.env</code>) — not typed here. After connect, use Queue to
+							search.
 						</p>
 					{/if}
 					{#if streaming?.spotify?.librespot_available === false}
@@ -2403,7 +2429,7 @@
 					{/if}
 				</div>
 			</div>
-			{#if streamMessage && !streaming?.spotify?.authenticated}
+			{#if streamMessage}
 				<p class="hint" role="status">{streamMessage}</p>
 			{/if}
 		</section>
