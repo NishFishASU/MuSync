@@ -523,6 +523,8 @@ class StreamingProviderStatus(BaseModel):
     librespot_running: Optional[bool] = None
     librespot_name: Optional[str] = None
     ytdlp_available: Optional[bool] = None
+    ytdlp_version: Optional[str] = None
+    ytdlp_outdated: Optional[bool] = None
     ffmpeg_available: Optional[bool] = None
     feeder: Optional[str] = None
     redirect_uri: Optional[str] = None

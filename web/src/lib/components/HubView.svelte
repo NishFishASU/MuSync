@@ -2830,6 +2830,13 @@
 					</p>
 					{#if streaming?.youtube?.ytdlp_available === false}
 						<p class="hint muted">Install <code>yt-dlp</code> on the Pi for hub PCM.</p>
+					{:else if streaming?.youtube?.ytdlp_outdated}
+						<p class="hint" role="status">
+							Upgrade yt-dlp{streaming.youtube.ytdlp_version
+								? ` (have ${streaming.youtube.ytdlp_version})`
+								: ''} — <code>sudo yt-dlp -U</code> or
+							<code>pipx upgrade yt-dlp</code> (see guide).
+						</p>
 					{/if}
 					{#if streaming?.youtube?.ffmpeg_available === false}
 						<p class="hint muted">Install <code>ffmpeg</code> on the Pi for hub PCM.</p>

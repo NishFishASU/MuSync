@@ -39,6 +39,12 @@ _ISO_DURATION_RE = re.compile(
 _YTDLP_FORMAT = "bestaudio/best"
 _RESOLVE_TIMEOUT_S = 45.0
 _STARTUP_SETTLE_S = 0.9
+# apt/pipx builds like 2025.04.30 break on current YouTube (bot / extractor).
+# Override floor with MUSYNC_YTDLP_MIN_VERSION=YYYY.MM.DD; skip gate with
+# MUSYNC_YTDLP_ALLOW_OLD=1.
+_DEFAULT_MIN_YTDLP = (2025, 10, 14)
+_VERSION_RE = re.compile(r"(\d{4})\.(\d{1,2})\.(\d{1,2})")
+_ytdlp_version_cache: dict[str, Optional[tuple[int, int, int]]] = {}
 
 
 def _api_key() -> str:
@@ -61,6 +67,82 @@ def _ffmpeg_bin() -> Optional[str]:
 
 def _feeder_sink() -> str:
     return (os.environ.get("MUSYNC_PW_FEEDER") or "musync_feeder").strip() or "musync_feeder"
+
+
+def parse_ytdlp_version(text: str) -> Optional[tuple[int, int, int]]:
+    """Parse ``2025.04.30`` / ``yt-dlp 2025.04.30`` into a comparable tuple."""
+    if not text:
+        return None
+    match = _VERSION_RE.search(str(text))
+    if not match:
+        return None
+    return int(match.group(1)), int(match.group(2)), int(match.group(3))
+
+
+def format_ytdlp_version(ver: tuple[int, int, int]) -> str:
+    return f"{ver[0]:04d}.{ver[1]:02d}.{ver[2]:02d}"
+
+
+def min_ytdlp_version() -> tuple[int, int, int]:
+    raw = (os.environ.get("MUSYNC_YTDLP_MIN_VERSION") or "").strip()
+    if raw:
+        parsed = parse_ytdlp_version(raw)
+        if parsed:
+            return parsed
+    return _DEFAULT_MIN_YTDLP
+
+
+def ytdlp_allow_old() -> bool:
+    return (os.environ.get("MUSYNC_YTDLP_ALLOW_OLD") or "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
+def probe_ytdlp_version(ytdlp: Optional[str] = None) -> Optional[tuple[int, int, int]]:
+    """Best-effort ``yt-dlp --version`` (cached per binary path)."""
+    bin_path = (ytdlp or _ytdlp_bin() or "").strip()
+    if not bin_path:
+        return None
+    if bin_path in _ytdlp_version_cache:
+        return _ytdlp_version_cache[bin_path]
+    ver: Optional[tuple[int, int, int]] = None
+    try:
+        proc = subprocess.run(
+            [bin_path, "--version"],
+            capture_output=True,
+            text=True,
+            timeout=8.0,
+            check=False,
+        )
+        ver = parse_ytdlp_version((proc.stdout or "") + "\n" + (proc.stderr or ""))
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        log.debug("yt-dlp --version failed: %s", exc)
+    _ytdlp_version_cache[bin_path] = ver
+    return ver
+
+
+def clear_ytdlp_version_cache() -> None:
+    """Test helper."""
+    _ytdlp_version_cache.clear()
+
+
+def ytdlp_upgrade_message(have: Optional[tuple[int, int, int]]) -> str:
+    need = min_ytdlp_version()
+    have_s = format_ytdlp_version(have) if have else "unknown"
+    return (
+        f"Upgrade yt-dlp (have {have_s}; need ≥{format_ytdlp_version(need)}). "
+        "On the Pi: `sudo yt-dlp -U` or `pipx upgrade yt-dlp` "
+        "(apt packages are often stale) — see docs/youtube.md"
+    )
+
+
+def ytdlp_version_outdated(have: Optional[tuple[int, int, int]]) -> bool:
+    if have is None:
+        return False
+    return have < min_ytdlp_version()
 
 
 def credentials_configured() -> bool:
@@ -134,13 +216,21 @@ def _ytdlp_auth_args() -> list[str]:
     return args
 
 
-def _summarize_ytdlp_stderr(stderr: str) -> str:
+def _summarize_ytdlp_stderr(
+    stderr: str, *, ytdlp_version: Optional[tuple[int, int, int]] = None
+) -> str:
     """Turn yt-dlp noise into a short operator-facing reason."""
     if not isinstance(stderr, str):
         stderr = str(stderr or "")
     text = stderr.strip()
+    have = ytdlp_version if ytdlp_version is not None else probe_ytdlp_version()
+    upgrade = ytdlp_upgrade_message(have) if ytdlp_version_outdated(have) else ""
+
+    def _with_upgrade(base: str) -> str:
+        return f"{upgrade} {base}".strip() if upgrade else base
+
     if not text:
-        return "yt-dlp failed with no error text"
+        return upgrade or "yt-dlp failed with no error text"
     lower = text.lower()
     # Prefer the last ERROR: line.
     err_lines = [
@@ -151,21 +241,25 @@ def _summarize_ytdlp_stderr(stderr: str) -> str:
     core = err_lines[-1] if err_lines else text.splitlines()[-1].strip()
     core = re.sub(r"^ERROR:\s*", "", core, flags=re.IGNORECASE).strip()
     if "sign in to confirm" in lower or "not a bot" in lower:
-        return (
+        base = (
             f"yt-dlp blocked by YouTube bot check ({core}). "
-            "Export cookies on the Pi (MUSYNC_YTDLP_COOKIES=…/cookies.txt or "
-            "MUSYNC_YTDLP_COOKIES_FROM_BROWSER=chromium) — see docs/youtube.md"
+            "Export cookies on the Pi (MUSYNC_YTDLP_COOKIES or "
+            "MUSYNC_YTDLP_COOKIES_FROM_BROWSER) — docs/youtube.md"
         )
+        return _with_upgrade(base)
     if "http error 403" in lower or "403:" in lower:
-        return (
-            f"yt-dlp got HTTP 403 ({core}). Update yt-dlp and/or set cookies "
-            "(docs/youtube.md)"
+        base = (
+            f"yt-dlp got HTTP 403 ({core}). "
+            "Upgrade yt-dlp and/or set cookies (docs/youtube.md)"
         )
+        return _with_upgrade(base)
     if "age" in lower and ("confirm" in lower or "restricted" in lower):
-        return f"yt-dlp age-gate ({core}). Set cookies — docs/youtube.md"
+        return _with_upgrade(
+            f"yt-dlp age-gate ({core}). Set cookies — docs/youtube.md"
+        )
     if len(core) > 280:
         core = core[:277] + "…"
-    return f"yt-dlp failed: {core}"
+    return _with_upgrade(f"yt-dlp failed: {core}")
 
 
 def _tail_text(path: Path, *, limit: int = 800) -> str:
@@ -205,6 +299,8 @@ class YouTubeClient:
         ytdlp = _ytdlp_bin()
         ffmpeg = _ffmpeg_bin()
         tools_ok = bool(ytdlp and ffmpeg)
+        ytdlp_ver = probe_ytdlp_version(ytdlp) if ytdlp else None
+        outdated = bool(ytdlp and ytdlp_version_outdated(ytdlp_ver))
         limits: list[str] = []
         if not configured:
             limits.append(
@@ -213,10 +309,14 @@ class YouTubeClient:
             )
         if not ytdlp:
             limits.append("Install yt-dlp on PATH (or set MUSYNC_YTDLP_BIN)")
+        elif outdated:
+            limits.append(ytdlp_upgrade_message(ytdlp_ver))
         if not ffmpeg:
             limits.append("Install ffmpeg on PATH (or set MUSYNC_FFMPEG_BIN)")
-        if configured and tools_ok:
+        if configured and tools_ok and not outdated:
             note = "Search OK; play via yt-dlp → ffmpeg → musync_feeder"
+        elif configured and tools_ok and outdated:
+            note = ytdlp_upgrade_message(ytdlp_ver)
         elif configured:
             note = "API key set — install yt-dlp + ffmpeg for hub PCM"
         else:
@@ -229,6 +329,8 @@ class YouTubeClient:
             "configured": configured,
             "authenticated": configured,  # API key only; no user OAuth
             "ytdlp_available": bool(ytdlp),
+            "ytdlp_version": format_ytdlp_version(ytdlp_ver) if ytdlp_ver else None,
+            "ytdlp_outdated": outdated if ytdlp else None,
             "ffmpeg_available": bool(ffmpeg),
             "playback_mode": "ytdlp_ffmpeg" if tools_ok else "unavailable",
             "feeder": _feeder_sink(),
@@ -399,14 +501,22 @@ class YouTubeClient:
             ) from exc
         except OSError as exc:
             raise ValueError(f"Failed to run yt-dlp: {exc}") from exc
+        ver = probe_ytdlp_version(ytdlp)
         if proc.returncode != 0:
-            raise ValueError(_summarize_ytdlp_stderr(proc.stderr or proc.stdout or ""))
+            raise ValueError(
+                _summarize_ytdlp_stderr(
+                    proc.stderr or proc.stdout or "", ytdlp_version=ver
+                )
+            )
         urls = [ln.strip() for ln in (proc.stdout or "").splitlines() if ln.strip()]
         if not urls:
-            raise ValueError(
-                "yt-dlp returned no media URL — update yt-dlp or set cookies "
+            msg = (
+                "yt-dlp returned no media URL — upgrade yt-dlp or set cookies "
                 "(docs/youtube.md)"
             )
+            if ytdlp_version_outdated(ver):
+                msg = f"{ytdlp_upgrade_message(ver)} {msg}"
+            raise ValueError(msg)
         # bestaudio usually one URL; if multiple, take the first (audio).
         return urls[0]
 
@@ -437,6 +547,12 @@ class YouTubeClient:
             raise ValueError(self._last_error)
         if not ffmpeg:
             self._last_error = "ffmpeg missing — install ffmpeg or set MUSYNC_FFMPEG_BIN"
+            raise ValueError(self._last_error)
+        ytdlp_ver = probe_ytdlp_version(ytdlp)
+        if ytdlp_version_outdated(ytdlp_ver) and not ytdlp_allow_old():
+            # Soft-fail before resolve — stale Pi builds (e.g. 2025.04.30) never
+            # produce feeder PCM; search still works via the Data API.
+            self._last_error = ytdlp_upgrade_message(ytdlp_ver)
             raise ValueError(self._last_error)
         sink = (feeder or _feeder_sink()).strip() or _feeder_sink()
         page = watch_url(vid)
