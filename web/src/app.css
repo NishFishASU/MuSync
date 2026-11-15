@@ -221,6 +221,55 @@ body {
 	animation-delay: 0.17s;
 }
 
+.streaming-panel {
+	grid-column: 1 / -1;
+}
+
+.stream-status {
+	display: grid;
+	grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+	gap: 0.75rem;
+	margin-bottom: 0.85rem;
+}
+
+.stream-card {
+	display: flex;
+	flex-direction: column;
+	align-items: flex-start;
+	gap: 0.4rem;
+	padding: 0.85rem 0.95rem;
+	border-radius: 12px;
+	border: 1px solid var(--line);
+	background: rgba(255, 255, 255, 0.03);
+}
+
+.stream-card .tiny {
+	font-size: 0.78rem;
+}
+
+.stream-search {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 0.5rem;
+	align-items: center;
+	margin-bottom: 0.55rem;
+}
+
+.stream-search input[type='search'] {
+	flex: 1 1 180px;
+	min-width: 140px;
+	padding: 0.55rem 0.7rem;
+	border-radius: 10px;
+	border: 1px solid var(--line);
+	background: rgba(0, 0, 0, 0.25);
+	color: var(--ink);
+	font: inherit;
+}
+
+.stream-hits .queue-main {
+	text-align: left;
+}
+
 .queue-panel {
 	animation-delay: 0.19s;
 }

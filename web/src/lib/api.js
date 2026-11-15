@@ -150,8 +150,53 @@
  * @property {number} enabled_count
  * @property {Record<string, string>} [hci_map]
  * @property {string} [detail]
+ * @property {boolean} [spotify_ready]
+ * @property {boolean} [apple_ready]
  */
 
+/**
+ * @typedef {Object} StreamingProviderStatus
+ * @property {'spotify' | 'apple'} provider
+ * @property {boolean} configured
+ * @property {boolean} authenticated
+ * @property {string | null} [display_name]
+ * @property {boolean | null} [librespot_available]
+ * @property {boolean | null} [librespot_running]
+ * @property {string | null} [librespot_name]
+ * @property {string | null} [feeder]
+ * @property {string | null} [redirect_uri]
+ * @property {boolean | null} [premium_required]
+ * @property {boolean | null} [user_token_set]
+ * @property {string | null} [airplay_source]
+ * @property {string | null} [playback_mode]
+ * @property {string[]} [limits]
+ * @property {string} [note]
+ */
+
+/**
+ * @typedef {Object} StreamingStatus
+ * @property {StreamingProviderStatus} spotify
+ * @property {StreamingProviderStatus} apple
+ * @property {boolean} [mock_playback]
+ */
+
+/**
+ * @typedef {Object} StreamingSearchHit
+ * @property {'spotify' | 'apple'} provider
+ * @property {string} id
+ * @property {string} uri
+ * @property {string} title
+ * @property {string} artist
+ * @property {number | null} [duration_ms]
+ * @property {string | null} [album]
+ */
+
+/**
+ * @typedef {Object} StreamingSearchResponse
+ * @property {'spotify' | 'apple'} provider
+ * @property {string} query
+ * @property {StreamingSearchHit[]} hits
+ */
 
 /**
  * @typedef {Object} WifiStatus
@@ -381,6 +426,42 @@ export function setActiveQueueItem(id) {
 	});
 }
 
+
+/** @returns {Promise<StreamingStatus>} */
+export function getStreamingStatus() {
+	return api('/api/streaming');
+}
+
+/** @returns {Promise<StreamingStatus>} */
+export function logoutSpotify() {
+	return api('/api/streaming/spotify/logout', { method: 'POST', body: '{}' });
+}
+
+/**
+ * @param {'spotify' | 'apple'} provider
+ * @param {string} q
+ * @param {number} [limit]
+ * @returns {Promise<StreamingSearchResponse>}
+ */
+export function searchStreaming(provider, q, limit = 15) {
+	const params = new URLSearchParams({
+		provider,
+		q,
+		limit: String(limit)
+	});
+	return api(`/api/streaming/search?${params}`);
+}
+
+/**
+ * @param {{ provider: 'spotify' | 'apple', uri: string, title?: string, artist?: string, duration_ms?: number, activate?: boolean }} body
+ * @returns {Promise<QueueItem>}
+ */
+export function addStreamingTrack(body) {
+	return api('/api/streaming/queue', {
+		method: 'POST',
+		body: JSON.stringify(body)
+	});
+}
 
 /** @returns {Promise<WifiStatus>} */
 export function getWifiStatus() {

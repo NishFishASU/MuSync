@@ -6,8 +6,8 @@ import re
 from pathlib import Path
 from urllib.parse import unquote
 
-from fastapi import FastAPI, File, HTTPException, Request, Response, UploadFile
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi import FastAPI, File, HTTPException, Query, Request, Response, UploadFile
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
 from . import __version__
@@ -29,6 +29,10 @@ from .models import (
     QueueItemCreate,
     QueueItemPatch,
     Source,
+    SourceType,
+    StreamingQueueAdd,
+    StreamingSearchResponse,
+    StreamingStatus,
     Transport,
     TransportPut,
     WifiConnectRequest,
@@ -36,6 +40,7 @@ from .models import (
     WifiSaveRequest,
     WifiStatus,
 )
+from .streaming import get_streaming_service
 from .wifi import WifiBackend, create_wifi_backend
 
 backend: AudioBackend = create_backend()
@@ -195,6 +200,85 @@ async def api_upload_input(host_id: str, file: UploadFile = File(...)) -> InputH
 def api_delete_input(host_id: str) -> Response:
     backend.remove_input(host_id)
     return Response(status_code=204)
+
+
+@app.get("/api/streaming", response_model=StreamingStatus)
+def api_streaming_status() -> StreamingStatus:
+    """Spotify / Apple auth + capability status (secrets never returned)."""
+    return get_streaming_service().status()
+
+
+@app.get("/api/streaming/spotify/login")
+def api_spotify_login() -> RedirectResponse:
+    """Start Spotify OAuth — redirects to accounts.spotify.com."""
+    url = get_streaming_service().spotify.auth_url()
+    return RedirectResponse(url)
+
+
+@app.get("/api/streaming/spotify/callback")
+def api_spotify_callback(
+    code: str | None = None,
+    state: str | None = None,
+    error: str | None = None,
+) -> RedirectResponse:
+    """OAuth redirect URI — stores tokens, then returns to the SPA."""
+    if error:
+        return RedirectResponse(f"/?spotify=error&detail={error}")
+    if not code or not state:
+        raise ValueError("Missing OAuth code/state")
+    get_streaming_service().spotify.handle_callback(code=code, state=state)
+    # Refresh queue availability now that auth is live.
+    try:
+        backend.list_sources()
+        if hasattr(backend, "_session"):
+            backend._session.refresh_live_availability()  # type: ignore[attr-defined]
+    except Exception:  # noqa: BLE001
+        pass
+    return RedirectResponse("/?spotify=connected")
+
+
+@app.post("/api/streaming/spotify/logout", response_model=StreamingStatus)
+def api_spotify_logout() -> StreamingStatus:
+    get_streaming_service().spotify.logout()
+    if hasattr(backend, "_session"):
+        try:
+            backend._session.refresh_live_availability()  # type: ignore[attr-defined]
+        except Exception:  # noqa: BLE001
+            pass
+    return get_streaming_service().status()
+
+
+@app.get("/api/streaming/search", response_model=StreamingSearchResponse)
+def api_streaming_search(
+    provider: str = Query(..., description="spotify or apple"),
+    q: str = Query(..., min_length=1),
+    limit: int = Query(15, ge=1, le=25),
+) -> StreamingSearchResponse:
+    return get_streaming_service().search(provider, q, limit=limit)
+
+
+@app.post("/api/streaming/queue", response_model=QueueItem, status_code=201)
+def api_streaming_queue_add(body: StreamingQueueAdd) -> QueueItem:
+    """Add a searched track to the hub queue and optionally activate it."""
+    source_type = SourceType.SPOTIFY if body.provider == "spotify" else SourceType.APPLE
+    title = body.title or body.uri
+    if body.artist:
+        title = f"{body.title or 'Track'} — {body.artist}"
+    item = backend.add_queue_item(
+        QueueItemCreate(
+            source_type=source_type,
+            locator=body.uri,
+            title=title,
+            duration_ms=body.duration_ms,
+            source_id=body.uri,
+        )
+    )
+    if body.activate:
+        backend.set_active_queue_item(item.id)
+        # Re-fetch in case availability/note updated on activate path.
+        items = {q.id: q for q in backend.list_queue()}
+        item = items.get(item.id, item)
+    return item
 
 
 @app.get("/api/wifi", response_model=WifiStatus)

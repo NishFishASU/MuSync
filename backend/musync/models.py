@@ -154,7 +154,10 @@ MAX_INPUT_HOSTS = 4
 
 # Source types that can feed PCM when their prerequisites are met.
 # INPUT is playable when the bound host is live (connected capture endpoint).
-PLAYABLE_SOURCE_TYPES = frozenset({SourceType.LOCAL, SourceType.INPUT})
+# SPOTIFY / APPLE become playable when streaming credentials (+ player) are ready.
+PLAYABLE_SOURCE_TYPES = frozenset(
+    {SourceType.LOCAL, SourceType.INPUT, SourceType.SPOTIFY, SourceType.APPLE}
+)
 
 
 class Source(BaseModel):
@@ -314,6 +317,59 @@ class Health(BaseModel):
     detail: str = ""
     mapped_sinks: int = 0
     graph_dry_run: bool = True
+    spotify_ready: bool = False
+    apple_ready: bool = False
+
+
+class StreamingProviderStatus(BaseModel):
+    provider: Literal["spotify", "apple"]
+    configured: bool = False
+    authenticated: bool = False
+    display_name: Optional[str] = None
+    librespot_available: Optional[bool] = None
+    librespot_running: Optional[bool] = None
+    librespot_name: Optional[str] = None
+    feeder: Optional[str] = None
+    redirect_uri: Optional[str] = None
+    premium_required: Optional[bool] = None
+    user_token_set: Optional[bool] = None
+    airplay_source: Optional[str] = None
+    playback_mode: Optional[str] = None
+    limits: list[str] = Field(default_factory=list)
+    note: str = ""
+
+
+class StreamingStatus(BaseModel):
+    spotify: StreamingProviderStatus
+    apple: StreamingProviderStatus
+    mock_playback: bool = False
+
+
+class StreamingSearchHit(BaseModel):
+    provider: Literal["spotify", "apple"]
+    id: str
+    uri: str
+    title: str
+    artist: str
+    duration_ms: Optional[int] = None
+    album: Optional[str] = None
+
+
+class StreamingSearchResponse(BaseModel):
+    provider: Literal["spotify", "apple"]
+    query: str
+    hits: list[StreamingSearchHit] = Field(default_factory=list)
+
+
+class StreamingQueueAdd(BaseModel):
+    """Add a searched streaming track to the song queue (hub, no host binding)."""
+
+    provider: Literal["spotify", "apple"]
+    uri: str
+    title: Optional[str] = None
+    artist: Optional[str] = None
+    duration_ms: Optional[int] = None
+    activate: bool = True
 
 
 class WifiNetwork(BaseModel):

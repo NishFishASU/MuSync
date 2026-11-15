@@ -26,6 +26,7 @@ Phone as **A2DP source** (S21 FE → `bluez_input`) vs phone as **SPP sink**: se
 | Enable/disable | Unload that sink's loopback only (others keep playing) |
 | Discovery | `wpctl status` / `bluetoothctl` → UI by friendly name (MAC auto-filled) |
 | Feeder | One `musync_feeder` null-sink — startup purges orphan `MuSync_Feeder` modules |
+| Streaming | Spotify librespot → feeder; Apple best-effort AirPlay — [spotify-apple.md](spotify-apple.md) |
 
 ## Cloud vs Pi
 

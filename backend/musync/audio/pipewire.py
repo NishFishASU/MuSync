@@ -886,6 +886,12 @@ class PipeWireBackend(AudioBackend):
 
     def _stop_player_process(self) -> None:
         self._unload_capture()
+        try:
+            from ..streaming import get_streaming_service
+
+            get_streaming_service().stop_spotify()
+        except Exception as exc:  # noqa: BLE001
+            log.debug("Spotify stop: %s", exc)
         if self._player_proc is None:
             return
         proc = self._player_proc
@@ -982,13 +988,87 @@ class PipeWireBackend(AudioBackend):
             self._feeder,
         )
 
+    def _start_spotify_into_feeder(self, locator: str) -> None:
+        """librespot Connect → PULSE_SINK=musync_feeder; Web API transfers the track."""
+        from ..streaming import get_streaming_service
+
+        self._ensure_feeder()
+        svc = get_streaming_service()
+        if self._env_dry_run():
+            log.info("Dry-run Spotify play %s → %s", locator, self._feeder)
+            return
+        try:
+            result = svc.play_spotify(locator, feeder=self._feeder)
+            log.info("Spotify Connect play: %s", result)
+        except ValueError as exc:
+            # Degraded: 30s preview via mpv when Connect device missing.
+            preview = svc.spotify.preview_url_for(locator)
+            if preview:
+                log.warning("Spotify Connect failed (%s) — preview via mpv", exc)
+                self._start_mpv_into_feeder(preview, position_ms=0)
+                return
+            raise
+
+    def _start_apple_into_feeder(self) -> None:
+        """Best-effort: loop shairport/AirPlay PipeWire source into musync_feeder."""
+        from ..streaming import get_streaming_service
+
+        svc = get_streaming_service()
+        source_ref = svc.apple_airplay_source()
+        if not source_ref:
+            raise ValueError(svc.apple_play_note())
+        self._ensure_feeder()
+        # Reuse capture loopback path with a synthetic host id.
+        cmds, notes = build_capture_loopback_commands(
+            host_id="apple-airplay",
+            feeder=self._feeder,
+            source_ref=source_ref,
+            tools=self._tools,
+        )
+        for note in notes:
+            log.info("%s", note)
+        if self._env_dry_run():
+            for cmd in cmds:
+                log.info("Dry-run Apple AirPlay capture: %s", " ".join(cmd))
+            self._active_capture_host_id = "apple-airplay"
+            return
+        self._unload_capture("apple-airplay")
+        for cmd in cmds:
+            proc = self._exec_soft(cmd)
+            if (
+                proc
+                and proc.returncode == 0
+                and len(cmd) >= 3
+                and cmd[1] == "load-module"
+                and cmd[2] == "module-loopback"
+                and proc.stdout.strip().isdigit()
+            ):
+                self._capture_module_ids["apple-airplay"] = proc.stdout.strip()
+        self._active_capture_host_id = "apple-airplay"
+        log.info("Apple AirPlay capture %s → %s", source_ref, self._feeder)
+
     def _start_player_process(self) -> None:
-        """Start feeder: local mpv, network upload file, or BT/USB capture loopback.
+        """Start feeder: local mpv, streaming, network upload, or BT/USB capture.
 
         Does not tear down sink loopbacks / SPP listens.
         """
         self._stop_player_process()
         transport = self._session.get_transport()
+
+        if transport.source_type == SourceType.SPOTIFY:
+            locator = self._session.active_locator() or ""
+            try:
+                self._start_spotify_into_feeder(locator)
+            except ValueError as exc:
+                log.warning("Spotify feeder: %s", exc)
+            return
+
+        if transport.source_type == SourceType.APPLE:
+            try:
+                self._start_apple_into_feeder()
+            except ValueError as exc:
+                log.warning("Apple feeder: %s", exc)
+            return
 
         if transport.source_type == SourceType.INPUT and transport.input_id:
             try:
@@ -1357,6 +1437,9 @@ class PipeWireBackend(AudioBackend):
                 )
             if spp_n == 0:
                 hint += "; NO_SPP_SINK (add kind: network_spp spp-1)"
+            from ..streaming import get_streaming_service
+
+            stream = get_streaming_service().status()
             return Health(
                 ok=True,
                 backend="pipewire",
@@ -1366,6 +1449,8 @@ class PipeWireBackend(AudioBackend):
                 hci_map=hci_map,
                 mapped_sinks=mapped,
                 graph_dry_run=dry,
+                spotify_ready=stream.spotify.authenticated,
+                apple_ready=stream.apple.authenticated,
                 detail=(
                     f"{detail}; mapped={mapped}/{len(devices)}; "
                     f"planned_links={links}; dry_run={dry}; tools: {tools}{hint}"

@@ -114,23 +114,23 @@ DEFAULT_PI_DEVICES: list[dict[str, Any]] = [
     {**DEFAULT_SPP_DEVICE},
 ]
 
-# Hub-side stream stubs only. Phone/PC inputs come from InputRegistry (≤4 hosts).
+# Hub-side stream catalog rows. Availability flips when StreamingService is ready.
 PLACEHOLDER_SOURCES: list[Source] = [
     Source(
-        id="spotify:hub-stub",
-        title="Spotify (hub Connect — later)",
+        id="spotify:hub",
+        title="Spotify (hub Connect)",
         type=SourceType.SPOTIFY,
-        locator="spotify:hub:stub",
+        locator="spotify:hub",
         available=False,
-        note="Stub — prefer a phone/PC host's Spotify session when registered",
+        note="Connect Spotify in Streaming — librespot → musync_feeder",
     ),
     Source(
-        id="apple:hub-stub",
-        title="Apple Music (hub — later)",
+        id="apple:hub",
+        title="Apple Music (hub — limited on Linux)",
         type=SourceType.APPLE,
-        locator="apple:hub:stub",
+        locator="apple:hub",
         available=False,
-        note="Stub — prefer a phone/PC host's Apple Music session when registered",
+        note="MusicKit search + optional AirPlay/shairport → feeder; see docs/spotify-apple.md",
     ),
 ]
 
