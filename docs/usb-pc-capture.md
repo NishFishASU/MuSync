@@ -15,7 +15,7 @@ PC / USB DAC ──► ALSA (hw:N) ──► PipeWire alsa_input.usb-… ──�
                                                               │
                                               ┌───────────────┼───────────────┐
                                               ▼               ▼               ▼
-                                         Qudelix / BT600   …            Phone SPP
+                                         Qudelix / USB HCI …            Phone SPP
 ```
 
 ## Auto-detect (preferred)

@@ -5,7 +5,7 @@ Short path for a reliable two-sink demo on a Raspberry Pi 5. No YAML MAC editing
 ## Before the room
 
 1. Pi on power + LAN (or phone hotspot — [wifi-join.md](wifi-join.md)).
-2. Qudelix powered and previously paired (`./scripts/pair_bt600.sh hci0` or `bluetoothctl`).
+2. Qudelix powered and previously paired (`./scripts/pair_hci.sh hci0` or `bluetoothctl`).
 3. Phone: Simple Protocol Player installed; note Pi IP from UI **Wi‑Fi → Pi IP**.
 4. Drop a short WAV/FLAC/MP3 into `media/`.
 5. UI built: `./scripts/build_web.sh` (or rsync `web/build/`).

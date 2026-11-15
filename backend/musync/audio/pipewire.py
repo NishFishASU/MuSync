@@ -10,7 +10,7 @@ r"""PipeWireBackend — Pi demo control plane via wpctl / pactl / pw-link / mpv.
         │  module-loopback latency_msec=<delay_ms>   (per enabled sink)
         ├──────────────► bluez_output.<MAC>   (hci0 / speaker 1)
         ├──────────────► bluez_output.<MAC>   (hci1 / speaker 2)
-        └──────────────► … up to 6 BT600 A2DP sinks (+ optional SPP TCP)
+        └──────────────► … up to 6 BlueZ HCI A2DP sinks (+ optional SPP TCP)
 ```
 
 Live phone input (priority): phone pairs as A2DP **source** → ``bluez_input.*``
@@ -52,7 +52,7 @@ wpctl set-mute <NODE_ID> 0
 mpv --no-video --ao=pipewire --audio-device=musync_feeder /path/to/track.flac
 ```
 
-HCI ↔ speaker: one ASUS BT600 per A2DP sink; persist MAC + hci in devices.yaml.
+HCI ↔ speaker: one BlueZ HCI adapter per A2DP sink; persist MAC + hci in devices.yaml.
 """
 
 from __future__ import annotations
@@ -212,7 +212,7 @@ class PipeWireBackend(AudioBackend):
         self._bt_scanning: bool = False
         self._bt_scan_cache: dict[str, DiscoveredBluetoothSink] = {}
         self._bt_scan_cleared_macs: set[str] = set()
-        # Onboard + USB HCI inventory (dead BT600s marked unhealthy, never block).
+        # Onboard + USB HCI inventory (unhealthy dongles marked dead, never block).
         self._bt_adapters: list[BluetoothAdapter] = []
         self._bt_adapters_detail: str = ""
         self._last_adapter_probe_at: float = 0.0
@@ -241,7 +241,7 @@ class PipeWireBackend(AudioBackend):
         # Refresh map / plan once at startup (no-op / dry-run without hardware).
         # Purge orphan MuSync_Feeder null-sinks from prior soft-load restarts.
         # Free SPP ports + soft-reconnect paired BT so UI shows READY after reboot.
-        # Adapter probe is soft — dead BT600 timeouts must not block API boot.
+        # Adapter probe is soft — unhealthy USB HCI timeouts must not block API boot.
         try:
             self._refresh_adapters(force=True)
             if not self._env_dry_run():
@@ -765,7 +765,7 @@ class PipeWireBackend(AudioBackend):
             log.info("SPP preflight :%s — %s", port, detail)
 
     def _refresh_adapters(self, *, force: bool = False) -> list[BluetoothAdapter]:
-        """Probe onboard + USB HCI adapters; dead BT600s soft-fail (short timeout)."""
+        """Probe onboard + USB HCI adapters; unhealthy dongles soft-fail (short timeout)."""
         now = time.monotonic()
         if (
             not force
@@ -783,6 +783,8 @@ class PipeWireBackend(AudioBackend):
                 powered=a.powered,
                 healthy=a.healthy,
                 onboard=a.onboard,
+                bus=a.bus,
+                usb_id=a.usb_id,
                 detail=a.detail,
             )
             for a in raw
@@ -808,6 +810,8 @@ class PipeWireBackend(AudioBackend):
                 powered=a.powered,
                 healthy=a.healthy,
                 onboard=a.onboard,
+                bus=a.bus,
+                usb_id=a.usb_id,
                 detail=a.detail,
             )
             for a in adapters
@@ -856,6 +860,8 @@ class PipeWireBackend(AudioBackend):
                 powered=a.powered,
                 healthy=a.healthy,
                 onboard=a.onboard,
+                bus=a.bus,
+                usb_id=a.usb_id,
                 detail=a.detail,
             )
             for a in adapters
@@ -897,7 +903,7 @@ class PipeWireBackend(AudioBackend):
 
         Demo reboot path: Qudelix is paired but A2DP may be down until
         ``bluetoothctl connect``. Throttled so UI polls cannot spam BlueZ.
-        Dead BT600 adapters are skipped (short connect timeout).
+        Unhealthy USB HCI adapters are skipped (short connect timeout).
         """
         now = time.monotonic()
         if (

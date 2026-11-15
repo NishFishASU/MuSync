@@ -12,8 +12,8 @@ mpv local file  OR  bluez_input / USB capture (module-loopback)
   musync_feeder          (pactl module-null-sink)
         │
         │  module-loopback latency_msec=<delay_ms>
-        ├────────────────► bluez_output.<MAC_1>   (BT600 hci0)
-        └────────────────► bluez_output.<MAC_2>   (BT600 hci1)
+        ├────────────────► bluez_output.<MAC_1>   (HCI hci0 — onboard or USB)
+        └────────────────► bluez_output.<MAC_2>   (HCI hci1 — USB dongle)
                            … up to 6 (+ optional SPP TCP)
 ```
 
@@ -45,7 +45,7 @@ Missing/broken `devices.yaml` is fine: the API boots with **Phone SPP** defaults
 ```bash
 cd /path/to/MuSync
 export MUSYNC_BACKEND=pipewire
-./scripts/pair_bt600.sh hci0            # if not already paired
+./scripts/pair_hci.sh hci0              # if not already paired (generic BlueZ HCI)
 ./scripts/build_web.sh                  # once, or rsync laptop build
 ./scripts/run_pi.sh                     # clears stray ffmpeg; soft-reconnects paired BT
 # Open http://<Pi-IP>:8080 → Device setup
@@ -58,15 +58,17 @@ Demo path: [demo-checklist.md](demo-checklist.md).
 
 1. Install packages (see README) — include `ffmpeg` + `pipewire-pulse` for SPP.
 2. Build UI: `./scripts/build_web.sh` → `web/build/` (gitignored; copy from laptop OK).
-3. Stabilize BT600 HCI — see [bt600-realtek.md](./bt600-realtek.md).
-4. **Device setup** in the web UI: pick BT by friendly name (MAC filled from bluez/bluetoothctl), set sink type + SPP host/port/rate/channels, Save → atomic write to `devices.yaml`.
+3. Optional USB HCI chips (e.g. ASUS BT600 / RTL8761) — see [bt600-realtek.md](./bt600-realtek.md). MuSync itself is chip-agnostic.
+4. **Device setup** in the web UI: pick BT by friendly name (MAC filled from bluez/bluetoothctl), set sink type + SPP host/port/rate/channels, Save → atomic write to `devices.yaml`. Adapter chips show onboard/USB · ready/in use/dead; assign HCI on Connect when multiple are free.
 5. Play hub-local; phone SPP → Pi IP:port / configured rate & channels. Details: [spp-network-sink.md](./spp-network-sink.md).
 
 Optional YAML templates (`config/devices.pi-2sink.example.yaml`) remain for advanced edits; they are not required for the demo path.
 
 Scale to 4 then 6 by enabling more discovered BT sinks in the UI (≤6 A2DP) — same software path.
-Onboard-only is fine (one A2DP sink); extra USB BT600s expand capacity when healthy.
-Dead BT600s are soft-skipped (short BlueZ timeouts) so they never block scan/reconnect.
+Onboard-only is fine (one A2DP sink); extra USB HCI dongles expand capacity when healthy.
+Unhealthy USB HCI sticks are soft-skipped (short BlueZ timeouts) so they never block onboard scan/reconnect.
+
+**Untested without hardware:** multi-dongle USB HCI A2DP is inventoried and soft-fail ready in software; live verification awaits a working dongle (BT600 was dead).
 
 ## Manual command cheat-sheet
 

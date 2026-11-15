@@ -1,6 +1,6 @@
 # SPP TCP network sink (Simple Protocol Player)
 
-MuSync can fan the same session out to a phone running **Simple Protocol Player** over TCP, alongside Qudelix / BT600 A2DP sinks.
+MuSync can fan the same session out to a phone running **Simple Protocol Player** over TCP, alongside Qudelix / USB HCI A2DP sinks.
 
 ## Verified standalone path (user-tested)
 
