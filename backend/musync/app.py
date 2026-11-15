@@ -588,10 +588,45 @@ def _index_html() -> Path:
     return web_root() / "index.html"
 
 
+_SPA_PAGES = frozenset(
+    {"outputs", "inputs", "streaming", "queue", "wifi", "profiles"}
+)
+
+
+def _spa_page_file(page: str) -> Path | None:
+    """Resolve a tab route to a built HTML file (dir index or flat .html)."""
+    root = web_root()
+    for candidate in (
+        root / page / "index.html",
+        root / f"{page}.html",
+        root / "index.html",
+    ):
+        if candidate.is_file():
+            return candidate
+    return None
+
+
 @app.get("/")
 def index() -> FileResponse:
     path = _index_html()
     if not path.is_file():
+        raise HTTPException(
+            status_code=503,
+            detail="UI not built — run: cd web && npm ci && npm run build",
+        )
+    return FileResponse(path)
+
+
+@app.get("/{page}")
+@app.get("/{page}/")
+def spa_tab(page: str) -> FileResponse:
+    """Deep-link SvelteKit tabs when StaticFiles won't map /outputs → outputs.html."""
+    if page.startswith("_") or page == "api":
+        raise HTTPException(status_code=404)
+    if page not in _SPA_PAGES:
+        raise HTTPException(status_code=404)
+    path = _spa_page_file(page)
+    if path is None:
         raise HTTPException(
             status_code=503,
             detail="UI not built — run: cd web && npm ci && npm run build",
