@@ -399,23 +399,90 @@ def test_spotify_search_shape_of_you_maps_hits(tmp_path, monkeypatch) -> None:
     assert kwargs["params"]["market"] == "US"
     assert kwargs["params"]["market"] != "from_token"
     assert kwargs["params"]["q"] == "Shape Of You"
-    # Spotify rejects non-integer / out-of-range limit — must be int string 1..50
-    assert kwargs["params"]["limit"] == "15"
+    # Dev Mode: limit must be digit string ≤10 (15 used to 400 Invalid limit)
+    assert kwargs["params"]["limit"] == "10"
     assert isinstance(kwargs["params"]["limit"], str)
+    assert kwargs["params"]["limit"].isdigit()
 
 
-def test_clamp_search_limit_is_int_string_1_to_50() -> None:
-    from musync.streaming.spotify import _clamp_search_limit
+def test_clamp_search_limit_dev_mode_max_10(monkeypatch) -> None:
+    """Dev Mode Spotify apps reject limit>10 with 400 Invalid limit."""
+    from musync.streaming.spotify import _clamp_search_limit, _coerce_query_int
 
-    assert _clamp_search_limit(15) == "15"
-    assert _clamp_search_limit("15") == "15"
+    monkeypatch.delenv("MUSYNC_SPOTIFY_SEARCH_MAX", raising=False)
+    assert _clamp_search_limit(15) == "10"
+    assert _clamp_search_limit("15") == "10"
     assert _clamp_search_limit(0) == "1"
     assert _clamp_search_limit(-3) == "1"
+    assert _clamp_search_limit(99) == "10"
+    assert _clamp_search_limit(10) == "10"
+    assert _clamp_search_limit("nope") == "10"
+    assert _clamp_search_limit(None) == "10"
+    # FastAPI/query oddities: list / tuple / blank
+    assert _clamp_search_limit([15]) == "10"
+    assert _clamp_search_limit(["8"]) == "8"
+    assert _clamp_search_limit([]) == "10"
+    assert _coerce_query_int(["12"], default=10) == 12
+    assert _coerce_query_int(None, default=10) == 10
+    monkeypatch.setenv("MUSYNC_SPOTIFY_SEARCH_MAX", "50")
+    assert _clamp_search_limit(15) == "15"
     assert _clamp_search_limit(99) == "50"
-    assert _clamp_search_limit(50) == "50"
-    assert _clamp_search_limit("nope") == "15"
-    assert _clamp_search_limit(None) == "15"
-    assert all(isinstance(_clamp_search_limit(n), str) for n in (1, 25, 50))
+    assert all(isinstance(_clamp_search_limit(n), str) for n in (1, 10, 15))
+
+
+def test_spotify_search_api_clamps_default_limit_to_10(tmp_path, monkeypatch) -> None:
+    """GET /api/streaming/search without limit must not send Spotify limit=15."""
+    from unittest.mock import MagicMock, patch
+
+    from musync.app import create_app
+
+    token_path = tmp_path / "spotify_tokens.json"
+    token_path.write_text(
+        json.dumps(
+            {
+                "access_token": "test-access",
+                "refresh_token": "test-refresh",
+                "expires_at": 9999999999,
+                "display_name": "Test User",
+                "scope": "streaming",
+            }
+        ),
+        encoding="utf-8",
+    )
+    backend = _backend(tmp_path, monkeypatch)
+    monkeypatch.setenv("MUSYNC_SPOTIFY_CLIENT_ID", "cid")
+    monkeypatch.setenv("MUSYNC_SPOTIFY_CLIENT_SECRET", "csecret")
+    monkeypatch.setenv("MUSYNC_SPOTIFY_TOKEN_PATH", str(token_path))
+    monkeypatch.delenv("MUSYNC_SPOTIFY_SEARCH_MAX", raising=False)
+    reset_streaming_service()
+    client = TestClient(create_app(audio_backend=backend))
+
+    search_resp = MagicMock()
+    search_resp.status_code = 200
+    search_resp.json.return_value = {"tracks": {"items": []}}
+    search_resp.text = "{}"
+    mock_client = MagicMock()
+    mock_client.__enter__.return_value = mock_client
+    mock_client.__exit__.return_value = False
+    mock_client.get.return_value = search_resp
+
+    with patch("musync.streaming.spotify.httpx.Client", return_value=mock_client):
+        # Explicit oversized limit — must clamp to 10 for Dev Mode
+        res = client.get(
+            "/api/streaming/search",
+            params={"provider": "spotify", "q": "Shape Of You", "limit": 15},
+        )
+        assert res.status_code == 200
+        assert mock_client.get.call_args.kwargs["params"]["limit"] == "10"
+
+        # Duplicate query keys / stringy list-ish values still coerce
+        res2 = client.get(
+            "/api/streaming/search?provider=spotify&q=test&limit=15&limit=20"
+        )
+        assert res2.status_code == 200
+        sent = mock_client.get.call_args.kwargs["params"]["limit"]
+        assert sent == "10"
+        assert isinstance(sent, str)
 
 
 def test_spotify_search_works_without_user_read_private(tmp_path, monkeypatch) -> None:

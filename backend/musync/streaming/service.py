@@ -103,7 +103,7 @@ class StreamingService:
             return self.youtube_playable()
         return False
 
-    def search(self, provider: str, query: str, *, limit: int = 15) -> StreamingSearchResponse:
+    def search(self, provider: str, query: str, *, limit: int = 10) -> StreamingSearchResponse:
         p = (provider or "").strip().lower()
         if p == "spotify":
             tracks = self.spotify.search_tracks(query, limit=limit)

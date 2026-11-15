@@ -2342,6 +2342,9 @@
 							{#if streaming?.spotify?.search_market}
 								· search market <code>{streaming.spotify.search_market}</code>
 							{/if}
+							{#if streaming?.spotify?.search_limit_max}
+								· max <code>{streaming.spotify.search_limit_max}</code>
+							{/if}
 						</p>
 					{:else}
 						<button

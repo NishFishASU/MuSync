@@ -65,13 +65,45 @@ def _search_market() -> str:
     return "US"
 
 
-def _clamp_search_limit(limit: Any) -> str:
-    """Spotify /search ``limit`` must be an integer string in 1..50 (else 400 Invalid limit)."""
+def _search_limit_max() -> int:
+    """Max ``limit`` for /v1/search.
+
+    Development Mode Spotify apps reject anything above **10** with a misleading
+    ``400 Invalid limit``. Extended Quota Mode still allows up to 50 — set
+    ``MUSYNC_SPOTIFY_SEARCH_MAX=50`` if your app has extended quota.
+    """
+    raw = (os.environ.get("MUSYNC_SPOTIFY_SEARCH_MAX") or "10").strip()
     try:
-        n = int(limit)  # noqa: try float/str/"15"
+        n = int(raw)
+    except ValueError:
+        n = 10
+    return max(1, min(n, 50))
+
+
+def _coerce_query_int(value: Any, *, default: int) -> int:
+    """Normalize FastAPI/httpx query values that may arrive as list/tuple/str/None."""
+    if value is None or value is False:
+        return default
+    if isinstance(value, (list, tuple)):
+        if not value:
+            return default
+        value = value[0]
+    if isinstance(value, bool):
+        return default
+    if isinstance(value, float):
+        value = int(value)
+    try:
+        return int(str(value).strip())
     except (TypeError, ValueError):
-        n = 15
-    return str(max(1, min(n, 50)))
+        return default
+
+
+def _clamp_search_limit(limit: Any) -> str:
+    """Spotify /search ``limit`` as digit string in 1..SEARCH_MAX (Dev Mode max 10)."""
+    cap = _search_limit_max()
+    default = min(10, cap)
+    n = _coerce_query_int(limit, default=default)
+    return str(max(1, min(n, cap)))
 
 
 def _client_id() -> str:
@@ -213,6 +245,7 @@ class SpotifyClient:
             "scopes": sorted(self.granted_scopes()),
             "missing_scopes": missing,
             "search_market": _search_market(),
+            "search_limit_max": _search_limit_max(),
             "limits": limits,
             "note": note,
         }
@@ -747,8 +780,9 @@ class SpotifyClient:
         if path.startswith("/search"):
             if "invalid limit" in detail_l:
                 return (
-                    "Spotify search rejected limit — MuSync sends limit as an integer "
-                    f"string from 1–50. ({detail})"
+                    "Spotify search rejected limit — Development Mode apps allow at most "
+                    f"10 results per /search request (set MUSYNC_SPOTIFY_SEARCH_MAX=10). "
+                    f"MuSync now clamps to {_search_limit_max()}. ({detail})"
                 )
             return f"Spotify search failed ({status}): {detail}"
         if status == 403:

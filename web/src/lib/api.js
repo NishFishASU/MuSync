@@ -276,6 +276,7 @@
  * @property {string[]} [missing_scopes]
  * @property {string | null} [playback_mode]
  * @property {string | null} [search_market]
+ * @property {number | null} [search_limit_max]
  * @property {string[]} [limits]
  * @property {string} [note]
  */
@@ -712,11 +713,13 @@ export function logoutSpotify() {
  * @param {number} [limit]
  * @returns {Promise<StreamingSearchResponse>}
  */
-export function searchStreaming(provider, q, limit = 15) {
+export function searchStreaming(provider, q, limit = 10) {
+	// Spotify Dev Mode /search max is 10 — larger values return 400 Invalid limit.
+	const n = Math.max(1, Math.min(Number(limit) || 10, 50));
 	const params = new URLSearchParams({
 		provider,
 		q,
-		limit: String(limit)
+		limit: String(Math.trunc(n))
 	});
 	return api(`/api/streaming/search?${params}`);
 }

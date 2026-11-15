@@ -547,15 +547,25 @@ def api_spotify_logout() -> StreamingStatus:
 
 @app.get("/api/streaming/search", response_model=StreamingSearchResponse)
 def api_streaming_search(
+    request: Request,
     provider: str = Query(..., description="spotify or youtube"),
     q: str = Query(..., min_length=1),
-    limit: int = Query(15, ge=1, le=50),
+    # Accept raw query string — FastAPI may pass duplicates as odd shapes; coerce below.
+    limit: str | None = Query("10"),
 ) -> StreamingSearchResponse:
     """Search Spotify/YouTube. Always returns 400 with a real message — never bare 500."""
+    from .streaming.spotify import _clamp_search_limit, _coerce_query_int
+
     p = (provider or "").strip().lower()
     svc = get_streaming_service()
-    # Spotify Web API rejects out-of-range / non-integer limit strings ("Invalid limit").
-    safe_limit = max(1, min(int(limit), 50))
+    # Prefer first query value if duplicated (?limit=15&limit=10); never leave as list.
+    raw_limit = request.query_params.get("limit", limit)
+    # Spotify Dev Mode: /search max limit is 10 (15+ → misleading "Invalid limit").
+    # YouTube can use a higher cap; spotify.search_tracks re-clamps via _clamp_search_limit.
+    safe_limit = _coerce_query_int(raw_limit, default=10)
+    safe_limit = max(1, min(safe_limit, 50))
+    if p == "spotify":
+        safe_limit = int(_clamp_search_limit(safe_limit))
     if p == "spotify" and not svc.spotify.configured():
         raise ValueError(
             "Spotify not configured — copy config/streaming.env.example to ~/musync.env, "
