@@ -137,6 +137,78 @@ body {
 	animation-delay: 0.05s;
 }
 
+.setup-panel {
+	animation-delay: 0.1s;
+	margin-bottom: 1rem;
+}
+
+.setup-grid {
+	display: grid;
+	grid-template-columns: 1fr 1fr;
+	gap: 1rem 1.25rem;
+}
+
+@media (max-width: 720px) {
+	.setup-grid {
+		grid-template-columns: 1fr;
+	}
+}
+
+.setup-sub {
+	margin: 0 0 0.55rem;
+	font-size: 0.95rem;
+	font-weight: 600;
+	letter-spacing: 0.02em;
+}
+
+.setup-list {
+	list-style: none;
+	margin: 0;
+	padding: 0;
+	display: flex;
+	flex-direction: column;
+	gap: 0.35rem;
+}
+
+.setup-check {
+	align-items: flex-start;
+}
+
+.setup-check .device-sub {
+	display: block;
+	margin-top: 0.15rem;
+}
+
+.setup-spp-fields {
+	display: grid;
+	grid-template-columns: 1fr 1fr;
+	gap: 0.55rem;
+	margin-top: 0.65rem;
+}
+
+.setup-actions {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 0.5rem;
+	margin-top: 0.9rem;
+}
+
+.setup-msg {
+	margin: 0.65rem 0 0;
+	font-size: 0.9rem;
+	color: var(--accent, #c4e17f);
+}
+
+.setup-warn {
+	margin: 0 0 0.75rem;
+	font-size: 0.88rem;
+	color: #e8c27a;
+}
+
+.setup-detail {
+	margin-top: 0.4rem;
+}
+
 .devices-panel {
 	animation-delay: 0.12s;
 }

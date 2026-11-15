@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import shutil
 import subprocess
 import wave
@@ -16,6 +17,7 @@ from .models import (
     MAX_BT_SINKS,
     MAX_SPP_SINKS,
     Device,
+    DeviceConfigEntry,
     DeviceKind,
     Source,
     SourceType,
@@ -28,7 +30,25 @@ DEMO_DURATION_MS = 180_000
 
 AUDIO_EXTENSIONS = {".wav", ".flac", ".mp3", ".ogg", ".m4a", ".aac"}
 
-# Default mock sinks (≤6) for cloud/dev without hardware.
+# Always-on SPP template — UI can enable/configure without copying YAML.
+DEFAULT_SPP_DEVICE: dict[str, Any] = {
+    "id": "spp-1",
+    "name": "Phone SPP",
+    "kind": "network_spp",
+    "mac": "",
+    "hci": "",
+    "connected": False,
+    "delay_ms": 0,
+    "volume": 0.9,
+    "mute": False,
+    "enabled": True,
+    "listen_host": "0.0.0.0",
+    "listen_port": 1234,
+    "sample_rate": 48000,
+    "channels": 1,
+}
+
+# Default mock sinks (≤6 BT + SPP) for cloud/dev without hardware.
 DEFAULT_MOCK_DEVICES: list[dict[str, Any]] = [
     {
         "id": "sink-1",
@@ -85,22 +105,13 @@ DEFAULT_MOCK_DEVICES: list[dict[str, Any]] = [
         "mute": False,
         "enabled": False,
     },
-    {
-        "id": "spp-1",
-        "name": "Phone SPP",
-        "kind": "network_spp",
-        "mac": "",
-        "hci": "",
-        "connected": True,
-        "delay_ms": 0,
-        "volume": 0.9,
-        "mute": False,
-        "enabled": True,
-        "listen_host": "0.0.0.0",
-        "listen_port": 1234,
-        "sample_rate": 48000,
-        "channels": 1,
-    },
+    {**DEFAULT_SPP_DEVICE, "connected": True},
+]
+
+# Pi / PipeWire boot when devices.yaml is missing or broken: SPP only until
+# discovery + UI save fills in bluez sinks by name (no placeholder MACs).
+DEFAULT_PI_DEVICES: list[dict[str, Any]] = [
+    {**DEFAULT_SPP_DEVICE},
 ]
 
 # Hub-side stream stubs only. Phone/PC inputs come from InputRegistry (≤4 hosts).
@@ -197,24 +208,88 @@ def validate_devices(devices: list[Device], *, require_min: int | None = None) -
     return devices
 
 
-def load_devices(*, require_min: int | None = None) -> list[Device]:
+def default_spp_device() -> Device:
+    return Device.model_validate(DEFAULT_SPP_DEVICE)
+
+
+def default_devices(*, backend: str = "mock") -> list[Device]:
+    """Boot defaults when YAML is missing/broken. Mock keeps demo sinks; Pi = SPP."""
+    raw = DEFAULT_MOCK_DEVICES if backend == "mock" else DEFAULT_PI_DEVICES
+    return validate_devices([Device.model_validate(d) for d in raw])
+
+
+def ensure_spp_present(devices: list[Device]) -> list[Device]:
+    """Guarantee at least one network_spp sink (UI always offers SPP)."""
+    if any(d.kind == DeviceKind.NETWORK_SPP for d in devices):
+        return devices
+    return validate_devices([*devices, default_spp_device()])
+
+
+def load_devices_result(
+    *,
+    require_min: int | None = None,
+    backend: str = "mock",
+) -> tuple[list[Device], bool, str]:
+    """Load devices.yaml; never raise on missing/broken file.
+
+    Returns ``(devices, ok, detail)``. On failure, returns backend defaults
+    (mock demo sinks or Pi SPP-only) so the API still boots.
+    """
     path = devices_config_path()
     if not path.is_file():
-        devices = [Device.model_validate(d) for d in DEFAULT_MOCK_DEVICES]
-        return validate_devices(devices, require_min=require_min)
+        devices = default_devices(backend=backend)
+        return devices, True, f"no config at {path} — using {backend} defaults"
 
-    with path.open("r", encoding="utf-8") as fh:
-        data = yaml.safe_load(fh) or {}
+    try:
+        with path.open("r", encoding="utf-8") as fh:
+            data = yaml.safe_load(fh)
+    except (OSError, yaml.YAMLError) as exc:
+        devices = default_devices(backend=backend)
+        return (
+            devices,
+            False,
+            f"broken config at {path} ({exc}) — using {backend} defaults",
+        )
+
+    if data is None:
+        devices = default_devices(backend=backend)
+        return devices, False, f"empty config at {path} — using {backend} defaults"
 
     raw_devices = data.get("devices") if isinstance(data, dict) else data
     if not isinstance(raw_devices, list):
-        raise ValueError(f"Invalid devices config at {path}: expected devices list")
+        devices = default_devices(backend=backend)
+        return (
+            devices,
+            False,
+            f"invalid devices list at {path} — using {backend} defaults",
+        )
 
-    devices = [Device.model_validate(item) for item in raw_devices]
-    return validate_devices(devices, require_min=require_min)
+    try:
+        devices = [Device.model_validate(item) for item in raw_devices]
+        devices = validate_devices(devices, require_min=require_min)
+        devices = ensure_spp_present(devices)
+        return devices, True, f"loaded {len(devices)} sinks from {path}"
+    except (ValueError, TypeError) as exc:
+        devices = default_devices(backend=backend)
+        return (
+            devices,
+            False,
+            f"invalid device entries at {path} ({exc}) — using {backend} defaults",
+        )
+
+
+def load_devices(*, require_min: int | None = None, backend: str = "mock") -> list[Device]:
+    """Load devices; tolerate missing/broken YAML (log + defaults, no crash)."""
+    devices, ok, detail = load_devices_result(require_min=require_min, backend=backend)
+    if not ok:
+        log.warning("devices.yaml: %s", detail)
+    else:
+        log.info("devices.yaml: %s", detail)
+    return devices
 
 
 def save_devices(devices: list[Device]) -> Path:
+    """Atomically write devices.yaml (temp file + replace)."""
     devices = validate_devices(devices)
     path = devices_config_path()
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -224,9 +299,113 @@ def save_devices(devices: list[Device]) -> Path:
         "max_spp_sinks": MAX_SPP_SINKS,
         "devices": [d.model_dump(mode="json") for d in devices],
     }
-    with path.open("w", encoding="utf-8") as fh:
-        yaml.safe_dump(payload, fh, sort_keys=False)
+    text = yaml.safe_dump(payload, sort_keys=False)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    with tmp.open("w", encoding="utf-8") as fh:
+        fh.write(text)
+        fh.flush()
+        os.fsync(fh.fileno())
+    os.replace(tmp, path)
     return path
+
+
+def slug_device_id(prefix: str, name: str, used: set[str]) -> str:
+    """Build a stable-ish id from a friendly name (``bt-qudelix``, ``spp-1``)."""
+    base = re.sub(r"[^a-z0-9]+", "-", name.strip().lower()).strip("-") or "sink"
+    base = base[:24]
+    candidate = f"{prefix}-{base}"
+    if candidate not in used:
+        return candidate
+    for i in range(2, 100):
+        alt = f"{candidate}-{i}"
+        if alt not in used:
+            return alt
+    return f"{candidate}-{len(used)+1}"
+
+
+def resolve_devices_from_config(
+    entries: list[DeviceConfigEntry],
+    *,
+    existing: list[Device] | None = None,
+    discovery_by_name: dict[str, dict[str, Any]] | None = None,
+    discovery_by_mac: dict[str, dict[str, Any]] | None = None,
+) -> list[Device]:
+    """Turn UI config entries into Device rows; fill MAC/pw_node from discovery by name.
+
+    ``discovery_by_name`` / ``discovery_by_mac`` map lower-name / upper-mac →
+    ``{mac, pw_node, pw_name, hci, connected}``. Callers build these from
+    PipeWire/bluetoothctl (or mock fixtures). No manual MAC typing required.
+    """
+    by_name = {k.strip().lower(): v for k, v in (discovery_by_name or {}).items()}
+    by_mac = {k.strip().upper(): v for k, v in (discovery_by_mac or {}).items()}
+    existing_by_id = {d.id: d for d in (existing or [])}
+    used_ids: set[str] = set()
+    out: list[Device] = []
+
+    for entry in entries:
+        kind = entry.kind
+        name = entry.name.strip() or (
+            "Phone SPP" if kind == DeviceKind.NETWORK_SPP else "Speaker"
+        )
+        prefix = "spp" if kind == DeviceKind.NETWORK_SPP else "bt"
+        device_id = (entry.id or "").strip() or slug_device_id(prefix, name, used_ids)
+        if device_id in used_ids:
+            device_id = slug_device_id(prefix, name, used_ids)
+        used_ids.add(device_id)
+
+        prev = existing_by_id.get(device_id)
+        mac = (entry.mac or (prev.mac if prev else "") or "").strip()
+        hci = (entry.hci or (prev.hci if prev else "") or "").strip()
+        pw_node = (entry.pw_node or (prev.pw_node if prev else "") or "").strip()
+        connected = bool(prev.connected) if prev else False
+
+        if kind == DeviceKind.BLUETOOTH:
+            hint = by_name.get(name.lower())
+            if not hint and mac:
+                hint = by_mac.get(mac.upper())
+            if hint:
+                mac = hint.get("mac") or mac
+                pw_node = hint.get("pw_node") or pw_node
+                hci = hint.get("hci") or hci
+                connected = bool(hint.get("connected", connected))
+
+        spp = prev if prev and prev.kind == DeviceKind.NETWORK_SPP else default_spp_device()
+        device = Device(
+            id=device_id,
+            name=name,
+            kind=kind,
+            mac=mac,
+            hci=hci,
+            pw_node=pw_node,
+            connected=connected if kind == DeviceKind.BLUETOOTH else bool(entry.enabled),
+            enabled=entry.enabled,
+            delay_ms=entry.delay_ms if entry.delay_ms is not None else (prev.delay_ms if prev else 0),
+            volume=entry.volume if entry.volume is not None else (prev.volume if prev else 0.85),
+            mute=entry.mute if entry.mute is not None else (prev.mute if prev else False),
+            listen_host=(
+                entry.listen_host
+                if entry.listen_host is not None
+                else (prev.listen_host if prev else spp.listen_host)
+            ),
+            listen_port=(
+                entry.listen_port
+                if entry.listen_port is not None
+                else (prev.listen_port if prev else spp.listen_port)
+            ),
+            sample_rate=(
+                entry.sample_rate
+                if entry.sample_rate is not None
+                else (prev.sample_rate if prev else spp.sample_rate)
+            ),
+            channels=(
+                entry.channels
+                if entry.channels is not None
+                else (prev.channels if prev else spp.channels)
+            ),
+        )
+        out.append(device)
+
+    return validate_devices(ensure_spp_present(out))
 
 
 def _probe_wav_duration_ms(path: Path) -> Optional[int]:

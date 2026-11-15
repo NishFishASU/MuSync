@@ -61,6 +61,9 @@ class DevicePatch(BaseModel):
     pw_node: Optional[str] = None
     connected: Optional[bool] = None
     kind: Optional[DeviceKind] = None
+    # MAC/hci are filled by discovery — UI should not require typing them.
+    mac: Optional[str] = None
+    hci: Optional[str] = None
     listen_host: Optional[str] = None
     listen_port: Optional[int] = Field(default=None, ge=1, le=65535)
     sample_rate: Optional[int] = Field(default=None, ge=8000, le=192000)
@@ -72,6 +75,56 @@ class DevicePatch(BaseModel):
         if v is None:
             return None
         return round(float(v), 3)
+
+
+class DiscoveredBluetoothSink(BaseModel):
+    """A bluez / PipeWire sink found on the hub (matched by friendly name)."""
+
+    name: str
+    mac: str = ""
+    pw_node: str = ""
+    pw_name: str = ""
+    hci: str = ""
+    paired: bool = False
+    connected: bool = False
+    configured_id: Optional[str] = None
+
+
+class DeviceDiscoverResponse(BaseModel):
+    """Discovery payload for the device-setup UI (no manual MAC entry)."""
+
+    bluetooth: list[DiscoveredBluetoothSink] = Field(default_factory=list)
+    spp_default: Device
+    config_path: str = ""
+    config_ok: bool = True
+    config_detail: str = ""
+    detail: str = ""
+
+
+class DeviceConfigEntry(BaseModel):
+    """One sink the UI wants to keep — type + SPP details; MAC filled server-side."""
+
+    id: Optional[str] = None
+    name: str
+    kind: DeviceKind = DeviceKind.BLUETOOTH
+    enabled: bool = True
+    # Optional: discovery hint (server fills mac/pw_node from name when omitted).
+    mac: Optional[str] = None
+    hci: Optional[str] = None
+    pw_node: Optional[str] = None
+    delay_ms: Optional[int] = Field(default=None, ge=0, le=2000)
+    volume: Optional[float] = Field(default=None, ge=0.0, le=1.0)
+    mute: Optional[bool] = None
+    listen_host: Optional[str] = None
+    listen_port: Optional[int] = Field(default=None, ge=1, le=65535)
+    sample_rate: Optional[int] = Field(default=None, ge=8000, le=192000)
+    channels: Optional[int] = Field(default=None, ge=1, le=2)
+
+
+class DevicesConfigPut(BaseModel):
+    """Replace configured sinks from the web UI (discovered BT + SPP)."""
+
+    devices: list[DeviceConfigEntry]
 
 
 class SourceType(str, Enum):

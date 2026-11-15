@@ -30,6 +30,46 @@
  */
 
 /**
+ * @typedef {Object} DiscoveredBluetoothSink
+ * @property {string} name
+ * @property {string} [mac]
+ * @property {string} [pw_node]
+ * @property {string} [pw_name]
+ * @property {string} [hci]
+ * @property {boolean} [paired]
+ * @property {boolean} [connected]
+ * @property {string | null} [configured_id]
+ */
+
+/**
+ * @typedef {Object} DeviceDiscoverResponse
+ * @property {DiscoveredBluetoothSink[]} bluetooth
+ * @property {Device} spp_default
+ * @property {string} [config_path]
+ * @property {boolean} [config_ok]
+ * @property {string} [config_detail]
+ * @property {string} [detail]
+ */
+
+/**
+ * @typedef {Object} DeviceConfigEntry
+ * @property {string} [id]
+ * @property {string} name
+ * @property {DeviceKind} kind
+ * @property {boolean} [enabled]
+ * @property {string} [mac]
+ * @property {string} [hci]
+ * @property {string} [pw_node]
+ * @property {number} [delay_ms]
+ * @property {number} [volume]
+ * @property {boolean} [mute]
+ * @property {string} [listen_host]
+ * @property {number} [listen_port]
+ * @property {number} [sample_rate]
+ * @property {number} [channels]
+ */
+
+/**
  * @typedef {Object} Source
  * @property {string} id
  * @property {string} title
@@ -151,9 +191,25 @@ export function listDevices() {
 	return api('/api/devices');
 }
 
+/** @returns {Promise<DeviceDiscoverResponse>} */
+export function discoverDevices() {
+	return api('/api/devices/discover');
+}
+
+/**
+ * @param {DeviceConfigEntry[]} devices
+ * @returns {Promise<Device[]>}
+ */
+export function putDevicesConfig(devices) {
+	return api('/api/devices/config', {
+		method: 'PUT',
+		body: JSON.stringify({ devices })
+	});
+}
+
 /**
  * @param {string} id
- * @param {Partial<Pick<Device, 'delay_ms' | 'volume' | 'mute' | 'enabled' | 'name' | 'listen_host' | 'listen_port' | 'sample_rate' | 'channels'>>} patch
+ * @param {Partial<Pick<Device, 'delay_ms' | 'volume' | 'mute' | 'enabled' | 'name' | 'kind' | 'listen_host' | 'listen_port' | 'sample_rate' | 'channels'>>} patch
  * @returns {Promise<Device>}
  */
 export function patchDevice(id, patch) {

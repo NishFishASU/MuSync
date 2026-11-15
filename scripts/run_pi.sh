@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Run MuSync on a Raspberry Pi 5 with the PipeWire backend.
-# Demo path: build SvelteKit UI → pair 2 speakers → start API + SPA.
+# Demo path: build SvelteKit UI → pair speakers → start API + SPA.
+# Device setup is done in the web UI (discover by name + SPP details) — no YAML MAC edit.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 
@@ -41,26 +42,16 @@ fi
 
 if [[ ! -f "$MUSYNC_DEVICES_CONFIG" ]]; then
   echo
-  echo "No devices.yaml yet — seeding Qudelix + SPP profile from"
-  echo "  config/devices.pi-2sink.example.yaml"
-  echo "You MUST replace REPLACE_WITH_* MACs before BT sinks leave MISSING."
-  cp "$ROOT/config/devices.pi-2sink.example.yaml" "$MUSYNC_DEVICES_CONFIG"
+  echo "No devices.yaml yet — API boots with Phone SPP defaults."
+  echo "  Open the UI → Device setup → enable discovered BT (e.g. Qudelix) + SPP → Save sinks."
+  echo "  (Broken YAML is also tolerated; save from the UI rewrites the file safely.)"
 fi
 
-# Loud warnings when still on placeholders / missing SPP (common “UI shows AA:BB MISSING”).
-if grep -Eqi 'AA:BB:CC:DD:EE:|REPLACE_WITH_' "$MUSYNC_DEVICES_CONFIG" 2>/dev/null; then
+# Soft hint only — placeholders are no longer required; UI discovery is preferred.
+if [[ -f "$MUSYNC_DEVICES_CONFIG" ]] && grep -Eqi 'AA:BB:CC:DD:EE:|REPLACE_WITH_' "$MUSYNC_DEVICES_CONFIG" 2>/dev/null; then
   echo
-  echo "WARNING: $MUSYNC_DEVICES_CONFIG still has placeholder MACs."
-  echo "  UI will show MISSING and Play will not reach Qudelix/bluez."
-  echo "  Fix:"
-  echo "    bluetoothctl devices          # find Qudelix MAC"
-  echo "    nano $MUSYNC_DEVICES_CONFIG   # set mac: \"A0:..\" on sink-1 (Qudelix)"
-  echo "    # keep spp-1 kind: network_spp enabled: true"
-fi
-if ! grep -Eq 'kind:[[:space:]]*network_spp' "$MUSYNC_DEVICES_CONFIG" 2>/dev/null; then
-  echo
-  echo "WARNING: no network_spp sink in $MUSYNC_DEVICES_CONFIG — Phone SPP will not appear."
-  echo "  Re-seed or append spp-1 from config/devices.pi-2sink.example.yaml"
+  echo "NOTE: $MUSYNC_DEVICES_CONFIG still has placeholder MACs."
+  echo "  Prefer UI Device setup (Refresh discovery → enable by name → Save) over editing YAML."
 fi
 
 missing=0
@@ -90,14 +81,14 @@ if command -v wpctl >/dev/null 2>&1; then
 fi
 
 echo
-echo "Qudelix + SPP checklist:"
-echo "  1) export MUSYNC_DEVICES_CONFIG=$MUSYNC_DEVICES_CONFIG"
-echo "  2) export MUSYNC_BACKEND=pipewire"
-echo "  3) Pair: ./scripts/pair_bt600.sh hci0   # or bluetoothctl"
-echo "  4) Edit devices.yaml: Qudelix mac + spp-1 enabled (kind: network_spp, port 1234)"
-echo "  5) Media in $MUSYNC_MEDIA_DIR ; UI: ./scripts/build_web.sh if needed"
-echo "  6) Restart this script; UI → enable Qudelix + Phone SPP → Play"
-echo "  7) Phone SPP app → Pi LAN/Tailscale IP:1234, 48000 Hz mono s16le"
+echo "Qudelix + SPP via web UI:"
+echo "  1) export MUSYNC_BACKEND=pipewire"
+echo "  2) Pair: ./scripts/pair_bt600.sh hci0   # or bluetoothctl"
+echo "  3) ./scripts/run_pi.sh  (this script)"
+echo "  4) Open http://<Pi-IP>:8080 → Device setup"
+echo "     - enable discovered BT by name (Qudelix) — no MAC typing"
+echo "     - enable Phone SPP; set port/rate/channels if needed → Save sinks"
+echo "  5) Play hub-local; phone SPP app → Pi IP:port, s16le"
 echo
 
 exec python3 -m musync

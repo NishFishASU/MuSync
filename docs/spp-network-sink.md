@@ -1,6 +1,6 @@
 # SPP TCP network sink (Simple Protocol Player)
 
-MuSync can fan the same PipeWire feeder out to a phone running **Simple Protocol Player** over TCP, alongside Qudelix / BT600 A2DP sinks.
+MuSync can fan the same session out to a phone running **Simple Protocol Player** over TCP, alongside Qudelix / BT600 A2DP sinks.
 
 ## Verified standalone path (user-tested)
 
@@ -21,51 +21,72 @@ In SPP on the phone:
 | Rate | `48000` |
 | Channels | `1` (mono) |
 
-## MuSync integration
+## Why MuSync used to fail (“unable to stream”)
 
-1. Seed from the Pi example (includes `spp-1` already):
+| Manual (works) | Old MuSync (broken) |
+|----------------|---------------------|
+| `-re -i <file>` always emits PCM | `-f pulse -i musync_feeder.monitor` often emits **no frames** until Play feeds the null sink |
+| No `-af` | `-af volume=…` / `adelay=…` delayed first PCM → SPP handshake timeout |
+| stderr free | `stderr=PIPE` unread could block ffmpeg |
 
-```bash
-cp config/devices.pi-2sink.example.yaml config/devices.yaml
-# edit Qudelix MAC; leave spp-1 enabled:
-#   kind: network_spp
-#   listen_port: 1234
-#   sample_rate: 48000
-#   channels: 1
-export MUSYNC_DEVICES_CONFIG="$PWD/config/devices.yaml"
-export MUSYNC_BACKEND=pipewire
-```
+## MuSync listen shape (fixed)
 
-   Mock cloud defaults also include `spp-1` on port `1234` when no yaml exists.
-2. Set `delay_ms` / `volume` like any other sink in the web UI.
-3. With `MUSYNC_BACKEND=pipewire`, MuSync starts (while `spp-1` is **enabled** — not only on Play):
+Idle (SPP enabled, not playing) — continuous silence so the phone can connect:
 
 ```text
-ffmpeg -f pulse -i musync_feeder.monitor -af "adelay=…,volume=…" \
+ffmpeg -f lavfi -i anullsrc=channel_layout=mono:sample_rate=48000 \
   -f s16le -acodec pcm_s16le -ar 48000 -ac 1 \
   tcp://0.0.0.0:1234?listen=1
 ```
 
-Bluez loopbacks for Qudelix / BT600 sinks are unchanged — SPP is an extra fan-out leg from the same feeder.
+Playing a hub-local file — **same argv as the proven manual command**:
+
+```text
+ffmpeg -re -i /path/to/track.wav \
+  -f s16le -acodec pcm_s16le -ar 48000 -ac 1 \
+  tcp://0.0.0.0:1234?listen=1
+```
+
+No `-af`. BT sinks still use the PipeWire feeder via mpv; SPP mirrors the local file like the manual demo.
 
 ## Pi + Qudelix + SPP phone
 
 ```bash
-cp config/devices.pi-2sink.example.yaml config/devices.yaml
-nano config/devices.yaml   # real Qudelix MAC; spp-1 enabled: true
-export MUSYNC_DEVICES_CONFIG="$PWD/config/devices.yaml"
 export MUSYNC_BACKEND=pipewire
 # stop manual ffmpeg listen / old MuSync if any
+pkill -f 'ffmpeg.*1234' || true
 ./scripts/run_pi.sh
 
-# UI: enable Qudelix + Phone SPP, Play a hub-local track
-# Phone: open SPP → Pi LAN/Tailscale IP:1234 → 48000 mono s16le
+# UI Device setup: enable Qudelix by name + Phone SPP → Save
+# Play a hub-local track, then connect phone (or connect during idle silence, reconnect after Play if needed)
+# Phone: SPP → Pi LAN/Tailscale IP:port → matching rate/channels s16le
+```
+
+## Pi verify (`ss` / `ps`)
+
+```bash
+# 1) MuSync SPP ffmpeg should be listening on 1234
+ss -ltnp | grep 1234
+# expect: LISTEN ...:1234 ... users:(("ffmpeg",pid=…,fd=…))
+
+# 2) Exact argv — should look like manual (file) or anullsrc (idle); NO -af, NO pulse.monitor
+ps -o args= -C ffmpeg | tr ' ' '\n' | head -40
+# or:
+tr '\0' ' ' < /proc/$(pgrep -f 'ffmpeg.*1234' | head -1)/cmdline; echo
+
+# 3) If port missing: check log
+tail -50 config/spp-spp-1.ffmpeg.log
+
+# 4) Manual still works when MuSync is stopped
+pkill -f 'python3 -m musync' || true
+pkill -f 'ffmpeg.*1234' || true
+ffmpeg -re -i media/test.wav -f s16le -acodec pcm_s16le -ar 48000 -ac 1 \
+  tcp://0.0.0.0:1234?listen=1
 ```
 
 Notes:
 
-- Listener starts when the SPP sink is **enabled** (backend boot / enable toggle) — **not** only on Play. Phone can connect before Play.
-- **Play does not restart** a healthy ffmpeg listen (restarting would drop the TCP session). Dead listeners are revived; changing port / rate / channels / delay / volume / mute still restarts that process only.
+- Listener starts when the SPP sink is **enabled** (idle `anullsrc`), not only on Play.
+- On Play with a local file, SPP switches to `-re -i <file>` (may drop one TCP session — reconnect phone after Play, or connect after Play).
 - Format must match the device row: default **48000 Hz / 1 ch / s16le**, port **1234**, host = Pi LAN or Tailscale IP (not `0.0.0.0` in the phone app).
-- Requires PipeWire pulse compat (`pipewire-pulse`) so ffmpeg can read `musync_feeder.monitor`, plus `ffmpeg` with `--enable-libpulse`. Dry-run (`MUSYNC_PW_DRY_RUN=1`) logs the command without binding the port.
-- If the phone connects while a **manual** `ffmpeg …?listen=1` is still bound to 1234, MuSync cannot bind — stop the manual listener first.
+- If a **manual** `ffmpeg …?listen=1` still owns 1234, MuSync cannot bind — stop it first.

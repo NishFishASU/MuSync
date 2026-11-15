@@ -56,10 +56,10 @@ bluetoothctl trust "$SPEAKER_MAC"
 bluetoothctl connect "$SPEAKER_MAC"
 
 echo
-echo "Done. Update config/devices.yaml:"
-echo "  hci: $HCI"
-echo "  mac: \"$SPEAKER_MAC\""
+echo "Done. Speaker paired on $HCI ($SPEAKER_MAC)."
+echo "No YAML edit needed — start MuSync and use Device setup in the UI:"
+echo "  ./scripts/run_pi.sh"
+echo "  Open http://<pi-ip>:8080 → Device setup → enable by name → Save sinks"
 echo
 echo "Verify PipeWire sink appeared:"
 echo "  wpctl status | sed -n '/Sinks:/,/Sources:/p'"
-echo "Then start MuSync: ./scripts/run_pi.sh"
