@@ -169,8 +169,9 @@ sudo systemctl enable --now musync
 - One A2DP sink per adapter ⇒ six speakers need six BT600s (`hci0`…`hci5`).
 - Powered hub strongly recommended beyond two dongles.
 - Prefer the same codec (SBC or AAC) across sinks.
-- Onboard Pi Bluetooth is unused for sinks; BT600s own the links.
+- Onboard Pi Bluetooth can validate the software path (e.g. Qudelix-5K + local file); dedicated BT600s own multi-sink demos.
 - Losing one sink should not stop the others (MuSync unloads only that sink's loopback).
+- Hardware instability (`0b05:1d70` RTL8761, `reg16 -110` disconnect loops, USB3 vs USB2, firmware): see **[docs/bt600-realtek.md](docs/bt600-realtek.md)**.
 
 ## Environment variables
 
