@@ -98,5 +98,68 @@ def test_health_reports_dry_run(backend: PipeWireBackend) -> None:
 def test_transport_still_works_software(backend: PipeWireBackend) -> None:
     playing = backend.set_transport(TransportPut(state=TransportState.PLAYING))
     assert playing.state == TransportState.PLAYING
+
+
+def test_ensure_feeder_idempotent_purges_orphans(
+    backend: PipeWireBackend, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Repeated soft-loads used to create dozens of MuSync_Feeder sinks."""
+    monkeypatch.setenv("MUSYNC_PW_DRY_RUN", "0")
+    backend._tools["pactl"] = "/usr/bin/pactl"
+    modules = (
+        "1\tmodule-null-sink sink_name=musync_feeder "
+        "sink_properties=device.description=MuSync_Feeder\n"
+        "2\tmodule-null-sink sink_name=musync_feeder "
+        "sink_properties=device.description=MuSync_Feeder\n"
+    )
+    sinks_after_purge = "10\tmusync_feeder\tPipeWire\n"
+    calls: list[list[str]] = []
+
+    def fake_exec(args: list[str]):
+        calls.append(list(args))
+        from types import SimpleNamespace
+
+        if args[1:3] == ["list", "modules"]:
+            return SimpleNamespace(returncode=0, stdout=modules, stderr="")
+        if args[1:3] == ["list", "sinks"]:
+            # After purge+load we report present; before unload still "present"
+            return SimpleNamespace(returncode=0, stdout=sinks_after_purge, stderr="")
+        if args[1] == "unload-module":
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        if args[1:3] == ["load-module", "module-null-sink"]:
+            return SimpleNamespace(returncode=0, stdout="99\n", stderr="")
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(backend, "_exec_soft", fake_exec)
+    monkeypatch.setattr(backend, "_env_dry_run", lambda: False)
+
+    backend._ensure_feeder(reset=True)
+    unload = [c for c in calls if len(c) >= 2 and c[1] == "unload-module"]
+    loads = [c for c in calls if len(c) >= 3 and c[1] == "load-module"]
+    assert {c[2] for c in unload} == {"1", "2"}
+    assert len(loads) == 1
+    assert any("sink_name=musync_feeder" in a for a in loads[0])
+
+    # Second ensure with a single healthy feeder must not load again.
+    calls.clear()
+    single = (
+        "99\tmodule-null-sink sink_name=musync_feeder "
+        "sink_properties=device.description=MuSync_Feeder\n"
+    )
+
+    def fake_exec_one(args: list[str]):
+        calls.append(list(args))
+        from types import SimpleNamespace
+
+        if args[1:3] == ["list", "modules"]:
+            return SimpleNamespace(returncode=0, stdout=single, stderr="")
+        if args[1:3] == ["list", "sinks"]:
+            return SimpleNamespace(returncode=0, stdout=sinks_after_purge, stderr="")
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(backend, "_exec_soft", fake_exec_one)
+    backend._ensure_feeder()
+    assert not any(c[1] == "load-module" for c in calls if len(c) > 1)
+    assert not any(c[1] == "unload-module" for c in calls if len(c) > 1)
     stopped = backend.set_transport(TransportPut(state=TransportState.STOPPED))
     assert stopped.position_ms == 0

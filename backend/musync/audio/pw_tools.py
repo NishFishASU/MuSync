@@ -727,3 +727,42 @@ def find_musync_loopback_ids(modules_text: str, device_id: str) -> list[str]:
         if tag in rest or f"musync_loopback_{device_id}" in rest:
             found.append(mid)
     return found
+
+
+def find_feeder_null_sink_ids(
+    modules_text: str,
+    feeder_name: str = "musync_feeder",
+) -> list[str]:
+    """Module indexes for ``module-null-sink`` owned by MuSync's feeder.
+
+    Matches ``sink_name=<feeder>`` (and ``.2`` suffixes) or description
+    ``MuSync_Feeder``. Used to purge orphan feeders after repeated soft-loads.
+    """
+    name = (feeder_name or "musync_feeder").strip() or "musync_feeder"
+    found: list[str] = []
+    for mid, rest in parse_pactl_modules_short(modules_text):
+        if "module-null-sink" not in rest:
+            continue
+        hay = rest.lower()
+        if f"sink_name={name.lower()}" in hay or f"sink_name={name.lower()}." in hay:
+            found.append(mid)
+            continue
+        if "musync_feeder" in hay or "device.description=musync_feeder" in hay:
+            found.append(mid)
+    return found
+
+
+def feeder_listed_in_sinks(sinks_short_text: str, feeder_name: str = "musync_feeder") -> bool:
+    """True if ``pactl list sinks short`` already has the feeder sink."""
+    name = (feeder_name or "musync_feeder").strip() or "musync_feeder"
+    for raw in sinks_short_text.splitlines():
+        # "42\tmusync_feeder\t…" or space-separated
+        parts = raw.strip().split()
+        if len(parts) >= 2 and parts[1] == name:
+            return True
+        if name in raw.split():
+            # also accept musync_feeder.2 style orphans as "present" for purge path
+            for tok in parts:
+                if tok == name or tok.startswith(f"{name}."):
+                    return True
+    return False
