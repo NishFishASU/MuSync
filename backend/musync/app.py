@@ -17,6 +17,9 @@ from .models import (
     Device,
     DevicePatch,
     Health,
+    InputHost,
+    InputHostCreate,
+    InputHostPatch,
     QueueItem,
     QueueItemCreate,
     QueueItemPatch,
@@ -111,6 +114,28 @@ def api_delete_queue_item(item_id: str) -> Response:
 def api_set_active_queue_item(body: ActiveQueuePut) -> Transport:
     """Activate a queue item (feeder swap only)."""
     return backend.set_active_queue_item(body.id)
+
+
+@app.get("/api/inputs", response_model=list[InputHost])
+def api_list_inputs() -> list[InputHost]:
+    """Registered phone/PC hosts (≤4). Capture paths are stubs."""
+    return backend.list_inputs()
+
+
+@app.post("/api/inputs", response_model=InputHost, status_code=201)
+def api_add_input(body: InputHostCreate) -> InputHost:
+    return backend.add_input(body)
+
+
+@app.patch("/api/inputs/{host_id}", response_model=InputHost)
+def api_patch_input(host_id: str, patch: InputHostPatch) -> InputHost:
+    return backend.patch_input(host_id, patch)
+
+
+@app.delete("/api/inputs/{host_id}", status_code=204)
+def api_delete_input(host_id: str) -> Response:
+    backend.remove_input(host_id)
+    return Response(status_code=204)
 
 
 def _index_html() -> Path:

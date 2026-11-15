@@ -8,6 +8,9 @@ from ..models import (
     Device,
     DevicePatch,
     Health,
+    InputHost,
+    InputHostCreate,
+    InputHostPatch,
     QueueItem,
     QueueItemCreate,
     QueueItemPatch,
@@ -71,6 +74,22 @@ class AudioBackend(ABC):
 
     @abstractmethod
     def set_active_queue_item(self, item_id: str) -> Transport:
+        ...
+
+    @abstractmethod
+    def list_inputs(self) -> list[InputHost]:
+        ...
+
+    @abstractmethod
+    def add_input(self, body: InputHostCreate) -> InputHost:
+        ...
+
+    @abstractmethod
+    def patch_input(self, host_id: str, patch: InputHostPatch) -> InputHost:
+        ...
+
+    @abstractmethod
+    def remove_input(self, host_id: str) -> None:
         ...
 
     @abstractmethod

@@ -61,12 +61,28 @@ class SourceType(str, Enum):
     INPUT = "input"
 
 
+class CapturePath(str, Enum):
+    """How a phone/PC feeds the Pi — stubs until capture is wired on hardware."""
+
+    BT_A2DP = "bt_a2dp"  # device as A2DP source → Pi
+    USB = "usb"  # USB audio interface / UAC from PC
+    NETWORK = "network"  # AirPlay / Pulse / file upload stub
+
+
+class HostKind(str, Enum):
+    PHONE = "phone"
+    PC = "pc"
+    OTHER = "other"
+
+
+MAX_INPUT_HOSTS = 4
+
 # Source types that can actually feed PCM today.
 PLAYABLE_SOURCE_TYPES = frozenset({SourceType.LOCAL})
 
 
 class Source(BaseModel):
-    """Catalog entry: discovered local file or streaming/input stub."""
+    """Catalog entry: hub local file, or a per-host contribution stub."""
 
     id: str
     title: str
@@ -76,10 +92,58 @@ class Source(BaseModel):
     available: bool = True
     note: Optional[str] = None
     duration_ms: Optional[int] = None
+    # Which registered phone/PC this catalog row belongs to (None = hub library).
+    input_id: Optional[str] = None
+
+
+class InputHost(BaseModel):
+    """A phone or PC that can feed the hub (≤4). Capture is stubbed."""
+
+    id: str
+    name: str
+    kind: HostKind = HostKind.PHONE
+    capture_path: CapturePath = CapturePath.NETWORK
+    armed: bool = False
+    connected: bool = False
+    endpoint: Optional[str] = None
+    # What this host can contribute into the queue (stubs OK).
+    offers_local: bool = True
+    offers_spotify: bool = True
+    offers_apple: bool = True
+    offers_live_input: bool = True
+    note: Optional[str] = None
+
+
+class InputHostCreate(BaseModel):
+    name: str
+    kind: HostKind = HostKind.PHONE
+    capture_path: CapturePath = CapturePath.NETWORK
+    armed: bool = False
+    connected: bool = False
+    endpoint: Optional[str] = None
+    offers_local: bool = True
+    offers_spotify: bool = True
+    offers_apple: bool = True
+    offers_live_input: bool = True
+    note: Optional[str] = None
+
+
+class InputHostPatch(BaseModel):
+    name: Optional[str] = None
+    kind: Optional[HostKind] = None
+    capture_path: Optional[CapturePath] = None
+    armed: Optional[bool] = None
+    connected: Optional[bool] = None
+    endpoint: Optional[str] = None
+    offers_local: Optional[bool] = None
+    offers_spotify: Optional[bool] = None
+    offers_apple: Optional[bool] = None
+    offers_live_input: Optional[bool] = None
+    note: Optional[str] = None
 
 
 class QueueItem(BaseModel):
-    """One song/cue in the play queue — source type can switch per item."""
+    """One song/cue — source type + optional phone/PC host binding."""
 
     id: str
     title: str
@@ -87,30 +151,34 @@ class QueueItem(BaseModel):
     locator: Optional[str] = None
     source_id: Optional[str] = None
     path: Optional[str] = None
+    # When set: this cue is contributed by / captured from that host.
+    input_id: Optional[str] = None
     available: bool = True
     note: Optional[str] = None
     duration_ms: Optional[int] = None
 
 
 class QueueItemCreate(BaseModel):
-    """Add a queue item from a catalog source and/or explicit type + locator."""
+    """Add a queue item from a catalog source and/or explicit type + host."""
 
     title: Optional[str] = None
     source_type: SourceType = SourceType.LOCAL
     locator: Optional[str] = None
     source_id: Optional[str] = None
     path: Optional[str] = None
+    input_id: Optional[str] = None
     duration_ms: Optional[int] = None
 
 
 class QueueItemPatch(BaseModel):
-    """Switch source type / locator on a song without rebuilding sinks."""
+    """Switch source type / host / locator on a song without rebuilding sinks."""
 
     title: Optional[str] = None
     source_type: Optional[SourceType] = None
     locator: Optional[str] = None
     source_id: Optional[str] = None
     path: Optional[str] = None
+    input_id: Optional[str] = None
 
 
 class Transport(BaseModel):
@@ -120,6 +188,7 @@ class Transport(BaseModel):
     source_id: Optional[str] = None
     queue_item_id: Optional[str] = None
     source_type: Optional[SourceType] = None
+    input_id: Optional[str] = None
     title: Optional[str] = None
 
 

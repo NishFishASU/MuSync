@@ -1,16 +1,23 @@
 <script>
 	import { onMount } from 'svelte';
 	import {
+		CAPTURE_PATHS,
+		HOST_KINDS,
 		SOURCE_TYPES,
+		addInput,
 		addQueueItem,
+		capturePathLabel,
+		deleteInput,
 		deleteQueueItem,
 		fmtMs,
 		getHealth,
 		getTransport,
 		listDevices,
+		listInputs,
 		listQueue,
 		listSources,
 		patchDevice,
+		patchInput,
 		patchQueueItem,
 		putTransport,
 		setActiveQueueItem,
@@ -24,6 +31,8 @@
 	let sources = $state([]);
 	/** @type {import('$lib/api.js').QueueItem[]} */
 	let queue = $state([]);
+	/** @type {import('$lib/api.js').InputHost[]} */
+	let inputs = $state([]);
 	/** @type {import('$lib/api.js').Transport | null} */
 	let transport = $state(null);
 	/** @type {import('$lib/api.js').Health | null} */
@@ -34,6 +43,11 @@
 	let scrubValue = $state(0);
 	let apiError = $state('');
 	let sourceError = $state('');
+	let newHostName = $state('');
+	/** @type {import('$lib/api.js').HostKind} */
+	let newHostKind = $state('phone');
+	/** @type {import('$lib/api.js').CapturePath} */
+	let newHostPath = $state('network');
 
 	/** @type {Record<string, ReturnType<typeof setTimeout>>} */
 	const patchTimers = {};
@@ -42,13 +56,17 @@
 	const playing = $derived(transport?.state === 'playing');
 	const activeQueueId = $derived(transport?.queue_item_id ?? null);
 	const activeIsStub = $derived(
-		Boolean(transport?.source_type && transport.source_type !== 'local')
+		Boolean(
+			transport &&
+				(transport.source_type !== 'local' ||
+					(transport.input_id && transport.source_type === 'local'))
+		)
 	);
 	const healthLabel = $derived.by(() => {
 		if (apiError) return 'API offline';
 		if (!health) return '…';
 		const label = health.backend === 'mock' ? 'mock' : 'pipewire';
-		return `${label} · ${health.enabled_count}/${health.sink_count} sinks`;
+		return `${label} · ${health.enabled_count}/${health.sink_count} sinks · ${inputs.length}/4 hosts`;
 	});
 
 	const sourcesByType = $derived.by(() => {
@@ -61,19 +79,27 @@
 		return groups;
 	});
 
+	/** @param {string | null | undefined} id */
+	function hostName(id) {
+		if (!id) return '';
+		return inputs.find((h) => h.id === id)?.name || id;
+	}
+
 	async function refresh() {
-		const [h, d, t, s, q] = await Promise.all([
+		const [h, d, t, s, q, i] = await Promise.all([
 			getHealth(),
 			listDevices(),
 			getTransport(),
 			listSources(),
-			listQueue()
+			listQueue(),
+			listInputs()
 		]);
 		health = h;
 		devices = d;
 		transport = t;
 		sources = s;
 		queue = q;
+		inputs = i;
 		apiError = '';
 		if (!selectedId && d.length) selectedId = d[0].id;
 		if (!scrubbing) scrubValue = t.position_ms || 0;
@@ -142,7 +168,13 @@
 	async function switchSongSource(id, sourceType) {
 		try {
 			sourceError = '';
-			const updated = await patchQueueItem(id, { source_type: sourceType });
+			/** @type {{ source_type: import('$lib/api.js').SourceType, input_id?: string | null }} */
+			const patch = { source_type: sourceType };
+			if (sourceType === 'local') patch.input_id = null;
+			else if (!queue.find((q) => q.id === id)?.input_id && inputs.length) {
+				patch.input_id = inputs.find((h) => h.armed)?.id || inputs[0].id;
+			}
+			const updated = await patchQueueItem(id, patch);
 			queue = queue.map((q) => (q.id === id ? updated : q));
 			transport = await getTransport();
 			if (!scrubbing) scrubValue = transport.position_ms || 0;
@@ -155,21 +187,89 @@
 		}
 	}
 
+	/**
+	 * @param {string} id
+	 * @param {string} inputId
+	 */
+	async function switchSongHost(id, inputId) {
+		try {
+			sourceError = '';
+			const updated = await patchQueueItem(id, { input_id: inputId || null });
+			queue = queue.map((q) => (q.id === id ? updated : q));
+			transport = await getTransport();
+			if (!updated.available) {
+				sourceError = updated.note || 'Host-bound source is a stub — sinks stay linked';
+			}
+		} catch (err) {
+			sourceError = err instanceof Error ? err.message : String(err);
+		}
+	}
+
 	/** @param {import('$lib/api.js').SourceType} sourceType */
 	async function addStubSong(sourceType) {
 		try {
 			sourceError = '';
+			const hostId =
+				sourceType === 'local'
+					? undefined
+					: inputs.find((h) => h.armed)?.id || inputs[0]?.id;
 			const item = await addQueueItem({
 				source_type: sourceType,
+				input_id: hostId,
 				title:
 					sourceType === 'spotify'
-						? 'Spotify track (stub)'
+						? 'Spotify from phone/PC (stub)'
 						: sourceType === 'apple'
-							? 'Apple Music track (stub)'
-							: 'Input cue (stub)'
+							? 'Apple Music from phone/PC (stub)'
+							: 'Live input cue (stub)'
 			});
 			queue = [...queue, item];
-			sourceError = item.note || `${sourceTypeLabel(sourceType)} stub added — switch type anytime`;
+			sourceError = item.note || `${sourceTypeLabel(sourceType)} stub added — bind a host anytime`;
+		} catch (err) {
+			sourceError = err instanceof Error ? err.message : String(err);
+		}
+	}
+
+	async function registerHost() {
+		try {
+			sourceError = '';
+			const host = await addInput({
+				name: newHostName.trim() || 'Phone / PC',
+				kind: newHostKind,
+				capture_path: newHostPath,
+				armed: true
+			});
+			inputs = [...inputs, host];
+			sources = await listSources();
+			newHostName = '';
+		} catch (err) {
+			sourceError = err instanceof Error ? err.message : String(err);
+		}
+	}
+
+	/**
+	 * @param {string} id
+	 * @param {Partial<import('$lib/api.js').InputHost>} patch
+	 */
+	async function updateHost(id, patch) {
+		try {
+			const updated = await patchInput(id, patch);
+			inputs = inputs.map((h) => (h.id === id ? updated : h));
+			sources = await listSources();
+			queue = await listQueue();
+		} catch (err) {
+			sourceError = err instanceof Error ? err.message : String(err);
+		}
+	}
+
+	/** @param {string} id */
+	async function removeHost(id) {
+		try {
+			await deleteInput(id);
+			inputs = inputs.filter((h) => h.id !== id);
+			sources = await listSources();
+			queue = await listQueue();
+			transport = await getTransport();
 		} catch (err) {
 			sourceError = err instanceof Error ? err.message : String(err);
 		}
@@ -413,29 +513,125 @@
 		{/if}
 	</div>
 
+	<section class="panel inputs-panel" aria-labelledby="inputs-heading">
+		<div class="panel-head">
+			<h2 id="inputs-heading">Phone / PC hosts</h2>
+			<p class="hint">Up to 4 · each can offer local, Spotify, Apple, or live capture</p>
+		</div>
+		<form
+			class="host-form"
+			onsubmit={(e) => {
+				e.preventDefault();
+				registerHost();
+			}}
+		>
+			<input
+				type="text"
+				placeholder="Name (e.g. iPhone)"
+				bind:value={newHostName}
+				aria-label="Host name"
+				maxlength="64"
+			/>
+			<select bind:value={newHostKind} aria-label="Host kind">
+				{#each HOST_KINDS as k}
+					<option value={k}>{k}</option>
+				{/each}
+			</select>
+			<select bind:value={newHostPath} aria-label="Capture path">
+				{#each CAPTURE_PATHS as p}
+					<option value={p}>{capturePathLabel(p)}</option>
+				{/each}
+			</select>
+			<button type="submit" class="btn btn-small" disabled={inputs.length >= 4}>Register</button>
+		</form>
+		<ul class="queue-list">
+			{#each inputs as host (host.id)}
+				<li class="queue-row host-row">
+					<div class="queue-main">
+						<span class="source-title">{host.name}</span>
+						<span class="source-sub">
+							{host.kind} · {capturePathLabel(host.capture_path)}
+							{#if host.endpoint}
+								· {host.endpoint}
+							{/if}
+							{#if host.note}
+								· {host.note}
+							{/if}
+						</span>
+					</div>
+					<label class="type-select">
+						<span class="sr-only">Capture path</span>
+						<select
+							value={host.capture_path}
+							aria-label={`Capture path for ${host.name}`}
+							onchange={(e) => {
+								const next = /** @type {HTMLSelectElement} */ (e.currentTarget).value;
+								updateHost(host.id, {
+									capture_path: /** @type {import('$lib/api.js').CapturePath} */ (next)
+								});
+							}}
+						>
+							{#each CAPTURE_PATHS as p}
+								<option value={p}>{capturePathLabel(p)}</option>
+							{/each}
+						</select>
+					</label>
+					<label class="check">
+						<input
+							type="checkbox"
+							checked={host.armed}
+							onchange={(e) => {
+								updateHost(host.id, {
+									armed: /** @type {HTMLInputElement} */ (e.currentTarget).checked
+								});
+							}}
+						/>
+						<span>Armed</span>
+					</label>
+					<span class="status-pill {host.connected ? 'linked' : 'missing'}">
+						{host.connected ? 'linked' : 'stub'}
+					</span>
+					<button
+						type="button"
+						class="btn btn-ghost btn-small"
+						aria-label={`Remove ${host.name}`}
+						onclick={() => removeHost(host.id)}
+					>
+						Remove
+					</button>
+				</li>
+			{:else}
+				<li class="empty-group">No phone/PC hosts yet — register one above</li>
+			{/each}
+		</ul>
+	</section>
+
 	<section class="panel queue-panel" aria-labelledby="queue-heading">
 		<div class="panel-head">
 			<h2 id="queue-heading">Song queue</h2>
-			<p class="hint">Per-song source · switch without tearing down sinks</p>
+			<p class="hint">Per-song type + host · switch without tearing down sinks</p>
 		</div>
 		<div class="stub-actions">
 			<button type="button" class="btn btn-ghost btn-small" onclick={() => addStubSong('spotify')}>
-				+ Spotify stub
+				+ Host Spotify
 			</button>
 			<button type="button" class="btn btn-ghost btn-small" onclick={() => addStubSong('apple')}>
-				+ Apple stub
+				+ Host Apple
 			</button>
 			<button type="button" class="btn btn-ghost btn-small" onclick={() => addStubSong('input')}>
-				+ Input stub
+				+ Live input
 			</button>
 		</div>
 		<ul class="queue-list">
 			{#each queue as item (item.id)}
-				<li class="queue-row" class:active={item.id === activeQueueId}>
+				<li class="queue-row queue-row-host" class:active={item.id === activeQueueId}>
 					<button type="button" class="queue-main" onclick={() => chooseQueueItem(item.id)}>
 						<span class="source-title">{item.title}</span>
 						<span class="source-sub">
 							{item.locator || item.source_id || item.id}
+							{#if item.input_id}
+								· {hostName(item.input_id)}
+							{/if}
 							{#if item.id === activeQueueId}
 								· active
 							{/if}
@@ -459,6 +655,22 @@
 							{/each}
 						</select>
 					</label>
+					<label class="type-select">
+						<span class="sr-only">Phone or PC host</span>
+						<select
+							value={item.input_id || ''}
+							aria-label={`Host for ${item.title}`}
+							onchange={(e) => {
+								const next = /** @type {HTMLSelectElement} */ (e.currentTarget).value;
+								switchSongHost(item.id, next);
+							}}
+						>
+							<option value="">Hub (no host)</option>
+							{#each inputs as h}
+								<option value={h.id}>{h.name}</option>
+							{/each}
+						</select>
+					</label>
 					<span class="status-pill {item.available ? 'linked' : 'missing'}">
 						{item.available ? 'ready' : 'stub'}
 					</span>
@@ -478,7 +690,7 @@
 	<section class="panel sources-panel" aria-labelledby="sources-heading">
 		<div class="panel-head">
 			<h2 id="sources-heading">Source catalog</h2>
-			<p class="hint">Local ready · Spotify / Apple / input stubs</p>
+			<p class="hint">Hub local files · per-host Spotify / Apple / live stubs</p>
 		</div>
 		{#each SOURCE_TYPES as type}
 			<div class="source-group">

@@ -71,10 +71,12 @@ scripts/build_web.sh  run_dev.sh  run_pi.sh  pair_bt600.sh
 | `GET`/`PUT` | `/api/transport` | `{ state, position_ms, source_id?, queue_item_id? }` |
 | `GET` | `/api/sources` | Catalog: `local` + `spotify` / `apple` / `input` stubs |
 | `PUT` | `/api/sources/active` | `{ id }` — activate catalog entry (feeder swap only) |
-| `GET`/`POST` | `/api/queue` | Song queue; each item has `source_type` |
-| `PATCH` | `/api/queue/{id}` | Switch `source_type` (`local`\|`spotify`\|`apple`\|`input`) without tearing down sinks |
+| `GET`/`POST` | `/api/queue` | Song queue; each item has `source_type` + optional `input_id` |
+| `PATCH` | `/api/queue/{id}` | Switch `source_type` / bind phone-PC host without tearing down sinks |
 | `PUT` | `/api/queue/active` | `{ id }` — play this queue item (feeder swap only) |
 | `DELETE` | `/api/queue/{id}` | Remove a queue item |
+| `GET`/`POST` | `/api/inputs` | Register ≤4 phone/PC hosts (`capture_path`: `bt_a2dp`\|`usb`\|`network`) |
+| `PATCH`/`DELETE` | `/api/inputs/{id}` | Arm / change capture path / remove host |
 
 ## Serving the built UI
 

@@ -87,16 +87,23 @@ def test_queue_source_type_switch(client: TestClient) -> None:
     assert patched.json()["source_type"] == "spotify"
     assert patched.json()["available"] is False
 
+    hosts = client.get("/api/inputs")
+    assert hosts.status_code == 200
+    assert len(hosts.json()) >= 1
+    host_id = hosts.json()[0]["id"]
+
     created = client.post(
         "/api/queue",
-        json={"source_type": "input", "title": "USB-from-PC stub"},
+        json={"source_type": "input", "input_id": host_id, "title": "USB-from-PC stub"},
     )
     assert created.status_code == 201
     assert created.json()["source_type"] == "input"
+    assert created.json()["input_id"] == host_id
 
     active = client.put("/api/queue/active", json={"id": created.json()["id"]})
     assert active.status_code == 200
     assert active.json()["source_type"] == "input"
+    assert active.json()["input_id"] == host_id
 
     # Stub cannot play
     denied = client.put("/api/transport", json={"state": "playing"})

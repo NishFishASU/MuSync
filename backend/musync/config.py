@@ -82,54 +82,23 @@ DEFAULT_MOCK_DEVICES: list[dict[str, Any]] = [
     },
 ]
 
+# Hub-side stream stubs only. Phone/PC inputs come from InputRegistry (≤4 hosts).
 PLACEHOLDER_SOURCES: list[Source] = [
     Source(
-        id="spotify:stub",
-        title="Spotify",
+        id="spotify:hub-stub",
+        title="Spotify (hub Connect — later)",
         type=SourceType.SPOTIFY,
-        locator="spotify:track:stub",
+        locator="spotify:hub:stub",
         available=False,
-        note="Stub — Spotify feeder not wired yet",
+        note="Stub — prefer a phone/PC host's Spotify session when registered",
     ),
     Source(
-        id="apple:stub",
-        title="Apple Music",
+        id="apple:hub-stub",
+        title="Apple Music (hub — later)",
         type=SourceType.APPLE,
-        locator="apple:track:stub",
+        locator="apple:hub:stub",
         available=False,
-        note="Stub — Apple Music feeder not wired yet",
-    ),
-    Source(
-        id="input:1",
-        title="Input 1 (phone / PC)",
-        type=SourceType.INPUT,
-        locator="input:1",
-        available=False,
-        note="Stub — input slot 1 of 4",
-    ),
-    Source(
-        id="input:2",
-        title="Input 2 (phone / PC)",
-        type=SourceType.INPUT,
-        locator="input:2",
-        available=False,
-        note="Stub — input slot 2 of 4",
-    ),
-    Source(
-        id="input:3",
-        title="Input 3 (phone / PC)",
-        type=SourceType.INPUT,
-        locator="input:3",
-        available=False,
-        note="Stub — input slot 3 of 4",
-    ),
-    Source(
-        id="input:4",
-        title="Input 4 (USB-from-PC / network)",
-        type=SourceType.INPUT,
-        locator="input:4",
-        available=False,
-        note="Stub — input slot 4 of 4",
+        note="Stub — prefer a phone/PC host's Apple Music session when registered",
     ),
 ]
 
