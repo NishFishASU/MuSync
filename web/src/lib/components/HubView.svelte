@@ -282,25 +282,27 @@
 		syncVideoPreview();
 	});
 	const healthLabel = $derived.by(() => {
-		if (apiError) return 'API offline';
+		if (apiError) return 'Offline';
 		if (!health) return '…';
-		const label = health.backend === 'mock' ? 'mock' : 'pipewire';
+		const mode = health.backend === 'mock' ? 'Demo' : 'Live';
 		const detail = health.detail || '';
 		const readyM = detail.match(/READY=([^;]+)/);
 		const missM = detail.match(/MISSING=([^;]+)/);
 		const ready = readyM?.[1]?.trim();
 		const missing = missM?.[1]?.trim();
 		const readiness =
-			ready || missing
-				? ` · ${missing && missing !== '—' ? 'MISSING' : 'READY'}`
-				: '';
+			missing && missing !== '—'
+				? ' · missing'
+				: ready
+					? ' · ready'
+					: '';
 		const healthyAdapters = health.healthy_adapter_count;
 		const adapterN = health.adapter_count;
 		const adapters =
 			typeof healthyAdapters === 'number' && typeof adapterN === 'number'
 				? ` · BT ${healthyAdapters}/${adapterN}`
 				: '';
-		return `${label} · ${health.enabled_count}/${health.sink_count} sinks · ${inputs.length}/4 hosts${adapters}${readiness}`;
+		return `${mode} · ${health.enabled_count}/${health.sink_count} outs · ${inputs.length}/4 ins${adapters}${readiness}`;
 	});
 
 	const healthyAdapterCount = $derived(btAdapters.filter((a) => a.healthy !== false).length);
@@ -1488,7 +1490,7 @@
 	<header class="top">
 		<div class="brand-block">
 			<a class="brand" href="/" aria-label="MuSync home">MuSync</a>
-			<p class="tagline">Silent disco hub · one clock</p>
+			<p class="tagline">Headphones in sync</p>
 		</div>
 		<div
 			class="health"
