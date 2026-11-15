@@ -4,6 +4,8 @@ from musync.audio.pw_tools import (
     build_capture_loopback_commands,
     build_sink_commands,
     classify_capture_source,
+    feeder_listed_in_sinks,
+    find_feeder_null_sink_ids,
     find_musync_loopback_ids,
     is_capture_candidate,
     match_device_node,
@@ -89,6 +91,19 @@ def test_build_sink_commands_with_pactl() -> None:
 def test_find_musync_loopback_ids() -> None:
     text = "12\tmodule-loopback sink_input_properties=media.name=musync_loopback_sink_1\n"
     assert find_musync_loopback_ids(text, "sink-1") == ["12"]
+
+
+def test_find_feeder_null_sink_ids_and_listed() -> None:
+    modules = """
+1\tmodule-null-sink sink_name=musync_feeder sink_properties=device.description=MuSync_Feeder
+2\tmodule-null-sink sink_name=musync_feeder sink_properties=device.description=MuSync_Feeder
+3\tmodule-loopback source=musync_feeder.monitor
+4\tmodule-null-sink sink_name=other
+"""
+    assert find_feeder_null_sink_ids(modules) == ["1", "2"]
+    sinks = "10\tmusync_feeder\tPipeWire\ts16le 2ch 48000Hz\n11\taluminum\t…"
+    assert feeder_listed_in_sinks(sinks) is True
+    assert feeder_listed_in_sinks("10\taluminum\tPipeWire\n") is False
 
 
 def test_parse_wpctl_sources_and_classify() -> None:

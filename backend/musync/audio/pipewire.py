@@ -107,6 +107,8 @@ from .pw_tools import (
     discover_bluetooth_remotes,
     discover_nodes,
     discover_sources,
+    feeder_listed_in_sinks,
+    find_feeder_null_sink_ids,
     find_musync_capture_ids,
     find_musync_loopback_ids,
     friendly_bluez_label,
@@ -195,7 +197,10 @@ class PipeWireBackend(AudioBackend):
         )
 
         # Refresh map / plan once at startup (no-op / dry-run without hardware).
+        # Purge orphan MuSync_Feeder null-sinks from prior soft-load restarts.
         try:
+            if not self._env_dry_run():
+                self._ensure_feeder(reset=True)
             self.refresh_sink_map()
             self._ensure_graph()
         except Exception as exc:  # noqa: BLE001 — never block API boot
@@ -383,6 +388,7 @@ class PipeWireBackend(AudioBackend):
         return by_name, by_mac, rows, f"{detail}; {bt_detail}"
 
     def _ensure_feeder_commands(self) -> list[list[str]]:
+        """Shell plan helper — prefer ``_ensure_feeder`` at runtime."""
         pactl = self._tools["pactl"]
         if not pactl:
             return []
@@ -395,6 +401,98 @@ class PipeWireBackend(AudioBackend):
                 "sink_properties=device.description=MuSync_Feeder",
             ]
         ]
+
+    def _list_feeder_module_ids(self) -> list[str]:
+        pactl = self._tools["pactl"]
+        if not pactl:
+            return []
+        proc = self._exec_soft([pactl, "list", "modules", "short"])
+        if not proc or not proc.stdout:
+            return []
+        return find_feeder_null_sink_ids(proc.stdout, self._feeder)
+
+    def _feeder_sink_present(self) -> bool:
+        pactl = self._tools["pactl"]
+        if not pactl:
+            return False
+        proc = self._exec_soft([pactl, "list", "sinks", "short"])
+        if not proc or not proc.stdout:
+            return False
+        return feeder_listed_in_sinks(proc.stdout, self._feeder)
+
+    def _purge_feeder_modules(self) -> int:
+        """Unload every MuSync null-sink feeder module (orphans from soft-loads)."""
+        pactl = self._tools["pactl"]
+        ids = self._list_feeder_module_ids()
+        for mid in ids:
+            if pactl:
+                self._exec_soft([pactl, "unload-module", mid])
+        if ids:
+            log.warning(
+                "Purged %d orphan MuSync feeder null-sink module(s): %s",
+                len(ids),
+                ", ".join(ids),
+            )
+        return len(ids)
+
+    def _load_feeder_module(self) -> None:
+        pactl = self._tools["pactl"]
+        if not pactl:
+            return
+        cmd = [
+            pactl,
+            "load-module",
+            "module-null-sink",
+            f"sink_name={self._feeder}",
+            "sink_properties=device.description=MuSync_Feeder",
+        ]
+        proc = self._exec_soft(cmd)
+        if proc and proc.returncode == 0:
+            log.info(
+                "Created feeder sink %s (module %s)",
+                self._feeder,
+                (proc.stdout or "").strip() or "?",
+            )
+        else:
+            log.warning(
+                "Failed to create feeder %s: %s",
+                self._feeder,
+                (proc.stderr or proc.stdout or "").strip() if proc else "no pactl",
+            )
+
+    def _ensure_feeder(self, *, reset: bool = False) -> None:
+        """Idempotent feeder: one ``musync_feeder`` null-sink, purge orphans.
+
+        ``reset=True`` (startup): unload all MuSync feeder modules, then create one.
+        Otherwise: create only when missing; if duplicates exist, purge + recreate.
+        """
+        if self._env_dry_run():
+            return
+        pactl = self._tools["pactl"]
+        if not pactl:
+            return
+
+        ids = self._list_feeder_module_ids()
+        present = self._feeder_sink_present()
+
+        if reset or len(ids) > 1 or (present and len(ids) == 0):
+            # Orphans / restart: wipe MuSync feeders then create exactly one.
+            if ids:
+                self._purge_feeder_modules()
+            self._load_feeder_module()
+            return
+
+        if len(ids) == 1 and present:
+            return
+
+        if len(ids) == 0 and not present:
+            self._load_feeder_module()
+            return
+
+        if len(ids) == 1 and not present:
+            # Stale module index — reload cleanly.
+            self._purge_feeder_modules()
+            self._load_feeder_module()
 
     def plan_graph(self) -> GraphPlan:
         """Build feeder → delay/volume → bluez plan for enabled devices."""
@@ -616,8 +714,7 @@ class PipeWireBackend(AudioBackend):
             device, input_kind=kind, input_spec=spec, ffmpeg_bin=ff
         )
         # Ensure feeder exists for BT fan-out; SPP itself uses file/anullsrc.
-        for feeder_cmd in self._ensure_feeder_commands():
-            self._exec_soft(feeder_cmd)
+        self._ensure_feeder()
 
         try:
             # Never use stderr=PIPE without a reader — a full pipe blocks ffmpeg
@@ -727,9 +824,8 @@ class PipeWireBackend(AudioBackend):
             self._sync_spp_listeners(only_device=only_device)
             return plan
 
-        # Live path — create feeder (idempotent soft-fail if exists).
-        for cmd in self._ensure_feeder_commands():
-            self._exec_soft(cmd)
+        # Live path — one feeder null-sink (idempotent; no duplicate soft-loads).
+        self._ensure_feeder()
 
         for link in plan.links:
             if only_device and link.device_id != only_device:
@@ -848,9 +944,7 @@ class PipeWireBackend(AudioBackend):
             log.warning("No capture endpoint for %s — cannot feed live input", host.id)
             return
 
-        for cmd in self._ensure_feeder_commands():
-            if not self._env_dry_run():
-                self._exec_soft(cmd)
+        self._ensure_feeder()
 
         cmds, notes = build_capture_loopback_commands(
             host_id=host.id,

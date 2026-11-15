@@ -18,13 +18,38 @@ export MUSYNC_PW_FEEDER="${MUSYNC_PW_FEEDER:-musync_feeder}"
 
 cd "$ROOT"
 
+# Prefer the project venv — system python3 often lacks uvicorn (ModuleNotFoundError).
+if [[ -f "$ROOT/.venv/bin/activate" ]]; then
+  # shellcheck disable=SC1091
+  source "$ROOT/.venv/bin/activate"
+fi
+if [[ -x "$ROOT/.venv/bin/python" ]]; then
+  PY="$ROOT/.venv/bin/python"
+else
+  PY="${PYTHON:-python3}"
+fi
+
 echo "MuSync Pi launcher"
 echo "  backend:  $MUSYNC_BACKEND"
+echo "  python:   $PY"
 echo "  listen:   http://${MUSYNC_HOST}:${MUSYNC_PORT}"
 echo "  devices:  $MUSYNC_DEVICES_CONFIG"
 echo "  media:    $MUSYNC_MEDIA_DIR"
 echo "  web:      $MUSYNC_WEB_DIR"
 echo "  feeder:   $MUSYNC_PW_FEEDER"
+
+if ! "$PY" -c "import uvicorn" 2>/dev/null; then
+  echo >&2
+  echo "ERROR: uvicorn not importable with: $PY" >&2
+  echo "MuSync must run inside the project venv (system python usually lacks deps)." >&2
+  echo "Fix:" >&2
+  echo "  cd $ROOT" >&2
+  echo "  python3 -m venv .venv" >&2
+  echo "  source .venv/bin/activate" >&2
+  echo "  pip install -r requirements.txt" >&2
+  echo "  ./scripts/run_pi.sh" >&2
+  exit 1
+fi
 
 if [[ ! -f "$MUSYNC_WEB_DIR/index.html" ]]; then
   echo
@@ -66,6 +91,15 @@ if [[ "$missing" -eq 1 ]]; then
   echo "  Continuing — backend will dry-run the graph if PipeWire is down."
 fi
 
+# Optional: show orphan MuSync feeders before boot (backend purges on startup).
+if command -v pactl >/dev/null 2>&1; then
+  feeder_n=$(pactl list modules short 2>/dev/null | grep -c "module-null-sink.*sink_name=${MUSYNC_PW_FEEDER}" || true)
+  if [[ "${feeder_n:-0}" -gt 1 ]]; then
+    echo
+    echo "NOTE: found ${feeder_n} ${MUSYNC_PW_FEEDER} null-sink modules — MuSync will purge orphans on startup."
+  fi
+fi
+
 if command -v bluetoothctl >/dev/null 2>&1; then
   echo
   echo "Bluetooth adapters:"
@@ -84,11 +118,11 @@ echo
 echo "Qudelix + SPP via web UI:"
 echo "  1) export MUSYNC_BACKEND=pipewire"
 echo "  2) Pair: ./scripts/pair_bt600.sh hci0   # or bluetoothctl"
-echo "  3) ./scripts/run_pi.sh  (this script)"
+echo "  3) ./scripts/run_pi.sh  (this script — uses .venv)"
 echo "  4) Open http://<Pi-IP>:8080 → Device setup"
 echo "     - enable discovered BT by name (Qudelix) — no MAC typing"
 echo "     - enable Phone SPP; set port/rate/channels if needed → Save sinks"
 echo "  5) Play hub-local; phone SPP app → Pi IP:port, s16le"
 echo
 
-exec python3 -m musync
+exec "$PY" -m musync

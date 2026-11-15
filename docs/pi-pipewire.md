@@ -25,6 +25,7 @@ Phone as **A2DP source** (S21 FE → `bluez_input`) vs phone as **SPP sink**: se
 | Volume / mute | `wpctl set-volume` / `wpctl set-mute` |
 | Enable/disable | Unload that sink's loopback only (others keep playing) |
 | Discovery | `wpctl status` / `bluetoothctl` → UI by friendly name (MAC auto-filled) |
+| Feeder | One `musync_feeder` null-sink — startup purges orphan `MuSync_Feeder` modules |
 
 ## Cloud vs Pi
 
