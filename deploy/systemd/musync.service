@@ -12,6 +12,9 @@ Environment=MUSYNC_HOST=0.0.0.0
 Environment=MUSYNC_PORT=8080
 Environment=MUSYNC_MEDIA_DIR=/home/pi/MuSync/media
 Environment=MUSYNC_DEVICES_CONFIG=/home/pi/MuSync/config/devices.yaml
+Environment=MUSYNC_WEB_DIR=/home/pi/MuSync/web/build
+Environment=MUSYNC_PW_FEEDER=musync_feeder
+Environment=MUSYNC_PW_DRY_RUN=0
 Environment=PYTHONPATH=/home/pi/MuSync/backend
 ExecStart=/usr/bin/python3 -m musync
 Restart=on-failure
