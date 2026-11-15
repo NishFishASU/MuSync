@@ -16,6 +16,9 @@ from ..config import (
     validate_devices,
 )
 from ..models import (
+    BluetoothConnectRequest,
+    BluetoothConnectResponse,
+    BluetoothScanStatus,
     CaptureDiscoverResponse,
     CapturePath,
     Device,
@@ -57,6 +60,22 @@ _MOCK_DISCOVERED = [
         hci="hci1",
         paired=True,
         connected=True,
+    ),
+]
+
+# Appear only while scanning (or after connect) — unpaired until connected via UI.
+_MOCK_SCAN_ONLY = [
+    DiscoveredBluetoothSink(
+        name="WH-1000XM5",
+        mac="AA:BB:CC:DD:EE:55",
+        paired=False,
+        connected=False,
+    ),
+    DiscoveredBluetoothSink(
+        name="Soundcore Motion",
+        mac="AA:BB:CC:DD:EE:66",
+        paired=False,
+        connected=False,
     ),
 ]
 from .base import AudioBackend
@@ -123,6 +142,12 @@ class MockAudioBackend(AudioBackend):
         }
         self._config_ok = True
         self._config_detail = "mock"
+        self._bt_scanning = False
+        # MAC → DiscoveredBluetoothSink accumulated during scan / connect.
+        self._bt_scan_cache: dict[str, DiscoveredBluetoothSink] = {
+            d.mac.upper(): d.model_copy(deep=True) for d in _MOCK_DISCOVERED if d.mac
+        }
+        self._bt_scan_cleared_macs: set[str] = set()
 
         # Feeder callbacks are no-ops: mock has no PipeWire graph to preserve.
         # Seed S21 FE as live BT A2DP so Play works for live input on laptop.
@@ -168,34 +193,212 @@ class MockAudioBackend(AudioBackend):
             self._persist()
             return updated.model_copy(deep=True)
 
+    def _annotate_bt_rows(self, rows: list[DiscoveredBluetoothSink]) -> list[DiscoveredBluetoothSink]:
+        configured = {
+            d.name.strip().lower(): d.id
+            for d in self._devices.values()
+            if d.kind == DeviceKind.BLUETOOTH and d.name.strip()
+        }
+        also_mac = {
+            d.mac.strip().upper(): d.id
+            for d in self._devices.values()
+            if d.kind == DeviceKind.BLUETOOTH and d.mac.strip()
+        }
+        out: list[DiscoveredBluetoothSink] = []
+        for item in rows:
+            cfg = configured.get(item.name.lower()) or also_mac.get(
+                (item.mac or "").upper()
+            )
+            out.append(item.model_copy(update={"configured_id": cfg}))
+        return out
+
+    def _bt_discovery_rows(self) -> list[DiscoveredBluetoothSink]:
+        """Merge base fixtures + scan cache (scan-only remotes while scanning)."""
+        by_mac: dict[str, DiscoveredBluetoothSink] = {
+            d.mac.upper(): d.model_copy(deep=True)
+            for d in _MOCK_DISCOVERED
+            if d.mac and d.mac.upper() not in self._bt_scan_cleared_macs
+        }
+        for mac, row in self._bt_scan_cache.items():
+            key = mac.upper()
+            if key in self._bt_scan_cleared_macs and not row.connected:
+                continue
+            by_mac[key] = row.model_copy(deep=True)
+        if self._bt_scanning:
+            for item in _MOCK_SCAN_ONLY:
+                mac = item.mac.upper()
+                if mac in self._bt_scan_cleared_macs:
+                    continue
+                if mac not in by_mac:
+                    by_mac[mac] = item.model_copy(deep=True)
+                    self._bt_scan_cache[mac] = item.model_copy(deep=True)
+        return self._annotate_bt_rows(list(by_mac.values()))
+
     def discover_device_setup(self) -> DeviceDiscoverResponse:
         with self._lock:
-            configured = {
-                d.name.strip().lower(): d.id
-                for d in self._devices.values()
-                if d.kind == DeviceKind.BLUETOOTH and d.name.strip()
-            }
-            also_mac = {
-                d.mac.strip().upper(): d.id
-                for d in self._devices.values()
-                if d.kind == DeviceKind.BLUETOOTH and d.mac.strip()
-            }
-            bluetooth: list[DiscoveredBluetoothSink] = []
-            for item in _MOCK_DISCOVERED:
-                cfg = configured.get(item.name.lower()) or also_mac.get(item.mac.upper())
-                bluetooth.append(item.model_copy(update={"configured_id": cfg}))
+            bluetooth = self._bt_discovery_rows()
             spp = next(
                 (d for d in self._devices.values() if d.kind == DeviceKind.NETWORK_SPP),
                 default_spp_device(),
             )
             path = devices_config_path()
+            scan_note = " · scanning" if self._bt_scanning else ""
             return DeviceDiscoverResponse(
                 bluetooth=bluetooth,
                 spp_default=spp.model_copy(deep=True),
                 config_path=str(path),
                 config_ok=self._config_ok,
                 config_detail=self._config_detail,
-                detail="mock discovery — Qudelix-5K + Kitchen Speaker fixtures",
+                detail=(
+                    "mock discovery — Qudelix-5K + Kitchen Speaker fixtures"
+                    f"{scan_note}"
+                ),
+            )
+
+    def bluetooth_scan_status(self) -> BluetoothScanStatus:
+        with self._lock:
+            rows = self._bt_discovery_rows()
+            return BluetoothScanStatus(
+                scanning=self._bt_scanning,
+                bluetooth=rows,
+                detail=(
+                    f"mock scan {'on' if self._bt_scanning else 'off'} · "
+                    f"{len(rows)} device{'s' if len(rows) != 1 else ''}"
+                ),
+            )
+
+    def bluetooth_scan_start(self) -> BluetoothScanStatus:
+        with self._lock:
+            self._bt_scanning = True
+            # Seed scan-only fixtures into the cache immediately (unless cleared).
+            for item in _MOCK_SCAN_ONLY:
+                mac = item.mac.upper()
+                if mac in self._bt_scan_cleared_macs:
+                    continue
+                if mac not in self._bt_scan_cache:
+                    self._bt_scan_cache[mac] = item.model_copy(deep=True)
+            return self.bluetooth_scan_status()
+
+    def bluetooth_scan_stop(self) -> BluetoothScanStatus:
+        with self._lock:
+            self._bt_scanning = False
+            return self.bluetooth_scan_status()
+
+    def bluetooth_clear_discovery(self) -> BluetoothScanStatus:
+        with self._lock:
+            kept: dict[str, DiscoveredBluetoothSink] = {}
+            for mac, row in self._bt_scan_cache.items():
+                if row.connected:
+                    kept[mac] = row
+                    self._bt_scan_cleared_macs.discard(mac)
+                else:
+                    self._bt_scan_cleared_macs.add(mac)
+            # Always keep currently connected configured BT sinks in the list.
+            for d in self._devices.values():
+                if d.kind != DeviceKind.BLUETOOTH or not d.mac:
+                    continue
+                mac = d.mac.upper()
+                if d.connected:
+                    kept[mac] = DiscoveredBluetoothSink(
+                        name=d.name,
+                        mac=d.mac,
+                        pw_node=d.pw_node,
+                        hci=d.hci,
+                        paired=True,
+                        connected=True,
+                        configured_id=d.id,
+                    )
+                    self._bt_scan_cleared_macs.discard(mac)
+            self._bt_scan_cache = kept
+            return BluetoothScanStatus(
+                scanning=self._bt_scanning,
+                bluetooth=self._bt_discovery_rows(),
+                detail=f"cleared · kept {len(kept)} connected",
+            )
+
+    def bluetooth_connect(self, body: BluetoothConnectRequest) -> BluetoothConnectResponse:
+        with self._lock:
+            mac = body.mac.upper()
+            name = (body.name or "").strip()
+            existing = self._bt_scan_cache.get(mac)
+            if existing is None:
+                for item in list(_MOCK_DISCOVERED) + list(_MOCK_SCAN_ONLY):
+                    if item.mac.upper() == mac:
+                        existing = item.model_copy(deep=True)
+                        break
+            if existing is None:
+                existing = DiscoveredBluetoothSink(
+                    name=name or f"BT {mac}",
+                    mac=mac,
+                    paired=False,
+                    connected=False,
+                )
+            if name:
+                existing = existing.model_copy(update={"name": name})
+            connected = existing.model_copy(
+                update={
+                    "paired": True,
+                    "connected": True,
+                    "pw_node": existing.pw_node or "99",
+                    "pw_name": existing.pw_name
+                    or f"bluez_output.{mac.replace(':', '_')}.1",
+                }
+            )
+            self._bt_scan_cache[mac] = connected
+            self._bt_scan_cleared_macs.discard(mac)
+
+            device: Device | None = None
+            if body.enable_as_output:
+                # Reuse configured sink with same MAC/name, else create one.
+                for d in self._devices.values():
+                    if d.kind == DeviceKind.BLUETOOTH and (
+                        d.mac.upper() == mac or d.name.lower() == connected.name.lower()
+                    ):
+                        data = d.model_dump()
+                        data.update(
+                            {
+                                "mac": mac,
+                                "name": connected.name,
+                                "connected": True,
+                                "enabled": True,
+                                "pw_node": connected.pw_node,
+                            }
+                        )
+                        device = Device.model_validate(data)
+                        self._devices[d.id] = device
+                        break
+                if device is None:
+                    bt_count = sum(
+                        1 for d in self._devices.values() if d.kind == DeviceKind.BLUETOOTH
+                    )
+                    new_id = f"bt-{bt_count + 1}"
+                    if new_id in self._devices:
+                        new_id = f"bt-{mac.replace(':', '').lower()[-6:]}"
+                    device = Device(
+                        id=new_id,
+                        name=connected.name,
+                        kind=DeviceKind.BLUETOOTH,
+                        mac=mac,
+                        connected=True,
+                        enabled=True,
+                        pw_node=connected.pw_node,
+                        delay_ms=0,
+                        volume=0.85,
+                    )
+                    trial = list(self._devices.values()) + [device]
+                    validate_devices(trial)
+                    self._devices[device.id] = device
+                self._persist()
+                connected = connected.model_copy(update={"configured_id": device.id})
+                self._bt_scan_cache[mac] = connected
+
+            rows = self._bt_discovery_rows()
+            return BluetoothConnectResponse(
+                ok=True,
+                mac=mac,
+                detail=f"mock connected {connected.name}",
+                device=device.model_copy(deep=True) if device else None,
+                bluetooth=rows,
             )
 
     def apply_devices_config(self, entries: list[DeviceConfigEntry]) -> list[Device]:

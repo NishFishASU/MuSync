@@ -8,6 +8,8 @@
 		addQueueItem,
 		addStreamingTrack,
 		capturePathLabel,
+		clearBluetoothDiscovery,
+		connectBluetooth,
 		connectWifi,
 		deleteInput,
 		deleteQueueItem,
@@ -38,6 +40,8 @@
 		setActiveQueueItem,
 		setActiveSource,
 		sourceTypeLabel,
+		startBluetoothScan,
+		stopBluetoothScan,
 		uploadInputFile
 	} from '$lib/api.js';
 
@@ -94,6 +98,11 @@
 	let setupMessage = $state('');
 	let setupDetail = $state('');
 	let setupConfigOk = $state(true);
+	let btScanning = $state(false);
+	let btScanBusy = $state(false);
+	let btConnectBusy = $state('');
+	/** @type {ReturnType<typeof setInterval> | null} */
+	let btScanPoll = null;
 
 	/** @type {import('$lib/api.js').StreamingStatus | null} */
 	let streaming = $state(null);
@@ -115,6 +124,7 @@
 	let clockAnchorAt = 0;
 
 	const selected = $derived(devices.find((d) => d.id === selectedId) ?? null);
+	const outputDevices = $derived(devices);
 	const playing = $derived(transport?.state === 'playing');
 	const wifiIpLabel = $derived(wifi?.ips?.length ? wifi.ips.join(', ') : '—');
 	const activeQueueId = $derived(transport?.queue_item_id ?? null);
@@ -293,9 +303,32 @@
 		}
 	}
 
+	/**
+	 * @param {import('$lib/api.js').DiscoveredBluetoothSink[]} rows
+	 */
+	function applyBtRows(rows) {
+		discoveredBt = rows || [];
+		const names = new Set();
+		for (const bt of discoveredBt) {
+			if (
+				bt.configured_id ||
+				devices.some((d) => d.kind !== 'network_spp' && d.name === bt.name && d.enabled)
+			) {
+				names.add(bt.name);
+			}
+		}
+		for (const d of devices) {
+			if (d.kind === 'network_spp') continue;
+			if (discoveredBt.some((bt) => bt.name === d.name) && d.enabled) {
+				names.add(d.name);
+			}
+		}
+		setupBtNames = names;
+	}
+
 	async function refreshDiscovery() {
 		const disc = await discoverDevices();
-		discoveredBt = disc.bluetooth || [];
+		applyBtRows(disc.bluetooth || []);
 		sppDefault = disc.spp_default || null;
 		setupDetail = disc.detail || '';
 		setupConfigOk = disc.config_ok !== false;
@@ -306,20 +339,100 @@
 			setupSppRate = sppDefault.sample_rate || 48000;
 			setupSppChannels = sppDefault.channels || 1;
 		}
-		const names = new Set();
-		for (const bt of discoveredBt) {
-			if (bt.configured_id || devices.some((d) => d.kind !== 'network_spp' && d.name === bt.name && d.enabled)) {
-				names.add(bt.name);
-			}
+	}
+
+	/** @param {import('$lib/api.js').BluetoothScanStatus} status */
+	function applyScanStatus(status) {
+		btScanning = Boolean(status.scanning);
+		applyBtRows(status.bluetooth || []);
+		if (status.detail) setupDetail = status.detail;
+	}
+
+	function stopBtScanPoll() {
+		if (btScanPoll) {
+			clearInterval(btScanPoll);
+			btScanPoll = null;
 		}
-		// Also mark currently configured BT devices that match discovery names.
-		for (const d of devices) {
-			if (d.kind === 'network_spp') continue;
-			if (discoveredBt.some((bt) => bt.name === d.name) && d.enabled) {
-				names.add(d.name);
-			}
+	}
+
+	async function onStartBtScan() {
+		if (btScanBusy) return;
+		btScanBusy = true;
+		setupMessage = '';
+		try {
+			applyScanStatus(await startBluetoothScan());
+			setupMessage = 'Bluetooth scan started';
+			stopBtScanPoll();
+			btScanPoll = setInterval(async () => {
+				try {
+					applyScanStatus(await startBluetoothScan());
+				} catch (err) {
+					console.error(err);
+				}
+			}, 4000);
+		} catch (err) {
+			setupMessage = err instanceof Error ? err.message : String(err);
+		} finally {
+			btScanBusy = false;
 		}
-		setupBtNames = names;
+	}
+
+	async function onStopBtScan() {
+		if (btScanBusy) return;
+		btScanBusy = true;
+		setupMessage = '';
+		try {
+			stopBtScanPoll();
+			applyScanStatus(await stopBluetoothScan());
+			setupMessage = 'Bluetooth scan stopped';
+		} catch (err) {
+			setupMessage = err instanceof Error ? err.message : String(err);
+		} finally {
+			btScanBusy = false;
+		}
+	}
+
+	async function onClearDiscovery() {
+		if (btScanBusy) return;
+		btScanBusy = true;
+		setupMessage = '';
+		try {
+			applyScanStatus(await clearBluetoothDiscovery());
+			setupMessage = 'Cleared discovery — connected devices kept';
+		} catch (err) {
+			setupMessage = err instanceof Error ? err.message : String(err);
+		} finally {
+			btScanBusy = false;
+		}
+	}
+
+	/**
+	 * @param {import('$lib/api.js').DiscoveredBluetoothSink} bt
+	 */
+	async function onConnectBt(bt) {
+		if (!bt.mac || btConnectBusy) return;
+		btConnectBusy = bt.mac;
+		setupMessage = '';
+		try {
+			const res = await connectBluetooth({
+				mac: bt.mac,
+				name: bt.name,
+				enable_as_output: true
+			});
+			if (res.bluetooth) applyBtRows(res.bluetooth);
+			if (res.ok) {
+				setupMessage = `Connected ${bt.name}`;
+				devices = await listDevices();
+				if (res.device?.id) selectedId = res.device.id;
+				health = await getHealth().catch(() => health);
+			} else {
+				setupMessage = res.detail || `Connect failed for ${bt.name}`;
+			}
+		} catch (err) {
+			setupMessage = err instanceof Error ? err.message : String(err);
+		} finally {
+			btConnectBusy = '';
+		}
 	}
 
 	async function refresh() {
@@ -494,10 +607,11 @@
 	}
 
 	/**
+	 * Debounced PATCH /api/devices/{id} — delay/volume live on outputs (MDAS-24).
+	 * @param {string} id
 	 * @param {Partial<Pick<import('$lib/api.js').Device, 'delay_ms' | 'volume' | 'mute' | 'enabled' | 'kind' | 'listen_host' | 'listen_port' | 'sample_rate' | 'channels'>>} partial
 	 */
-	function queueDevicePatch(partial) {
-		const id = selectedId;
+	function queueDevicePatch(id, partial) {
 		if (!id) return;
 		devices = devices.map((d) => (d.id === id ? { ...d, ...partial } : d));
 
@@ -818,6 +932,7 @@
 			cancelled = true;
 			clearInterval(pollTimer);
 			clearInterval(tickTimer);
+			stopBtScanPoll();
 			for (const t of Object.values(patchTimers)) clearTimeout(t);
 		};
 	});
@@ -842,7 +957,8 @@
 <nav class="jump" aria-label="Sections">
 	<a href="#transport-heading">Transport</a>
 	<a href="#wifi-heading">Wi-Fi</a>
-	<a href="#setup-heading">Devices</a>
+	<a href="#setup-heading">Outputs</a>
+	<a href="#inputs-heading">Inputs</a>
 	<a href="#streaming-heading">Streaming</a>
 	<a href="#queue-heading">Sources</a>
 </nav>
@@ -1085,85 +1201,133 @@
 
 		<section class="panel setup-panel" aria-labelledby="setup-heading">
 			<div class="panel-head">
-				<h2 id="setup-heading">Device setup</h2>
-				<p class="hint">BT by name · Phone SPP · Save</p>
+				<h2 id="setup-heading">Bluetooth search</h2>
+				<p class="hint">
+					{btScanning ? 'Scanning…' : 'Scan · connect · clear'}
+					{#if btScanning}
+						<span class="status-pill linked scan-pill">live</span>
+					{/if}
+				</p>
 			</div>
 			{#if !setupConfigOk}
-				<p class="setup-warn">Config missing — save below to write devices.yaml.</p>
+				<p class="setup-warn">Config missing — save outputs below to write devices.yaml.</p>
 			{/if}
-			<div class="setup-grid">
-				<div class="setup-col">
-					<h3 class="setup-sub">Bluetooth</h3>
-					{#if discoveredBt.length === 0}
-						<p class="hint">No bluez sinks — pair, then Refresh.</p>
-					{:else}
-						<ul class="setup-list">
-							{#each discoveredBt as bt (bt.name + (bt.mac || ''))}
-								<li>
-									<label class="check setup-check">
-										<input
-											type="checkbox"
-											checked={setupBtNames.has(bt.name)}
-											onchange={() => toggleSetupBt(bt.name)}
-										/>
-										<span>
-											<strong>{bt.name}</strong>
-											<span class="device-sub">
-												{bt.connected ? 'connected' : bt.paired ? 'paired' : 'seen'}
-											</span>
-										</span>
-									</label>
-								</li>
-							{/each}
-						</ul>
-					{/if}
-				</div>
-				<div class="setup-col">
-					<h3 class="setup-sub">Phone SPP</h3>
-					<p class="hint spp-phone-hint">
-						Phone app host = <code>{wifiIpLabel}</code> (not 0.0.0.0) · port below
-					</p>
-					<label class="check setup-check">
-						<input type="checkbox" bind:checked={setupSppEnabled} />
-						<span>
-							<strong>Enable TCP listen</strong>
-							<span class="device-sub">Simple Protocol Player → Pi IP:port</span>
-						</span>
-					</label>
-					{#if setupSppEnabled}
-						<div class="setup-spp-fields">
-							<label class="field">
-								<span>Listen host</span>
-								<input type="text" bind:value={setupSppHost} autocomplete="off" />
-							</label>
-							<label class="field">
-								<span>Port</span>
-								<input type="number" min="1" max="65535" bind:value={setupSppPort} />
-							</label>
-							<label class="field">
-								<span>Sample rate</span>
-								<select bind:value={setupSppRate}>
-									<option value={44100}>44100</option>
-									<option value={48000}>48000</option>
-								</select>
-							</label>
-							<label class="field">
-								<span>Channels</span>
-								<select bind:value={setupSppChannels}>
-									<option value={1}>Mono (1)</option>
-									<option value={2}>Stereo (2)</option>
-								</select>
-							</label>
-						</div>
-					{/if}
-				</div>
-			</div>
-			<div class="setup-actions">
-				<button type="button" class="btn btn-ghost" disabled={setupBusy} onclick={() => refreshDiscovery()}>
+			<div class="setup-actions bt-scan-actions">
+				<button
+					type="button"
+					class="btn"
+					disabled={btScanBusy || btScanning}
+					onclick={() => onStartBtScan()}
+				>
+					{btScanning ? 'Scanning…' : 'Start scan'}
+				</button>
+				<button
+					type="button"
+					class="btn btn-ghost"
+					disabled={btScanBusy || !btScanning}
+					onclick={() => onStopBtScan()}
+				>
+					Stop
+				</button>
+				<button
+					type="button"
+					class="btn btn-ghost"
+					disabled={btScanBusy || discoveredBt.length === 0}
+					onclick={() => onClearDiscovery()}
+				>
+					Clear list
+				</button>
+				<button
+					type="button"
+					class="btn btn-ghost"
+					disabled={setupBusy || btScanBusy}
+					onclick={() => refreshDiscovery()}
+				>
 					Refresh
 				</button>
+			</div>
+			{#if discoveredBt.length === 0}
+				<p class="hint">No Bluetooth devices yet — Start scan (or pair on the Pi, then Refresh).</p>
+			{:else}
+				<ul class="setup-list bt-discover-list">
+					{#each discoveredBt as bt (bt.mac || bt.name)}
+						<li class="bt-discover-row">
+							<label class="check setup-check">
+								<input
+									type="checkbox"
+									checked={setupBtNames.has(bt.name)}
+									onchange={() => toggleSetupBt(bt.name)}
+								/>
+								<span>
+									<strong>{bt.name}</strong>
+									<span class="device-sub">
+										{bt.connected ? 'connected' : bt.paired ? 'paired' : 'seen'}
+										{#if bt.mac}
+											· {bt.mac}
+										{/if}
+									</span>
+								</span>
+							</label>
+							<button
+								type="button"
+								class="btn btn-small"
+								disabled={!bt.mac || btConnectBusy === bt.mac || bt.connected}
+								onclick={() => onConnectBt(bt)}
+							>
+								{bt.connected
+									? 'Connected'
+									: btConnectBusy === bt.mac
+										? 'Connecting…'
+										: 'Connect'}
+							</button>
+						</li>
+					{/each}
+				</ul>
+			{/if}
+
+			<div class="setup-col spp-output-col">
+				<h3 class="setup-sub">Phone SPP output</h3>
+				<p class="hint spp-phone-hint">
+					Phone app host = <code>{wifiIpLabel}</code> (not 0.0.0.0) · port below
+				</p>
+				<label class="check setup-check">
+					<input type="checkbox" bind:checked={setupSppEnabled} />
+					<span>
+						<strong>Enable TCP listen</strong>
+						<span class="device-sub">Simple Protocol Player → Pi IP:port</span>
+					</span>
+				</label>
+				{#if setupSppEnabled}
+					<div class="setup-spp-fields">
+						<label class="field">
+							<span>Listen host</span>
+							<input type="text" bind:value={setupSppHost} autocomplete="off" />
+						</label>
+						<label class="field">
+							<span>Port</span>
+							<input type="number" min="1" max="65535" bind:value={setupSppPort} />
+						</label>
+						<label class="field">
+							<span>Sample rate</span>
+							<select bind:value={setupSppRate}>
+								<option value={44100}>44100</option>
+								<option value={48000}>48000</option>
+							</select>
+						</label>
+						<label class="field">
+							<span>Channels</span>
+							<select bind:value={setupSppChannels}>
+								<option value={1}>Mono (1)</option>
+								<option value={2}>Stereo (2)</option>
+							</select>
+						</label>
+					</div>
+				{/if}
+			</div>
+
+			<div class="setup-actions">
 				<button type="button" class="btn" disabled={setupBusy} onclick={() => saveDeviceSetup()}>
-					{setupBusy ? 'Saving…' : 'Save sinks'}
+					{setupBusy ? 'Saving…' : 'Save outputs'}
 				</button>
 			</div>
 			{#if setupMessage}
@@ -1174,208 +1338,294 @@
 			{/if}
 		</section>
 
-		<div class="split">
-			<section class="panel devices-panel" aria-labelledby="devices-heading">
-				<div class="panel-head">
-					<h2 id="devices-heading">Sinks</h2>
-					<p class="hint">Tap for delay &amp; volume</p>
-				</div>
-				<ul class="device-list">
-					{#each devices as d (d.id)}
-						<li>
-							<button
-								type="button"
-								class="device-row"
-								class:selected={d.id === selectedId}
-								aria-pressed={d.id === selectedId}
-								onclick={() => {
-									selectedId = d.id;
-								}}
+		<section class="panel devices-panel" aria-labelledby="devices-heading">
+			<div class="panel-head">
+				<h2 id="devices-heading">Connected outputs</h2>
+				<p class="hint">Delay &amp; volume per output · PATCH /api/devices</p>
+			</div>
+			<ul class="device-list output-control-list">
+				{#each outputDevices as d (d.id)}
+					<li class="output-card" class:selected={d.id === selectedId}>
+						<button
+							type="button"
+							class="device-row output-row-head"
+							aria-pressed={d.id === selectedId}
+							onclick={() => {
+								selectedId = d.id === selectedId ? null : d.id;
+							}}
+						>
+							<span>
+								<span class="device-title">
+									{d.name}
+									{#if d.kind === 'network_spp'}
+										<span class="type-chip">SPP</span>
+									{:else}
+										<span class="type-chip">BT</span>
+									{/if}
+								</span>
+								<span class="device-sub">
+									{#if d.kind === 'network_spp'}
+										:{d.listen_port || 1234} · {d.sample_rate || 48000}/{d.channels || 1}
+									{:else if d.mac}
+										{d.mac}
+									{:else}
+										Bluetooth A2DP
+									{/if}
+								</span>
+							</span>
+							<span
+								class="status-pill {sinkStatusLabel(d) === 'READY'
+									? 'linked'
+									: sinkStatusLabel(d) === 'off'
+										? ''
+										: 'missing'}"
 							>
-								<span>
-									<span class="device-title">
-										{d.name}
-										{#if d.kind === 'network_spp'}
-											<span class="type-chip">SPP</span>
-										{:else}
-											<span class="type-chip">BT</span>
-										{/if}
-									</span>
-									<span class="device-sub">
-										{#if d.kind === 'network_spp'}
-											:{d.listen_port || 1234} · {d.sample_rate || 48000}/{d.channels || 1} · {d.delay_ms} ms · {Math.round(d.volume * 100)}%
-										{:else}
-											{d.delay_ms} ms · {Math.round(d.volume * 100)}%
-										{/if}
-									</span>
+								{sinkStatusLabel(d)}
+							</span>
+						</button>
+						<div class="output-controls">
+							<label class="field compact-field">
+								<span>Delay <em>{d.delay_ms} ms</em></span>
+								<input
+									type="range"
+									min="0"
+									max="500"
+									step="5"
+									value={d.delay_ms}
+									disabled={!d.enabled}
+									oninput={(e) => {
+										queueDevicePatch(d.id, {
+											delay_ms: Number(/** @type {HTMLInputElement} */ (e.currentTarget).value)
+										});
+									}}
+								/>
+							</label>
+							<label class="field compact-field">
+								<span>Volume <em>{Math.round(d.volume * 100)}%</em></span>
+								<input
+									type="range"
+									min="0"
+									max="100"
+									step="1"
+									value={Math.round(d.volume * 100)}
+									disabled={!d.enabled}
+									oninput={(e) => {
+										const pct = Number(/** @type {HTMLInputElement} */ (e.currentTarget).value);
+										queueDevicePatch(d.id, { volume: pct / 100 });
+									}}
+								/>
+							</label>
+							<div class="toggles">
+								<label class="check">
+									<input
+										type="checkbox"
+										checked={d.mute}
+										onchange={(e) => {
+											queueDevicePatch(d.id, {
+												mute: /** @type {HTMLInputElement} */ (e.currentTarget).checked
+											});
+										}}
+									/>
+									<span>Mute</span>
+								</label>
+								<label class="check">
+									<input
+										type="checkbox"
+										checked={d.enabled}
+										onchange={(e) => {
+											queueDevicePatch(d.id, {
+												enabled: /** @type {HTMLInputElement} */ (e.currentTarget).checked
+											});
+										}}
+									/>
+									<span>Enabled</span>
+								</label>
+							</div>
+						</div>
+						{#if selectedId === d.id && d.kind === 'network_spp'}
+							<div class="spp-inline-fields output-spp-extra">
+								<label class="field">
+									<span>Listen host</span>
+									<input
+										type="text"
+										value={d.listen_host || '0.0.0.0'}
+										oninput={(e) => {
+											queueDevicePatch(d.id, {
+												listen_host: /** @type {HTMLInputElement} */ (e.currentTarget).value
+											});
+										}}
+									/>
+								</label>
+								<label class="field">
+									<span>Port</span>
+									<input
+										type="number"
+										min="1"
+										max="65535"
+										value={d.listen_port || 1234}
+										oninput={(e) => {
+											queueDevicePatch(d.id, {
+												listen_port: Number(
+													/** @type {HTMLInputElement} */ (e.currentTarget).value
+												)
+											});
+										}}
+									/>
+								</label>
+								<p class="hint">Phone → {wifiIpLabel}:{d.listen_port || 1234}</p>
+							</div>
+						{/if}
+					</li>
+				{:else}
+					<li class="empty-group">No outputs yet — scan/connect BT or enable Phone SPP, then Save</li>
+				{/each}
+			</ul>
+		</section>
+	</div>
+
+	<div class="zone" id="zone-inputs">
+		<p class="zone-label">Inputs</p>
+
+		<section class="panel inputs-panel" aria-labelledby="inputs-heading">
+			<div class="panel-head">
+				<h2 id="inputs-heading">Inputs</h2>
+				<p class="hint">Phone / PC hosts · up to 4 · no delay/volume</p>
+			</div>
+			<p class="hint muted">
+				Pi 5 USB-C PD is power-only — PC audio needs a USB-A sound card/interface (not the PD port).
+				Phone: pair as A2DP <em>source</em>, then Refresh.
+			</p>
+			<div class="stub-actions">
+				<button
+					type="button"
+					class="btn btn-ghost btn-small"
+					disabled={captureBusy}
+					onclick={() => refreshCaptureDiscovery()}
+				>
+					{captureBusy ? 'Scanning…' : 'Refresh inputs'}
+				</button>
+				{#if captureMessage}
+					<span class="hint">{captureMessage}</span>
+				{/if}
+			</div>
+			{#if discoveredCapture.length}
+				<ul class="queue-list discovery-list">
+					{#each discoveredCapture as src (src.pw_name || src.name)}
+						<li class="queue-row host-row">
+							<div class="queue-main">
+								<span class="source-title">{src.name}</span>
+								<span class="source-sub">
+									{capturePathLabel(src.capture_path || 'bt_a2dp')}
+									{#if src.pw_name || src.pw_node}
+										· {src.pw_name || src.pw_node}
+									{/if}
 								</span>
-								<span
-									class="status-pill {sinkStatusLabel(d) === 'READY'
-										? 'linked'
-										: sinkStatusLabel(d) === 'off'
-											? ''
-											: 'missing'}"
-								>
-									{sinkStatusLabel(d)}
-								</span>
+							</div>
+							<button type="button" class="btn btn-small" onclick={() => bindCaptureSource(src)}>
+								{src.configured_id ? 'Re-bind' : 'Use'}
 							</button>
 						</li>
 					{/each}
 				</ul>
-			</section>
-
-			{#if selected}
-				<section class="panel detail-panel" aria-labelledby="detail-heading">
-					<div class="panel-head">
-						<h2 id="detail-heading">Sink controls</h2>
+			{/if}
+			<form
+				class="host-form"
+				onsubmit={(e) => {
+					e.preventDefault();
+					registerHost();
+				}}
+			>
+				<input
+					type="text"
+					placeholder="Name (e.g. S21 FE)"
+					bind:value={newHostName}
+					aria-label="Host name"
+					maxlength="64"
+				/>
+				<select bind:value={newHostKind} aria-label="Host kind">
+					{#each HOST_KINDS as k}
+						<option value={k}>{k}</option>
+					{/each}
+				</select>
+				<select bind:value={newHostPath} aria-label="Capture path">
+					{#each CAPTURE_PATHS as p}
+						<option value={p}>{capturePathLabel(p)}</option>
+					{/each}
+				</select>
+				<button type="submit" class="btn btn-small" disabled={inputs.length >= 4}>Register</button>
+			</form>
+			<ul class="queue-list">
+				{#each inputs as host (host.id)}
+					<li class="queue-row host-row">
+						<div class="queue-main">
+							<span class="source-title">{host.name}</span>
+							<span class="source-sub">
+								{capturePathLabel(host.capture_path)}
+								{#if host.endpoint}
+									· {host.endpoint}
+								{/if}
+							</span>
+						</div>
+						<label class="type-select">
+							<span class="sr-only">Capture path</span>
+							<select
+								value={host.capture_path}
+								aria-label={`Capture path for ${host.name}`}
+								onchange={(e) => {
+									const next = /** @type {HTMLSelectElement} */ (e.currentTarget).value;
+									updateHost(host.id, {
+										capture_path: /** @type {import('$lib/api.js').CapturePath} */ (next)
+									});
+								}}
+							>
+								{#each CAPTURE_PATHS as p}
+									<option value={p}>{capturePathLabel(p)}</option>
+								{/each}
+							</select>
+						</label>
+						<label class="check">
+							<input
+								type="checkbox"
+								checked={host.armed}
+								onchange={(e) => {
+									updateHost(host.id, {
+										armed: /** @type {HTMLInputElement} */ (e.currentTarget).checked
+									});
+								}}
+							/>
+							<span>Armed</span>
+						</label>
+						<span class="status-pill {host.connected ? 'linked' : 'missing'}">
+							{host.connected ? 'live' : 'waiting'}
+						</span>
+						{#if host.capture_path === 'network'}
+							<label class="btn btn-ghost btn-small upload-btn">
+								Upload
+								<input
+									type="file"
+									accept="audio/*,.wav,.flac,.mp3,.ogg"
+									class="sr-only"
+									onchange={(e) => onHostUpload(host.id, e)}
+								/>
+							</label>
+						{/if}
 						<button
 							type="button"
 							class="btn btn-ghost btn-small"
-							onclick={() => {
-								selectedId = null;
-							}}
+							aria-label={`Remove ${host.name}`}
+							onclick={() => removeHost(host.id)}
 						>
-							Close
+							Remove
 						</button>
-					</div>
-					<p class="detail-name">{selected.name}</p>
-					<p class="detail-meta">
-						{#if selected.kind === 'network_spp'}
-							SPP · listen {selected.listen_host}:{selected.listen_port} · phone → {wifiIpLabel}:{selected.listen_port}
-							· {selected.sample_rate} Hz / {selected.channels} ch · {sinkStatusLabel(selected)}
-						{:else}
-							BT · {sinkStatusLabel(selected)} · Refresh in Device setup reconnects after reboot
-						{/if}
-					</p>
-
-					<label class="field">
-						<span>Sink type</span>
-						<select
-							value={selected.kind || 'bluetooth'}
-							onchange={(e) => {
-								queueDevicePatch({
-									kind: /** @type {import('$lib/api.js').DeviceKind} */ (
-										/** @type {HTMLSelectElement} */ (e.currentTarget).value
-									)
-								});
-							}}
-						>
-							<option value="bluetooth">Bluetooth (A2DP)</option>
-							<option value="network_spp">Phone SPP (TCP)</option>
-						</select>
-					</label>
-
-					{#if selected.kind === 'network_spp'}
-						<div class="spp-inline-fields">
-							<label class="field">
-								<span>Listen host</span>
-								<input
-									type="text"
-									value={selected.listen_host || '0.0.0.0'}
-									oninput={(e) => {
-										queueDevicePatch({
-											listen_host: /** @type {HTMLInputElement} */ (e.currentTarget).value
-										});
-									}}
-								/>
-							</label>
-							<label class="field">
-								<span>Port</span>
-								<input
-									type="number"
-									min="1"
-									max="65535"
-									value={selected.listen_port || 1234}
-									oninput={(e) => {
-										queueDevicePatch({
-											listen_port: Number(/** @type {HTMLInputElement} */ (e.currentTarget).value)
-										});
-									}}
-								/>
-							</label>
-							<label class="field">
-								<span>Sample rate</span>
-								<select
-									value={selected.sample_rate || 48000}
-									onchange={(e) => {
-										queueDevicePatch({
-											sample_rate: Number(/** @type {HTMLSelectElement} */ (e.currentTarget).value)
-										});
-									}}
-								>
-									<option value="44100">44100</option>
-									<option value="48000">48000</option>
-								</select>
-							</label>
-							<label class="field">
-								<span>Channels</span>
-								<select
-									value={selected.channels || 1}
-									onchange={(e) => {
-										queueDevicePatch({
-											channels: Number(/** @type {HTMLSelectElement} */ (e.currentTarget).value)
-										});
-									}}
-								>
-									<option value="1">Mono (1)</option>
-									<option value="2">Stereo (2)</option>
-								</select>
-							</label>
-						</div>
-					{/if}
-
-					<label class="field">
-						<span>Delay <em>{selected.delay_ms} ms</em></span>
-						<input
-							type="range"
-							min="0"
-							max="500"
-							step="5"
-							value={selected.delay_ms}
-							oninput={(e) => {
-								queueDevicePatch({ delay_ms: Number(/** @type {HTMLInputElement} */ (e.currentTarget).value) });
-							}}
-						/>
-					</label>
-					<label class="field">
-						<span>Volume <em>{Math.round(selected.volume * 100)}%</em></span>
-						<input
-							type="range"
-							min="0"
-							max="100"
-							step="1"
-							value={Math.round(selected.volume * 100)}
-							oninput={(e) => {
-								const pct = Number(/** @type {HTMLInputElement} */ (e.currentTarget).value);
-								queueDevicePatch({ volume: pct / 100 });
-							}}
-						/>
-					</label>
-					<div class="toggles">
-						<label class="check">
-							<input
-								type="checkbox"
-								checked={selected.mute}
-								onchange={(e) => {
-									queueDevicePatch({ mute: /** @type {HTMLInputElement} */ (e.currentTarget).checked });
-								}}
-							/>
-							<span>Mute</span>
-						</label>
-						<label class="check">
-							<input
-								type="checkbox"
-								checked={selected.enabled}
-								onchange={(e) => {
-									queueDevicePatch({ enabled: /** @type {HTMLInputElement} */ (e.currentTarget).checked });
-								}}
-							/>
-							<span>Enabled</span>
-						</label>
-					</div>
-				</section>
+					</li>
+				{:else}
+					<li class="empty-group">No hosts yet — register or bind a discovered source</li>
+				{/each}
+			</ul>
+			{#if captureDetail}
+				<p class="hint muted">{captureDetail}</p>
 			{/if}
-		</div>
+		</section>
 	</div>
 
 	<div class="zone" id="zone-sources">
@@ -1643,145 +1893,6 @@
 			</div>
 		</section>
 
-		<section class="panel inputs-panel" aria-labelledby="inputs-heading">
-			<div class="panel-head">
-				<h2 id="inputs-heading">Phone / PC hosts</h2>
-				<p class="hint">Up to 4 · {liveHosts.length} live · BT A2DP / USB-A</p>
-			</div>
-			<p class="hint muted">
-				Pi 5 USB-C PD is power-only — PC audio needs a USB-A sound card/interface (not the PD port).
-				Phone: pair as A2DP <em>source</em>, then Refresh.
-			</p>
-			<div class="stub-actions">
-				<button
-					type="button"
-					class="btn btn-ghost btn-small"
-					disabled={captureBusy}
-					onclick={() => refreshCaptureDiscovery()}
-				>
-					{captureBusy ? 'Scanning…' : 'Refresh inputs'}
-				</button>
-				{#if captureMessage}
-					<span class="hint">{captureMessage}</span>
-				{/if}
-			</div>
-			{#if discoveredCapture.length}
-				<ul class="queue-list discovery-list">
-					{#each discoveredCapture as src (src.pw_name || src.name)}
-						<li class="queue-row host-row">
-							<div class="queue-main">
-								<span class="source-title">{src.name}</span>
-								<span class="source-sub">
-									{capturePathLabel(src.capture_path || 'bt_a2dp')}
-									{#if src.pw_name || src.pw_node}
-										· {src.pw_name || src.pw_node}
-									{/if}
-								</span>
-							</div>
-							<button type="button" class="btn btn-small" onclick={() => bindCaptureSource(src)}>
-								{src.configured_id ? 'Re-bind' : 'Use'}
-							</button>
-						</li>
-					{/each}
-				</ul>
-			{/if}
-			<form
-				class="host-form"
-				onsubmit={(e) => {
-					e.preventDefault();
-					registerHost();
-				}}
-			>
-				<input
-					type="text"
-					placeholder="Name (e.g. S21 FE)"
-					bind:value={newHostName}
-					aria-label="Host name"
-					maxlength="64"
-				/>
-				<select bind:value={newHostKind} aria-label="Host kind">
-					{#each HOST_KINDS as k}
-						<option value={k}>{k}</option>
-					{/each}
-				</select>
-				<select bind:value={newHostPath} aria-label="Capture path">
-					{#each CAPTURE_PATHS as p}
-						<option value={p}>{capturePathLabel(p)}</option>
-					{/each}
-				</select>
-				<button type="submit" class="btn btn-small" disabled={inputs.length >= 4}>Register</button>
-			</form>
-			<ul class="queue-list">
-				{#each inputs as host (host.id)}
-					<li class="queue-row host-row">
-						<div class="queue-main">
-							<span class="source-title">{host.name}</span>
-							<span class="source-sub">
-								{capturePathLabel(host.capture_path)}
-								{#if host.endpoint}
-									· {host.endpoint}
-								{/if}
-							</span>
-						</div>
-						<label class="type-select">
-							<span class="sr-only">Capture path</span>
-							<select
-								value={host.capture_path}
-								aria-label={`Capture path for ${host.name}`}
-								onchange={(e) => {
-									const next = /** @type {HTMLSelectElement} */ (e.currentTarget).value;
-									updateHost(host.id, {
-										capture_path: /** @type {import('$lib/api.js').CapturePath} */ (next)
-									});
-								}}
-							>
-								{#each CAPTURE_PATHS as p}
-									<option value={p}>{capturePathLabel(p)}</option>
-								{/each}
-							</select>
-						</label>
-						<label class="check">
-							<input
-								type="checkbox"
-								checked={host.armed}
-								onchange={(e) => {
-									updateHost(host.id, {
-										armed: /** @type {HTMLInputElement} */ (e.currentTarget).checked
-									});
-								}}
-							/>
-							<span>Armed</span>
-						</label>
-						<span class="status-pill {host.connected ? 'linked' : 'missing'}">
-							{host.connected ? 'live' : 'waiting'}
-						</span>
-						{#if host.capture_path === 'network'}
-							<label class="btn btn-ghost btn-small upload-btn">
-								Upload
-								<input
-									type="file"
-									accept="audio/*,.wav,.flac,.mp3,.ogg"
-									class="sr-only"
-									onchange={(e) => onHostUpload(host.id, e)}
-								/>
-							</label>
-						{/if}
-						<button
-							type="button"
-							class="btn btn-ghost btn-small"
-							aria-label={`Remove ${host.name}`}
-							onclick={() => removeHost(host.id)}
-						>
-							Remove
-						</button>
-					</li>
-				{:else}
-					<li class="empty-group">No hosts yet — register or bind a discovered source</li>
-				{/each}
-			</ul>
-			{#if captureDetail}
-				<p class="hint muted">{captureDetail}</p>
-			{/if}
-		</section>
+
 	</div>
 </main>

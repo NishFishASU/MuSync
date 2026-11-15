@@ -741,6 +741,78 @@ def discover_bluetooth_remotes(
     return remotes, f"bluetoothctl → {len(remotes)} remotes"
 
 
+def bluetoothctl_scan_on(
+    bluetoothctl: Optional[str],
+    *,
+    timeout: float = 3.0,
+) -> tuple[bool, str]:
+    """Start BlueZ discovery (``bluetoothctl scan on``). Non-blocking for the API."""
+    if not bluetoothctl:
+        return False, "bluetoothctl missing"
+    try:
+        proc = run_cmd([bluetoothctl, "scan", "on"], timeout=timeout)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        # scan on often keeps the process open; TimeoutExpired still means scan started.
+        if isinstance(exc, subprocess.TimeoutExpired):
+            return True, "scan on (background)"
+        return False, f"scan on: {exc}"
+    out = ((proc.stdout or "") + (proc.stderr or "")).strip()
+    low = out.lower()
+    if proc.returncode == 0 or "discovery started" in low or "already" in low:
+        return True, out or "scan on"
+    # Some builds print to stdout and still start discovery.
+    if "failed" in low or "not available" in low:
+        return False, out or f"scan on failed (rc={proc.returncode})"
+    return True, out or "scan on"
+
+
+def bluetoothctl_scan_off(
+    bluetoothctl: Optional[str],
+    *,
+    timeout: float = 4.0,
+) -> tuple[bool, str]:
+    """Stop BlueZ discovery (``bluetoothctl scan off``)."""
+    if not bluetoothctl:
+        return False, "bluetoothctl missing"
+    try:
+        proc = run_cmd([bluetoothctl, "scan", "off"], timeout=timeout)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return False, f"scan off: {exc}"
+    out = ((proc.stdout or "") + (proc.stderr or "")).strip()
+    low = out.lower()
+    if proc.returncode == 0 or "discovery stopped" in low or "already" in low:
+        return True, out or "scan off"
+    return False, out or f"scan off failed (rc={proc.returncode})"
+
+
+def bluetoothctl_pair(
+    bluetoothctl: Optional[str],
+    mac: str,
+    *,
+    timeout: float = 12.0,
+) -> tuple[bool, str]:
+    """Best-effort ``bluetoothctl pair <mac>`` before connect."""
+    if not bluetoothctl:
+        return False, "bluetoothctl missing"
+    want = normalize_mac(mac)
+    if not want or want.count(":") != 5:
+        return False, f"invalid mac: {mac!r}"
+    try:
+        proc = run_cmd([bluetoothctl, "pair", want], timeout=timeout)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return False, f"pair {want}: {exc}"
+    out = ((proc.stdout or "") + (proc.stderr or "")).strip()
+    low = out.lower()
+    if (
+        proc.returncode == 0
+        or "pairing successful" in low
+        or "already paired" in low
+        or "exists" in low
+    ):
+        return True, out or f"paired {want}"
+    return False, out or f"pair {want} failed (rc={proc.returncode})"
+
+
 def bluetoothctl_connect(
     bluetoothctl: Optional[str],
     mac: str,

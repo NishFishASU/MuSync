@@ -5,6 +5,9 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 
 from ..models import (
+    BluetoothConnectRequest,
+    BluetoothConnectResponse,
+    BluetoothScanStatus,
     CaptureDiscoverResponse,
     Device,
     DeviceConfigEntry,
@@ -110,6 +113,26 @@ class AudioBackend(ABC):
     def discover_capture_sources(self) -> CaptureDiscoverResponse:
         """List PipeWire Audio/Source nodes (bluez_input / USB) for host binding."""
         ...
+
+    def bluetooth_scan_status(self) -> BluetoothScanStatus:
+        """Return scan flag + accumulated BT discovery rows (override in backends)."""
+        raise NotImplementedError
+
+    def bluetooth_scan_start(self) -> BluetoothScanStatus:
+        """Start BlueZ discovery (``bluetoothctl scan on``)."""
+        raise NotImplementedError
+
+    def bluetooth_scan_stop(self) -> BluetoothScanStatus:
+        """Stop BlueZ discovery (``bluetoothctl scan off``)."""
+        raise NotImplementedError
+
+    def bluetooth_clear_discovery(self) -> BluetoothScanStatus:
+        """Drop non-connected rows from the discovery list (keep connected)."""
+        raise NotImplementedError
+
+    def bluetooth_connect(self, body: BluetoothConnectRequest) -> BluetoothConnectResponse:
+        """Pair/connect a remote by MAC and optionally enable it as an output."""
+        raise NotImplementedError
 
     def bind_input_upload(self, host_id: str, file_path: str) -> InputHost:
         """Network capture stub: point host at an uploaded file that plays into feeder."""

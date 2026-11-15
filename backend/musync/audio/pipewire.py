@@ -74,6 +74,9 @@ from ..config import (
 )
 from ..models import (
     MAX_INPUT_HOSTS,
+    BluetoothConnectRequest,
+    BluetoothConnectResponse,
+    BluetoothScanStatus,
     CaptureDiscoverResponse,
     CapturePath,
     Device,
@@ -104,6 +107,9 @@ from .pw_tools import (
     GraphPlan,
     PwNode,
     bluetoothctl_connect,
+    bluetoothctl_pair,
+    bluetoothctl_scan_off,
+    bluetoothctl_scan_on,
     build_capture_loopback_commands,
     build_sink_commands,
     classify_capture_source,
@@ -185,6 +191,10 @@ class PipeWireBackend(AudioBackend):
         # Soft BT reconnect throttle (demo reboot: paired but A2DP not up yet).
         self._last_bt_reconnect_at: float = 0.0
         self._bt_reconnect_min_interval_s: float = 8.0
+        # UI BlueZ scan session — accumulate remotes; clear keeps connected only.
+        self._bt_scanning: bool = False
+        self._bt_scan_cache: dict[str, DiscoveredBluetoothSink] = {}
+        self._bt_scan_cleared_macs: set[str] = set()
 
         self._tools = {
             "wpctl": which("wpctl"),
@@ -381,6 +391,8 @@ class PipeWireBackend(AudioBackend):
             mac = normalize_mac(remote.mac)
             if mac in seen_macs:
                 continue
+            if mac in self._bt_scan_cleared_macs and not remote.connected:
+                continue
             hint = {
                 "mac": mac,
                 "pw_node": "",
@@ -391,17 +403,51 @@ class PipeWireBackend(AudioBackend):
             by_name[remote.name.lower()] = hint
             by_mac[mac] = hint
             cfg = configured_by_name.get(remote.name.lower()) or configured_by_mac.get(mac)
-            rows.append(
-                DiscoveredBluetoothSink(
-                    name=remote.name or f"BT {mac}",
-                    mac=mac,
-                    paired=remote.paired,
-                    connected=remote.connected,
-                    configured_id=cfg,
+            row = DiscoveredBluetoothSink(
+                name=remote.name or f"BT {mac}",
+                mac=mac,
+                paired=remote.paired,
+                connected=remote.connected,
+                configured_id=cfg,
+            )
+            rows.append(row)
+            self._bt_scan_cache[mac] = row
+            self._bt_scan_cleared_macs.discard(mac)
+
+        # Merge scan-cache remotes not present in live listing (still scanning / cleared filter).
+        for mac, cached in list(self._bt_scan_cache.items()):
+            if mac in seen_macs:
+                continue
+            if any(normalize_mac(r.mac) == mac for r in rows if r.mac):
+                continue
+            if mac in self._bt_scan_cleared_macs and not cached.connected:
+                continue
+            cfg = configured_by_name.get(cached.name.lower()) or configured_by_mac.get(mac)
+            rows.append(cached.model_copy(update={"configured_id": cfg}))
+            if cached.name:
+                by_name.setdefault(
+                    cached.name.lower(),
+                    {
+                        "mac": mac,
+                        "pw_node": cached.pw_node,
+                        "pw_name": cached.pw_name,
+                        "hci": cached.hci,
+                        "connected": cached.connected,
+                    },
                 )
+            by_mac.setdefault(
+                mac,
+                {
+                    "mac": mac,
+                    "pw_node": cached.pw_node,
+                    "pw_name": cached.pw_name,
+                    "hci": cached.hci,
+                    "connected": cached.connected,
+                },
             )
 
-        return by_name, by_mac, rows, f"{detail}; {bt_detail}"
+        scan_note = "; scanning" if self._bt_scanning else ""
+        return by_name, by_mac, rows, f"{detail}; {bt_detail}{scan_note}"
 
     def _ensure_feeder_commands(self) -> list[list[str]]:
         """Shell plan helper — prefer ``_ensure_feeder`` at runtime."""
@@ -1592,6 +1638,180 @@ class PipeWireBackend(AudioBackend):
             except Exception as exc:  # noqa: BLE001
                 log.warning("Graph refresh after config apply failed: %s", exc)
             return [d.model_copy(deep=True) for d in self._devices.values()]
+
+    def bluetooth_scan_status(self) -> BluetoothScanStatus:
+        with self._lock:
+            _by_name, _by_mac, rows, detail = self._discovery_maps()
+            return BluetoothScanStatus(
+                scanning=self._bt_scanning,
+                bluetooth=rows,
+                detail=detail,
+            )
+
+    def bluetooth_scan_start(self) -> BluetoothScanStatus:
+        with self._lock:
+            btctl = self._tools.get("bluetoothctl")
+            ok, msg = bluetoothctl_scan_on(btctl)
+            self._bt_scanning = bool(ok) or self._bt_scanning
+            if ok:
+                self._bt_scanning = True
+            # Refresh remotes so newly advertised devices enter the cache.
+            _by_name, _by_mac, rows, detail = self._discovery_maps()
+            return BluetoothScanStatus(
+                scanning=self._bt_scanning,
+                bluetooth=rows,
+                detail=f"{msg}; {detail}" if msg else detail,
+            )
+
+    def bluetooth_scan_stop(self) -> BluetoothScanStatus:
+        with self._lock:
+            btctl = self._tools.get("bluetoothctl")
+            ok, msg = bluetoothctl_scan_off(btctl)
+            if ok or not btctl:
+                self._bt_scanning = False
+            _by_name, _by_mac, rows, detail = self._discovery_maps()
+            return BluetoothScanStatus(
+                scanning=self._bt_scanning,
+                bluetooth=rows,
+                detail=f"{msg}; {detail}" if msg else detail,
+            )
+
+    def bluetooth_clear_discovery(self) -> BluetoothScanStatus:
+        with self._lock:
+            kept: dict[str, DiscoveredBluetoothSink] = {}
+            cleared = 0
+            for mac, row in list(self._bt_scan_cache.items()):
+                if row.connected:
+                    kept[mac] = row
+                    self._bt_scan_cleared_macs.discard(mac)
+                else:
+                    cleared += 1
+                    self._bt_scan_cleared_macs.add(mac)
+            # Connected configured sinks always stay visible.
+            for d in self._devices.values():
+                if d.kind != DeviceKind.BLUETOOTH or not d.mac:
+                    continue
+                mac = normalize_mac(d.mac)
+                if not mac:
+                    continue
+                if d.connected or (d.enabled and d.connected):
+                    kept[mac] = DiscoveredBluetoothSink(
+                        name=d.name,
+                        mac=mac,
+                        pw_node=d.pw_node,
+                        hci=d.hci,
+                        paired=True,
+                        connected=True,
+                        configured_id=d.id,
+                    )
+                    self._bt_scan_cleared_macs.discard(mac)
+            self._bt_scan_cache = kept
+            _by_name, _by_mac, rows, detail = self._discovery_maps()
+            # Filter live rows through cleared set (except connected).
+            filtered = [
+                r
+                for r in rows
+                if r.connected
+                or not r.mac
+                or normalize_mac(r.mac) not in self._bt_scan_cleared_macs
+            ]
+            return BluetoothScanStatus(
+                scanning=self._bt_scanning,
+                bluetooth=filtered,
+                detail=f"cleared {cleared} · kept {len(filtered)} · {detail}",
+            )
+
+    def bluetooth_connect(self, body: BluetoothConnectRequest) -> BluetoothConnectResponse:
+        with self._lock:
+            mac = normalize_mac(body.mac)
+            btctl = self._tools.get("bluetoothctl")
+            notes: list[str] = []
+            pair_ok, pair_detail = bluetoothctl_pair(btctl, mac)
+            notes.append(pair_detail)
+            ok, connect_detail = bluetoothctl_connect(btctl, mac, timeout=12.0)
+            notes.append(connect_detail)
+            if not ok and not self._env_dry_run():
+                # Still refresh discovery so UI shows current state.
+                _bn, _bm, rows, _d = self._discovery_maps()
+                return BluetoothConnectResponse(
+                    ok=False,
+                    mac=mac,
+                    detail="; ".join(n for n in notes if n),
+                    bluetooth=rows,
+                )
+
+            # Update / create scan-cache row.
+            name = (body.name or "").strip()
+            cached = self._bt_scan_cache.get(mac)
+            label = name or (cached.name if cached else f"BT {mac}")
+            row = DiscoveredBluetoothSink(
+                name=label,
+                mac=mac,
+                pw_node=cached.pw_node if cached else "",
+                pw_name=cached.pw_name if cached else "",
+                hci=cached.hci if cached else "",
+                paired=True,
+                connected=True if ok or self._env_dry_run() else False,
+            )
+            self._bt_scan_cache[mac] = row
+            self._bt_scan_cleared_macs.discard(mac)
+
+            device: Device | None = None
+            if body.enable_as_output:
+                for d in self._devices.values():
+                    if d.kind == DeviceKind.BLUETOOTH and (
+                        normalize_mac(d.mac) == mac
+                        or d.name.strip().lower() == label.lower()
+                    ):
+                        data = d.model_dump()
+                        data.update(
+                            {
+                                "mac": mac,
+                                "name": label,
+                                "connected": True,
+                                "enabled": True,
+                            }
+                        )
+                        device = Device.model_validate(data)
+                        self._devices[d.id] = device
+                        break
+                if device is None:
+                    bt_count = sum(
+                        1 for d in self._devices.values() if d.kind == DeviceKind.BLUETOOTH
+                    )
+                    new_id = f"bt-{bt_count + 1}"
+                    if new_id in self._devices:
+                        new_id = f"bt-{mac.replace(':', '').lower()[-6:]}"
+                    device = Device(
+                        id=new_id,
+                        name=label,
+                        kind=DeviceKind.BLUETOOTH,
+                        mac=mac,
+                        connected=True,
+                        enabled=True,
+                        delay_ms=0,
+                        volume=0.85,
+                    )
+                    trial = list(self._devices.values()) + [device]
+                    validate_devices(trial)
+                    self._devices[device.id] = device
+                self._persist()
+                row = row.model_copy(update={"configured_id": device.id})
+                self._bt_scan_cache[mac] = row
+                try:
+                    self.refresh_sink_map()
+                    self._ensure_graph()
+                except Exception as exc:  # noqa: BLE001
+                    notes.append(f"graph refresh: {exc}")
+
+            _bn, _bm, rows, _d = self._discovery_maps()
+            return BluetoothConnectResponse(
+                ok=True if ok or self._env_dry_run() else False,
+                mac=mac,
+                detail="; ".join(n for n in notes if n),
+                device=device.model_copy(deep=True) if device else None,
+                bluetooth=rows,
+            )
 
     def get_transport(self) -> Transport:
         return self._session.get_transport()
