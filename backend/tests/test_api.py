@@ -174,6 +174,22 @@ def test_index_served(client: TestClient) -> None:
     assert "/_app/" in res.text or "sveltekit" in res.text.lower()
 
 
+def test_spa_tab_deep_links(client: TestClient) -> None:
+    """Tab routes must deep-link (refresh /outputs works on the Pi)."""
+    for path in (
+        "/outputs",
+        "/outputs/",
+        "/inputs/",
+        "/streaming",
+        "/queue/",
+        "/wifi",
+        "/profiles/",
+    ):
+        res = client.get(path)
+        assert res.status_code == 200, f"{path}: {res.status_code} {res.text[:120]}"
+        assert "MuSync" in res.text
+
+
 def test_static_asset_smoke(client: TestClient) -> None:
     """Minimal UI smoke: built SPA index + at least one JS chunk."""
     index = client.get("/")
