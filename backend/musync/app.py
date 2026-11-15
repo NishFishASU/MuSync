@@ -16,6 +16,9 @@ from .config import media_library_path, resolve_media_file, web_root
 from .models import (
     ActiveQueuePut,
     ActiveSourcePut,
+    BluetoothConnectRequest,
+    BluetoothConnectResponse,
+    BluetoothScanStatus,
     CaptureDiscoverResponse,
     Device,
     DeviceDiscoverResponse,
@@ -110,6 +113,36 @@ def api_get_device(device_id: str) -> Device:
 @app.patch("/api/devices/{device_id}", response_model=Device)
 def api_patch_device(device_id: str, patch: DevicePatch) -> Device:
     return backend.patch_device(device_id, patch)
+
+
+@app.get("/api/bluetooth/scan", response_model=BluetoothScanStatus)
+def api_bluetooth_scan_status() -> BluetoothScanStatus:
+    """BlueZ scan session status + accumulated discovery rows."""
+    return backend.bluetooth_scan_status()
+
+
+@app.post("/api/bluetooth/scan", response_model=BluetoothScanStatus)
+def api_bluetooth_scan_start() -> BluetoothScanStatus:
+    """Start ``bluetoothctl scan on`` and refresh discovery."""
+    return backend.bluetooth_scan_start()
+
+
+@app.delete("/api/bluetooth/scan", response_model=BluetoothScanStatus)
+def api_bluetooth_scan_stop() -> BluetoothScanStatus:
+    """Stop ``bluetoothctl scan off``."""
+    return backend.bluetooth_scan_stop()
+
+
+@app.post("/api/bluetooth/discover/clear", response_model=BluetoothScanStatus)
+def api_bluetooth_clear_discovery() -> BluetoothScanStatus:
+    """Clear discovery list except currently connected remotes."""
+    return backend.bluetooth_clear_discovery()
+
+
+@app.post("/api/bluetooth/connect", response_model=BluetoothConnectResponse)
+def api_bluetooth_connect(body: BluetoothConnectRequest) -> BluetoothConnectResponse:
+    """Pair/connect a remote by MAC (optionally enable as an output sink)."""
+    return backend.bluetooth_connect(body)
 
 
 @app.get("/api/transport", response_model=Transport)

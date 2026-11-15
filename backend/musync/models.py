@@ -101,6 +101,39 @@ class DeviceDiscoverResponse(BaseModel):
     detail: str = ""
 
 
+class BluetoothScanStatus(BaseModel):
+    """Live BlueZ scan session + accumulated discovery rows for the web UI."""
+
+    scanning: bool = False
+    bluetooth: list[DiscoveredBluetoothSink] = Field(default_factory=list)
+    detail: str = ""
+
+
+class BluetoothConnectRequest(BaseModel):
+    """Connect (and optionally trust/pair) a discovered Bluetooth remote by MAC."""
+
+    mac: str = Field(..., min_length=11, max_length=32)
+    name: Optional[str] = None
+    # When true, enable the device as an output sink after a successful connect.
+    enable_as_output: bool = True
+
+    @field_validator("mac")
+    @classmethod
+    def normalize_request_mac(cls, v: str) -> str:
+        cleaned = v.strip().upper().replace("-", ":")
+        if cleaned.count(":") != 5:
+            raise ValueError("MAC must look like AA:BB:CC:DD:EE:FF")
+        return cleaned
+
+
+class BluetoothConnectResponse(BaseModel):
+    ok: bool
+    mac: str
+    detail: str = ""
+    device: Optional[Device] = None
+    bluetooth: list[DiscoveredBluetoothSink] = Field(default_factory=list)
+
+
 class DeviceConfigEntry(BaseModel):
     """One sink the UI wants to keep — type + SPP details; MAC filled server-side."""
 

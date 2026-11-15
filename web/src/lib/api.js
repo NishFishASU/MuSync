@@ -53,6 +53,22 @@
  */
 
 /**
+ * @typedef {Object} BluetoothScanStatus
+ * @property {boolean} scanning
+ * @property {DiscoveredBluetoothSink[]} bluetooth
+ * @property {string} [detail]
+ */
+
+/**
+ * @typedef {Object} BluetoothConnectResponse
+ * @property {boolean} ok
+ * @property {string} mac
+ * @property {string} [detail]
+ * @property {Device | null} [device]
+ * @property {DiscoveredBluetoothSink[]} [bluetooth]
+ */
+
+/**
  * @typedef {Object} DeviceConfigEntry
  * @property {string} [id]
  * @property {string} name
@@ -286,6 +302,37 @@ export function discoverDevices() {
 	return api('/api/devices/discover');
 }
 
+/** @returns {Promise<BluetoothScanStatus>} */
+export function getBluetoothScan() {
+	return api('/api/bluetooth/scan');
+}
+
+/** @returns {Promise<BluetoothScanStatus>} */
+export function startBluetoothScan() {
+	return api('/api/bluetooth/scan', { method: 'POST' });
+}
+
+/** @returns {Promise<BluetoothScanStatus>} */
+export function stopBluetoothScan() {
+	return api('/api/bluetooth/scan', { method: 'DELETE' });
+}
+
+/** @returns {Promise<BluetoothScanStatus>} */
+export function clearBluetoothDiscovery() {
+	return api('/api/bluetooth/discover/clear', { method: 'POST' });
+}
+
+/**
+ * @param {{ mac: string, name?: string, enable_as_output?: boolean }} body
+ * @returns {Promise<BluetoothConnectResponse>}
+ */
+export function connectBluetooth(body) {
+	return api('/api/bluetooth/connect', {
+		method: 'POST',
+		body: JSON.stringify(body)
+	});
+}
+
 /**
  * @param {DeviceConfigEntry[]} devices
  * @returns {Promise<Device[]>}
@@ -298,6 +345,7 @@ export function putDevicesConfig(devices) {
 }
 
 /**
+ * Per-output delay/volume/mute/enabled — same PATCH surface MDAS-24 fixes on the Pi.
  * @param {string} id
  * @param {Partial<Pick<Device, 'delay_ms' | 'volume' | 'mute' | 'enabled' | 'name' | 'kind' | 'listen_host' | 'listen_port' | 'sample_rate' | 'channels'>>} patch
  * @returns {Promise<Device>}

@@ -80,7 +80,10 @@ USB/PC capture needs a **USB-A sound card** — Pi 5 USB-C PD is power-only: [do
 |--------|------|---------|
 | `GET` | `/api/health` | Backend, PipeWire up?, mapped sinks, graph dry-run |
 | `GET` | `/api/devices` | List sinks (Bluetooth + optional `network_spp`) |
-| `PATCH` | `/api/devices/{id}` | `{ delay_ms?, volume?, mute?, enabled?, listen_port?, … }` |
+| `PATCH` | `/api/devices/{id}` | Per-output `{ delay_ms?, volume?, mute?, enabled?, listen_port?, … }` |
+| `GET`/`POST`/`DELETE` | `/api/bluetooth/scan` | BlueZ scan status / start (`scan on`) / stop (`scan off`) |
+| `POST` | `/api/bluetooth/discover/clear` | Clear discovery list except connected remotes |
+| `POST` | `/api/bluetooth/connect` | `{ mac, name?, enable_as_output? }` — pair/connect (+ enable output) |
 | `GET`/`PUT` | `/api/transport` | `{ state, position_ms, source_id?, queue_item_id?, title/artist/album/cover_url? }` |
 | `GET` | `/api/now-playing` | Unified now-playing (title, artist, album, cover) |
 | `GET` | `/api/now-playing/cover` | Embedded local cover bytes |
