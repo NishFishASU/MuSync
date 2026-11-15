@@ -20,13 +20,13 @@ from ..models import (
 
 CAPTURE_NOTES: dict[CapturePath, str] = {
     CapturePath.BT_A2DP: "BT A2DP source → PipeWire bluez_input → musync_feeder",
-    CapturePath.USB: "USB audio capture → musync_feeder",
+    CapturePath.USB: "USB ALSA/PipeWire source → musync_feeder",
     CapturePath.NETWORK: "Network / uploaded file → musync_feeder",
 }
 
 STUB_CAPTURE_NOTES: dict[CapturePath, str] = {
     CapturePath.BT_A2DP: "Waiting for bluez_input — pair phone as A2DP source to Pi",
-    CapturePath.USB: "Waiting for USB Audio/Source on the Pi",
+    CapturePath.USB: "Waiting for USB sound card (auto-detect on Refresh inputs)",
     CapturePath.NETWORK: "Upload a file or set endpoint to play into the feeder",
 }
 

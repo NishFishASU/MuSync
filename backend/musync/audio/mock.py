@@ -98,13 +98,13 @@ def _mock_live_hosts() -> list[InputHost]:
         ),
         InputHost(
             id="input-2",
-            name="Laptop (USB)",
+            name="USB Audio CODEC",
             kind=HostKind.PC,
             capture_path=CapturePath.USB,
-            armed=False,
-            connected=False,
-            endpoint=None,
-            note="Waiting for USB Audio/Source on the Pi",
+            armed=True,
+            connected=True,
+            endpoint="alsa_input.usb-Generic_USB_Audio-00",
+            note=CAPTURE_NOTES[CapturePath.USB],
         ),
     ]
 
@@ -271,6 +271,42 @@ class MockAudioBackend(AudioBackend):
 
     def discover_capture_sources(self) -> CaptureDiscoverResponse:
         with self._lock:
+            # Prefer auto-detect: bind USB fixture onto a waiting USB/PC host.
+            usb_fix = next(
+                (s for s in _MOCK_CAPTURE_SOURCES if s.capture_path == CapturePath.USB),
+                None,
+            )
+            auto_bound: list[str] = []
+            if usb_fix:
+                waiting = next(
+                    (
+                        h
+                        for h in self._inputs.list_hosts()
+                        if h.capture_path == CapturePath.USB
+                        and not (h.connected and h.endpoint)
+                    ),
+                    None,
+                )
+                already = any(
+                    (h.endpoint or "") == usb_fix.pw_name
+                    for h in self._inputs.list_hosts()
+                )
+                if waiting and not already:
+                    self._inputs.patch_host(
+                        waiting.id,
+                        InputHostPatch(
+                            name=usb_fix.name,
+                            kind=HostKind.PC,
+                            capture_path=CapturePath.USB,
+                            connected=True,
+                            endpoint=usb_fix.pw_name,
+                            armed=True,
+                            note=CAPTURE_NOTES[CapturePath.USB],
+                        ),
+                    )
+                    auto_bound.append(waiting.id)
+                    self._session.refresh_live_availability()
+
             configured = {h.name.strip().lower(): h.id for h in self._inputs.list_hosts()}
             also_ep = {
                 (h.endpoint or "").strip(): h.id
@@ -281,9 +317,15 @@ class MockAudioBackend(AudioBackend):
             for item in _MOCK_CAPTURE_SOURCES:
                 cfg = configured.get(item.name.lower()) or also_ep.get(item.pw_name)
                 sources.append(item.model_copy(update={"configured_id": cfg}))
+            auto_note = (
+                f"; auto-bound USB hosts={','.join(auto_bound)}" if auto_bound else ""
+            )
             return CaptureDiscoverResponse(
                 sources=sources,
-                detail="mock capture — Galaxy S21 FE bluez_input + USB Audio fixtures",
+                detail=(
+                    "mock capture — Galaxy S21 FE bluez_input + USB Audio fixtures"
+                    f"{auto_note}"
+                ),
             )
 
     def health(self) -> Health:

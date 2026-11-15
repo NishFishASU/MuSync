@@ -69,7 +69,7 @@ Opposite direction: hub plays a local track (or live capture) and the phone **li
 |------|-----|
 | Phone app audio on all speakers | **BT A2DP source** (`bluez_input` → feeder) |
 | Extra earpiece / check sync on phone | **SPP sink** (feeder → TCP → SPP) |
-| PC line-in | **USB** capture path (USB Audio/Source → feeder) |
+| PC line-in | **USB** capture path — [usb-pc-capture.md](./usb-pc-capture.md) |
 | No BT radio left for inbound A2DP | Upload file on a **network** host (plays into feeder) or SPP-only demo |
 
 ## Mock / laptop

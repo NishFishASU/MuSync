@@ -114,7 +114,20 @@ def test_queue_source_type_switch(client: TestClient) -> None:
     assert hosts.status_code == 200
     assert len(hosts.json()) >= 1
     live = next(h for h in hosts.json() if h.get("connected"))
-    waiting = next(h for h in hosts.json() if not h.get("connected"))
+    # Create an unbound waiting host (mock seeds BT+USB as live).
+    waiting_res = client.post(
+        "/api/inputs",
+        json={
+            "name": "Waiting phone",
+            "kind": "phone",
+            "capture_path": "bt_a2dp",
+            "connected": False,
+            "armed": False,
+        },
+    )
+    assert waiting_res.status_code == 201
+    waiting = waiting_res.json()
+    assert waiting.get("connected") is False
 
     # Waiting (non-live) host cannot play.
     created = client.post(
