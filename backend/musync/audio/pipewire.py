@@ -227,6 +227,11 @@ class PipeWireBackend(AudioBackend):
         self._loopback_module_ids: dict[str, str] = {}
         self._capture_module_ids: dict[str, str] = {}
         self._active_capture_host_id: Optional[str] = None
+        # In-memory feeder ready flag — Play must not shell ``pactl list sinks``.
+        self._feeder_ok: bool = False
+        # Throttle heavy list_devices / health live refresh (BT reconnect + map).
+        self._last_live_refresh_at: float = 0.0
+        self._live_refresh_min_interval_s: float = 2.5
         self._last_plan: Optional[GraphPlan] = None
         self._discovered: list[PwNode] = []
         self._discovered_sources: list[PwNode] = []
@@ -302,6 +307,7 @@ class PipeWireBackend(AudioBackend):
             self._reconnect_bt_sinks(force=True)
             self.refresh_sink_map()
             self._ensure_graph()
+            self._feeder_ok = True
             # Bind Galaxy S21 / Laptop demo hosts to live bluez_input / USB when present.
             self._refresh_input_host_links()
         except Exception as exc:  # noqa: BLE001 — never block API boot
@@ -613,12 +619,14 @@ class PipeWireBackend(AudioBackend):
         cmd = [pactl, "load-module", *feeder_null_sink_args(self._feeder)]
         proc = self._exec_soft(cmd)
         if proc and proc.returncode == 0:
+            self._feeder_ok = True
             log.info(
                 "Created feeder sink %s (module %s)",
                 self._feeder,
                 (proc.stdout or "").strip() or "?",
             )
         else:
+            self._feeder_ok = False
             log.warning(
                 "Failed to create feeder %s: %s",
                 self._feeder,
@@ -643,6 +651,7 @@ class PipeWireBackend(AudioBackend):
 
         if reset:
             # Startup / hard reset: wipe every MuSync feeder, then create exactly one.
+            self._feeder_ok = False
             if ids:
                 self._purge_feeder_modules()
             elif present:
@@ -653,6 +662,7 @@ class PipeWireBackend(AudioBackend):
 
         if len(ids) > 1 or (present and len(ids) == 0):
             # Orphans / inconsistent state: wipe then create exactly one.
+            self._feeder_ok = False
             if ids or present:
                 self._purge_feeder_modules()
             self._load_feeder_module()
@@ -660,16 +670,19 @@ class PipeWireBackend(AudioBackend):
 
         if len(ids) == 1 and present:
             # Healthy single feeder — reuse (never soft-load a duplicate).
+            self._feeder_ok = True
             return
 
         if len(ids) == 0 and not present:
             self._load_feeder_module()
+            self._feeder_ok = True
             return
 
         if len(ids) == 1 and not present:
             # Stale module index — reload cleanly.
             self._purge_feeder_modules()
             self._load_feeder_module()
+            self._feeder_ok = True
 
     def plan_graph(self) -> GraphPlan:
         """Build feeder → delay/volume → bluez plan for enabled devices."""
@@ -1203,6 +1216,14 @@ class PipeWireBackend(AudioBackend):
         self._sync_spp_listeners()
         self._sync_cast_streams()
 
+    def _maybe_refresh_live_sink_state(self, *, reconnect: bool = True) -> None:
+        """Throttle expensive live refresh so SPA list_devices cannot stall Play."""
+        now = time.monotonic()
+        if (now - self._last_live_refresh_at) < self._live_refresh_min_interval_s:
+            return
+        self._last_live_refresh_at = now
+        self._refresh_live_sink_state(reconnect=reconnect)
+
     def _sink_readiness_summary(self) -> tuple[list[str], list[str]]:
         """Return ``(ready_ids, missing_ids)`` for enabled sinks (demo UI / health)."""
         ready: list[str] = []
@@ -1536,35 +1557,48 @@ class PipeWireBackend(AudioBackend):
                 log.warning("Cast sync soft-fail %s: %s", device.id, exc)
 
     def _sink_links_healthy_for_play(self) -> bool:
-        """True when enabled+connected BT sinks already have loaded loopbacks."""
+        """True when enabled BT sinks already have loaded loopbacks.
+
+        Do **not** require ``connected`` — that flag lags until list_devices refresh
+        and would force a full graph rebuild on every Play.
+        """
         enabled_bt = [
             d
             for d in self._devices.values()
-            if d.enabled and d.kind == DeviceKind.BLUETOOTH and d.connected
+            if d.enabled and d.kind == DeviceKind.BLUETOOTH
         ]
         if not enabled_bt:
             return True
         return all(d.id in self._loopback_module_ids for d in enabled_bt)
 
     def _ensure_play_ready(self) -> None:
-        """Fast Play path: ensure feeder; skip rediscovery + loopback bounce when healthy.
+        """Fast Play path: in-memory feeder/links check only — no pactl/wpctl shell.
 
         Full ``_ensure_graph`` runs ``wpctl`` + per-MAC ``bluetoothctl info`` and
         unloads/reloads every BT loopback — multi-second on a busy Pi. Local file
-        Play only needs an existing feeder + links.
+        Play only needs an existing feeder + links from startup / prior ensure.
         """
         if self._env_dry_run():
             self._ensure_graph()
             return
         try:
-            if self._feeder_sink_present() and self._sink_links_healthy_for_play():
+            if self._feeder_ok and self._sink_links_healthy_for_play():
                 log.debug(
                     "Play: skipping full graph rebuild (feeder + BT links healthy)"
                 )
                 return
         except Exception as exc:  # noqa: BLE001
             log.debug("Play ready check soft-fail: %s", exc)
+        # Prefer a feeder-only fix over full rediscovery when links are already up.
+        if not self._feeder_ok and self._sink_links_healthy_for_play():
+            try:
+                self._ensure_feeder()
+                if self._feeder_ok:
+                    return
+            except Exception as exc:  # noqa: BLE001
+                log.debug("Play feeder ensure soft-fail: %s", exc)
         self._ensure_graph()
+        self._feeder_ok = True
 
     def _sync_spp_and_cast_after_play(self) -> None:
         """Background silence→file upgrade for SPP/Cast after local BT audio starts."""
@@ -1573,6 +1607,18 @@ class PipeWireBackend(AudioBackend):
             self._sync_cast_streams()
         except Exception as exc:  # noqa: BLE001
             log.debug("post-play SPP/Cast sync: %s", exc)
+
+    def _after_play_side_effects(self, transport) -> None:
+        """Turn-taking + AVRCP publish off the Play HTTP critical path."""
+        try:
+            self._apply_turn_policy(rotate=False)
+        except Exception as exc:  # noqa: BLE001
+            log.debug("post-play turn policy: %s", exc)
+        try:
+            self._publish_avrcp_transport(transport)
+        except Exception as exc:  # noqa: BLE001
+            log.debug("post-play AVRCP publish: %s", exc)
+        self._sync_spp_and_cast_after_play()
 
     def _ensure_graph(self, only_device: str | None = None) -> GraphPlan:
         """Ensure feeder → delay/volume → enabled sinks.
@@ -1691,9 +1737,14 @@ class PipeWireBackend(AudioBackend):
         if proc.poll() is None:
             proc.terminate()
             try:
-                proc.wait(timeout=2.0)
+                # Short wait — Play must not stall 2s on a hung prior mpv.
+                proc.wait(timeout=0.2)
             except subprocess.TimeoutExpired:
                 proc.kill()
+                try:
+                    proc.wait(timeout=0.2)
+                except subprocess.TimeoutExpired:
+                    pass
 
     def _stop_all_spp_listeners(self) -> None:
         for device_id in list(self._spp_procs.keys()):
@@ -2478,12 +2529,13 @@ class PipeWireBackend(AudioBackend):
     # --- AudioBackend API ---
 
     def list_devices(self) -> list[Device]:
+        # Heavy BT reconnect / map refresh is throttled — holding the lock through
+        # bluetoothctl on every SPA poll starved Play and made the UI feel stuck.
+        try:
+            self._maybe_refresh_live_sink_state(reconnect=True)
+        except Exception as exc:  # noqa: BLE001 — never fail listing
+            log.debug("live sink refresh: %s", exc)
         with self._lock:
-            # Soft refresh so UI READY/MISSING tracks BT/SPP after reboot.
-            try:
-                self._refresh_live_sink_state(reconnect=True)
-            except Exception as exc:  # noqa: BLE001 — never fail listing
-                log.debug("live sink refresh: %s", exc)
             # Headset Absolute Volume → sliders (throttled; soft-fail).
             try:
                 self._poll_avrcp_volumes()
@@ -2978,21 +3030,22 @@ class PipeWireBackend(AudioBackend):
         return self._session.get_transport()
 
     def set_transport(self, body: TransportPut) -> Transport:
-        # Ensure feeder/links before Play (cheap when healthy); swap feeder;
-        # defer SPP/Cast silence→file so Qudelix BT is not gated on ffmpeg restart.
+        # Play: in-memory feeder check → start mpv → return ASAP.
+        # Turn-taking / AVRCP / SPP-Cast file switch run in a background thread so
+        # the SPA is not gated on YAML persist or ffmpeg restart.
         if body.state is TransportState.PLAYING:
             self._ensure_play_ready()
         transport = self._session.set_transport(body)
         if body.state is TransportState.PLAYING:
-            self._apply_turn_policy(rotate=False)
             threading.Thread(
-                target=self._sync_spp_and_cast_after_play,
-                name="musync-spp-cast-sync",
+                target=self._after_play_side_effects,
+                args=(transport,),
+                name="musync-after-play",
                 daemon=True,
             ).start()
-        else:
-            self._sync_spp_listeners()
-            self._sync_cast_streams()
+            return transport
+        self._sync_spp_listeners()
+        self._sync_cast_streams()
         self._publish_avrcp_transport(transport)
         return transport
 
@@ -3001,6 +3054,8 @@ class PipeWireBackend(AudioBackend):
         self._apply_turn_policy(rotate=True)
 
     def _apply_turn_policy(self, *, rotate: bool) -> None:
+        changed = False
+        spp_cast_restarts: list[Device] = []
         with self._lock:
             devices = list(self._devices.values())
             eligible = eligible_turn_devices(
@@ -3018,6 +3073,7 @@ class PipeWireBackend(AudioBackend):
                 device = self._devices.get(device_id)
                 if device is None or device.mute == want_mute:
                     continue
+                changed = True
                 updated = device.model_copy(update={"mute": want_mute})
                 self._devices[device_id] = updated
                 if updated.kind == DeviceKind.BLUETOOTH:
@@ -3025,20 +3081,22 @@ class PipeWireBackend(AudioBackend):
                         self._apply_mute(updated)
                     except Exception as exc:  # noqa: BLE001
                         log.debug("turn mute %s: %s", device_id, exc)
-                elif updated.kind == DeviceKind.NETWORK_SPP:
-                    try:
-                        self._restart_spp_listener(updated)
-                    except Exception as exc:  # noqa: BLE001
-                        log.debug("turn SPP mute %s: %s", device_id, exc)
-                elif updated.kind == DeviceKind.CAST:
-                    try:
-                        self._restart_cast_stream(updated)
-                    except Exception as exc:  # noqa: BLE001
-                        log.debug("turn Cast mute %s: %s", device_id, exc)
+                elif updated.kind in {DeviceKind.NETWORK_SPP, DeviceKind.CAST}:
+                    spp_cast_restarts.append(updated)
+            if changed:
+                try:
+                    self._persist()
+                except Exception as exc:  # noqa: BLE001
+                    log.debug("turn persist: %s", exc)
+        # SPP/Cast mute needs ffmpeg restart — keep off any caller that still syncs.
+        for updated in spp_cast_restarts:
             try:
-                self._persist()
+                if updated.kind == DeviceKind.NETWORK_SPP:
+                    self._restart_spp_listener(updated)
+                else:
+                    self._restart_cast_stream(updated)
             except Exception as exc:  # noqa: BLE001
-                log.debug("turn persist: %s", exc)
+                log.debug("turn %s mute restart: %s", updated.kind.value, exc)
 
     def _maybe_handle_feeder_eof(self) -> None:
         """Local mpv/pw-play exit → advance (Spotify/YouTube use duration_ms clock)."""
@@ -3264,12 +3322,12 @@ class PipeWireBackend(AudioBackend):
         return build_now_playing(self._session)
 
     def health(self) -> Health:
+        # Live BT refresh outside the lock + throttled (same as list_devices).
+        try:
+            self._maybe_refresh_live_sink_state(reconnect=True)
+        except Exception as exc:  # noqa: BLE001
+            log.debug("health refresh: %s", exc)
         with self._lock:
-            # Keep connected flags fresh without spamming BlueZ (throttled).
-            try:
-                self._refresh_live_sink_state(reconnect=True)
-            except Exception as exc:  # noqa: BLE001
-                log.debug("health refresh: %s", exc)
             up, detail = self.probe_pipewire()
             devices = list(self._devices.values())
             hci_map = {d.hci: d.mac for d in devices if d.hci}

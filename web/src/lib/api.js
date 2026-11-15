@@ -6,13 +6,13 @@
 
 /**
  * SPA poll cadence (ms) — cuts idle/hidden API chatter vs prior fixed 1 Hz × 2.
- * Playing: transport 1s, now-playing 2s → 1.5 req/s (was 2).
- * Idle: transport 3s, now-playing 6s → ~0.5 req/s (was 2; ~4× fewer).
+ * Playing: transport 400ms, now-playing 1.5s (snappier Play→UI; client still ticks scrub).
+ * Idle: transport 3s, now-playing 6s → ~0.5 req/s.
  * Hidden tab: pause until visible (0 req/s).
  */
-export const SPA_POLL_TRANSPORT_PLAYING_MS = 1000;
+export const SPA_POLL_TRANSPORT_PLAYING_MS = 400;
 export const SPA_POLL_TRANSPORT_IDLE_MS = 3000;
-export const SPA_POLL_NOW_PLAYING_PLAYING_MS = 2000;
+export const SPA_POLL_NOW_PLAYING_PLAYING_MS = 1500;
 export const SPA_POLL_NOW_PLAYING_IDLE_MS = 6000;
 
 /**

@@ -688,7 +688,8 @@ class YouTubeClient:
                         proc.terminate()
                 else:
                     proc.terminate()
-                proc.wait(timeout=2.0)
+                # Short wait so local Play is not gated on a hung yt-dlp/ffmpeg.
+                proc.wait(timeout=0.25)
             except subprocess.TimeoutExpired:
                 try:
                     if proc is ffmpeg:
@@ -698,7 +699,7 @@ class YouTubeClient:
                             proc.kill()
                     else:
                         proc.kill()
-                    proc.wait(timeout=1.0)
+                    proc.wait(timeout=0.25)
                 except Exception:  # noqa: BLE001
                     pass
             except Exception:  # noqa: BLE001

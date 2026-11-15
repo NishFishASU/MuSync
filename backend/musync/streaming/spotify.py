@@ -941,9 +941,14 @@ class SpotifyClient:
         if proc.poll() is None:
             proc.terminate()
             try:
-                proc.wait(timeout=2.0)
+                # Keep short — local/YouTube Play must not wait 2s on a hung librespot.
+                proc.wait(timeout=0.25)
             except subprocess.TimeoutExpired:
                 proc.kill()
+                try:
+                    proc.wait(timeout=0.25)
+                except subprocess.TimeoutExpired:
+                    pass
 
     def play_uri(self, uri: str, *, feeder: Optional[str] = None) -> dict[str, Any]:
         """Force-transfer playback to the MuSync librespot Connect device.
