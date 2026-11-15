@@ -48,15 +48,12 @@ import logging
 import os
 import subprocess
 import threading
-import time
 from pathlib import Path
 from typing import Optional
 
 from ..config import (
-    PLACEHOLDER_SOURCES,
     clamp_delay_ms,
     clamp_volume,
-    discover_local_sources,
     load_devices,
     repo_root,
     save_devices,
@@ -65,8 +62,10 @@ from ..models import (
     Device,
     DevicePatch,
     Health,
+    QueueItem,
+    QueueItemCreate,
+    QueueItemPatch,
     Source,
-    SourceType,
     Transport,
     TransportPut,
     TransportState,
@@ -84,6 +83,7 @@ from .pw_tools import (
     run_cmd,
     which,
 )
+from .source_session import SourceSession
 
 log = logging.getLogger(__name__)
 
@@ -114,18 +114,6 @@ class PipeWireBackend(AudioBackend):
         self._loopback_module_ids: dict[str, str] = {}
         self._last_plan: Optional[GraphPlan] = None
         self._discovered: list[PwNode] = []
-
-        self._sources = self._build_sources()
-        active = next((s for s in self._sources if s.available), None)
-        self._transport = Transport(
-            state=TransportState.STOPPED,
-            position_ms=0,
-            duration_ms=(active.duration_ms or 0) if active else 0,
-            source_id=active.id if active else None,
-            title=active.title if active else None,
-        )
-        self._play_started_wall: Optional[float] = None
-        self._play_started_pos: int = 0
         self._player_proc: Optional[subprocess.Popen[str]] = None
 
         self._tools = {
@@ -138,51 +126,19 @@ class PipeWireBackend(AudioBackend):
             "bluetoothctl": which("bluetoothctl"),
         }
 
+        # Song/source switches only stop/start the feeder player — sink graph stays.
+        self._session = SourceSession(
+            lock=self._lock,
+            on_feeder_stop=self._stop_player_process,
+            on_feeder_start=self._start_player_process,
+        )
+
         # Refresh map / plan once at startup (no-op / dry-run without hardware).
         try:
             self.refresh_sink_map()
             self._ensure_graph()
         except Exception as exc:  # noqa: BLE001 — never block API boot
             log.warning("Startup graph plan failed: %s", exc)
-
-    def _build_sources(self) -> list[Source]:
-        local = discover_local_sources()
-        if not local:
-            local = [
-                Source(
-                    id="local:demo/sample-tone",
-                    title="Sample Tone (demo)",
-                    type=SourceType.LOCAL,
-                    path=None,
-                    available=True,
-                    duration_ms=180_000,
-                    note="Add WAV/FLAC/MP3 under media/ for real playback on Pi",
-                )
-            ]
-        return local + list(PLACEHOLDER_SOURCES)
-
-    def _source_by_id(self, source_id: str) -> Source:
-        for src in self._sources:
-            if src.id == source_id:
-                return src
-        raise KeyError(f"Unknown source: {source_id}")
-
-    def _tick_position(self) -> None:
-        if self._transport.state != TransportState.PLAYING:
-            return
-        if self._play_started_wall is None:
-            return
-        elapsed = int((time.monotonic() - self._play_started_wall) * 1000)
-        pos = self._play_started_pos + elapsed
-        duration = self._transport.duration_ms or 0
-        if duration and pos >= duration:
-            self._transport.position_ms = duration
-            self._transport.state = TransportState.STOPPED
-            self._play_started_wall = None
-            self._play_started_pos = 0
-            self._stop_player_process()
-        else:
-            self._transport.position_ms = pos
 
     def _persist(self) -> None:
         try:
@@ -466,24 +422,23 @@ class PipeWireBackend(AudioBackend):
                 proc.kill()
 
     def _start_player_process(self) -> None:
-        """Play local file into the MuSync feeder (or default PipeWire)."""
+        """Play local file into the MuSync feeder. Does not touch sink loopbacks."""
         self._stop_player_process()
-        src_id = self._transport.source_id
-        if not src_id:
-            return
-        try:
-            src = self._source_by_id(src_id)
-        except KeyError:
-            return
-        if not src.path:
-            log.info("No file path for %s — software clock only", src_id)
+        path = self._session.active_file_path()
+        transport = self._session.get_transport()
+        if not path:
+            log.info(
+                "No local file for feeder (%s / %s) — software clock only",
+                transport.source_type,
+                transport.queue_item_id or transport.source_id,
+            )
             return
 
         if self._env_dry_run():
             log.info(
                 "Dry-run playback: mpv --ao=pipewire --audio-device=%s %s",
                 self._feeder,
-                src.path,
+                path,
             )
             return
 
@@ -497,8 +452,8 @@ class PipeWireBackend(AudioBackend):
                         "--no-video",
                         "--ao=pipewire",
                         f"--audio-device={self._feeder}",
-                        f"--start={self._transport.position_ms / 1000:.3f}",
-                        src.path,
+                        f"--start={transport.position_ms / 1000:.3f}",
+                        path,
                     ],
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL,
@@ -506,7 +461,7 @@ class PipeWireBackend(AudioBackend):
                 )
             elif pw_play:
                 self._player_proc = subprocess.Popen(
-                    [pw_play, f"--target={self._feeder}", src.path],
+                    [pw_play, f"--target={self._feeder}", path],
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL,
                     text=True,
@@ -557,89 +512,36 @@ class PipeWireBackend(AudioBackend):
             return updated.model_copy(deep=True)
 
     def get_transport(self) -> Transport:
-        with self._lock:
-            self._tick_position()
-            return self._transport.model_copy(deep=True)
+        return self._session.get_transport()
 
     def set_transport(self, body: TransportPut) -> Transport:
-        with self._lock:
-            self._tick_position()
-            if body.source_id is not None:
-                self._apply_source(body.source_id, reset_position=False)
-
-            if body.position_ms is not None:
-                duration = self._transport.duration_ms or 0
-                pos = max(0, body.position_ms)
-                if duration:
-                    pos = min(pos, duration)
-                self._transport.position_ms = pos
-                if self._transport.state == TransportState.PLAYING:
-                    self._play_started_wall = time.monotonic()
-                    self._play_started_pos = pos
-                    self._start_player_process()
-
-            if body.state is not None:
-                self._apply_state(body.state)
-
-            return self._transport.model_copy(deep=True)
-
-    def _apply_state(self, state: TransportState) -> None:
-        current = self._transport.state
-        if state == TransportState.PLAYING:
-            if current == TransportState.PLAYING:
-                return
+        # Ensure sink graph exists before starting playback; never tear it down
+        # when switching songs/sources (feeder swap only).
+        if body.state is TransportState.PLAYING:
             self._ensure_graph()
-            self._play_started_wall = time.monotonic()
-            self._play_started_pos = self._transport.position_ms
-            self._transport.state = TransportState.PLAYING
-            self._start_player_process()
-        elif state == TransportState.PAUSED:
-            self._tick_position()
-            self._play_started_wall = None
-            self._transport.state = TransportState.PAUSED
-            self._stop_player_process()
-        elif state == TransportState.STOPPED:
-            self._play_started_wall = None
-            self._play_started_pos = 0
-            self._transport.position_ms = 0
-            self._transport.state = TransportState.STOPPED
-            self._stop_player_process()
-
-    def _apply_source(self, source_id: str, *, reset_position: bool) -> None:
-        src = self._source_by_id(source_id)
-        if not src.available:
-            raise ValueError(f"Source not available in MVP: {source_id}")
-        self._transport.source_id = src.id
-        self._transport.title = src.title
-        self._transport.duration_ms = src.duration_ms or 0
-        if reset_position:
-            self._transport.position_ms = 0
-            self._play_started_wall = None
-            self._play_started_pos = 0
+        return self._session.set_transport(body)
 
     def list_sources(self) -> list[Source]:
-        with self._lock:
-            placeholders = [s for s in self._sources if s.type != SourceType.LOCAL]
-            local = discover_local_sources()
-            if not local:
-                local = [s for s in self._sources if s.type == SourceType.LOCAL]
-            self._sources = local + placeholders
-            return [s.model_copy(deep=True) for s in self._sources]
+        return self._session.list_sources()
 
     def set_active_source(self, source_id: str) -> Transport:
-        with self._lock:
-            was_playing = self._transport.state == TransportState.PLAYING
-            if was_playing:
-                self._stop_player_process()
-            self._apply_source(source_id, reset_position=True)
-            self._transport.state = (
-                TransportState.PLAYING if was_playing else TransportState.STOPPED
-            )
-            if was_playing:
-                self._play_started_wall = time.monotonic()
-                self._play_started_pos = 0
-                self._start_player_process()
-            return self._transport.model_copy(deep=True)
+        # Feeder swap only — sink loopbacks remain.
+        return self._session.set_active_source(source_id)
+
+    def list_queue(self) -> list[QueueItem]:
+        return self._session.list_queue()
+
+    def add_queue_item(self, body: QueueItemCreate) -> QueueItem:
+        return self._session.add_queue_item(body)
+
+    def patch_queue_item(self, item_id: str, patch: QueueItemPatch) -> QueueItem:
+        return self._session.patch_queue_item(item_id, patch)
+
+    def remove_queue_item(self, item_id: str) -> None:
+        self._session.remove_queue_item(item_id)
+
+    def set_active_queue_item(self, item_id: str) -> Transport:
+        return self._session.set_active_queue_item(item_id)
 
     def health(self) -> Health:
         with self._lock:
