@@ -172,6 +172,8 @@
 	let credBusy = $state(false);
 	let credMessage = $state('');
 	let guidesOpen = $state(false);
+	let tunnelOpen = $state(true);
+	let tunnelCopyMessage = $state('');
 
 	/** @type {Record<string, ReturnType<typeof setTimeout>>} */
 	const patchTimers = {};
@@ -196,6 +198,19 @@
 	);
 	const wifiQrSrc = $derived(
 		wifiLanUrl ? `/api/wifi/lan-qr.svg?u=${encodeURIComponent(wifiLanUrl)}` : ''
+	);
+	/** SSH -L helper for Spotify loopback Connect from a laptop (Pi / musync.local UI). */
+	const sshTunnel = $derived(streaming?.ssh_tunnel ?? null);
+	const sshTunnelCommand = $derived(
+		sshTunnel?.command ||
+			`ssh -N -L ${wifi?.port || 8080}:127.0.0.1:${wifi?.port || 8080} pi@${wifi?.ips?.[0] || 'PI_IP'}`
+	);
+	const sshTunnelOpenUrl = $derived(
+		sshTunnel?.open_url || `http://127.0.0.1:${wifi?.port || 8080}/streaming/`
+	);
+	const onLoopbackHost = $derived(
+		typeof window !== 'undefined' &&
+			(window.location.hostname === '127.0.0.1' || window.location.hostname === 'localhost')
 	);
 	const activeQueueId = $derived(transport?.queue_item_id ?? null);
 	const activeQueueItem = $derived(queue.find((q) => q.id === activeQueueId) ?? null);
@@ -731,6 +746,16 @@
 			// Fall back to same-origin redirect if JSON helper fails.
 			streamMessage = err instanceof Error ? err.message : String(err);
 			window.location.assign(SPOTIFY_LOGIN_HREF);
+		}
+	}
+
+	async function onCopySshTunnel() {
+		tunnelCopyMessage = '';
+		try {
+			await navigator.clipboard.writeText(sshTunnelCommand);
+			tunnelCopyMessage = 'Copied SSH tunnel command';
+		} catch {
+			tunnelCopyMessage = sshTunnelCommand;
 		}
 	}
 
@@ -2697,6 +2722,58 @@
 					</div>
 				</details>
 			</section>
+
+			<details class="ssh-tunnel-panel cred-guides" bind:open={tunnelOpen}>
+				<summary>Connect from laptop (SSH tunnel)</summary>
+				{#if onLoopbackHost}
+					<p class="hint muted">
+						You are already on <code>127.0.0.1</code> — Connect Spotify here without a tunnel
+						(laptop mock or an active <code>ssh -L</code>).
+					</p>
+				{:else}
+					<p class="hint muted">
+						Spotify OAuth callback is loopback (<code>127.0.0.1</code>), not
+						<code>musync.local</code>. Tunnel the Pi port to this laptop, then Connect.
+					</p>
+				{/if}
+				<ol class="ssh-tunnel-steps">
+					{#each sshTunnel?.steps?.length ? sshTunnel.steps : [
+						`Copy the SSH command below and run it on your laptop (keep the window open).`,
+						`Open ${sshTunnelOpenUrl} in a browser on the same laptop (not musync.local).`,
+						'Streaming → Connect Spotify → approve OAuth; the callback hits the Pi via the tunnel.',
+						'Close the tunnel after Connect succeeds; search/play use the Pi over LAN.'
+					] as step}
+						<li>{step}</li>
+					{/each}
+				</ol>
+				<div class="ssh-tunnel-cmd-row">
+					<code class="ssh-tunnel-cmd">{sshTunnelCommand}</code>
+					<button
+						type="button"
+						class="btn btn-ghost btn-small wifi-copy-btn"
+						onclick={() => onCopySshTunnel()}
+					>
+						Copy
+					</button>
+				</div>
+				<p class="hint muted ssh-tunnel-links">
+					Optional script:
+					<a href={sshTunnel?.script_sh || '/api/streaming/spotify/ssh-tunnel.sh'} download
+						>Download .sh</a
+					>
+					·
+					<a href={sshTunnel?.script_ps1 || '/api/streaming/spotify/ssh-tunnel.ps1'} download
+						>Download .ps1</a
+					>
+					· also <code>scripts/spotify_oauth_tunnel.sh</code>
+				</p>
+				{#if tunnelCopyMessage}
+					<p class="hint" role="status">{tunnelCopyMessage}</p>
+				{/if}
+				{#if sshTunnel?.hint}
+					<p class="hint muted">{sshTunnel.hint}</p>
+				{/if}
+			</details>
 
 			<div class="stream-status">
 				<div class="stream-card">

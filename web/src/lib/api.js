@@ -359,11 +359,26 @@ export function spaPollRequestsPerSecond(cadence) {
  */
 
 /**
+ * @typedef {Object} SpotifySshTunnelInfo
+ * @property {number} port
+ * @property {string} host
+ * @property {string} user
+ * @property {boolean} ready
+ * @property {string} command
+ * @property {string} open_url
+ * @property {string} [script_sh]
+ * @property {string} [script_ps1]
+ * @property {string[]} [steps]
+ * @property {string} [hint]
+ */
+
+/**
  * @typedef {Object} StreamingStatus
  * @property {StreamingProviderStatus} spotify
  * @property {AirplayStatus} airplay
  * @property {StreamingProviderStatus} youtube
  * @property {boolean} [mock_playback]
+ * @property {SpotifySshTunnelInfo | null} [ssh_tunnel]
  */
 
 /**
