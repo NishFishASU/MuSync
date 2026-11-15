@@ -484,6 +484,8 @@ class Health(BaseModel):
     apple_ready: bool = False
     youtube_ready: bool = False
     avrcp_supported: bool = False
+    # Mock only: sounddevice / ffplay / mpv / … or "none" when soft-failed.
+    host_speakers: str = ""
 
 
 class StreamingProviderStatus(BaseModel):
