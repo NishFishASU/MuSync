@@ -135,6 +135,14 @@ PLACEHOLDER_SOURCES: list[Source] = [
         available=False,
         note="AirPlay → shairport-sync → musync_feeder — docs/airplay-receive.md",
     ),
+    Source(
+        id="youtube:hub",
+        title="YouTube (hub search)",
+        type=SourceType.YOUTUBE,
+        locator="youtube:hub",
+        available=False,
+        note="Set MUSYNC_YOUTUBE_API_KEY — yt-dlp → ffmpeg → musync_feeder; see docs/youtube.md",
+    ),
 ]
 
 

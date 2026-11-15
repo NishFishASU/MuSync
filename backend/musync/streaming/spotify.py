@@ -34,7 +34,23 @@ log = logging.getLogger(__name__)
 
 SPOTIFY_AUTH = "https://accounts.spotify.com"
 SPOTIFY_API = "https://api.spotify.com/v1"
-SCOPES = "user-read-playback-state user-modify-playback-state user-read-currently-playing streaming"
+# Search with market=from_token needs user-read-private; playback needs the player scopes.
+# Space-separated list sent on /authorize — bumping this requires Disconnect → Connect
+# (show_dialog=true) so Spotify re-consents; refresh tokens do not gain new scopes.
+SCOPES = (
+    "user-read-private user-read-email "
+    "user-read-playback-state user-modify-playback-state "
+    "user-read-currently-playing streaming"
+)
+REQUIRED_SCOPES = frozenset(
+    {
+        "user-read-private",
+        "user-read-playback-state",
+        "user-modify-playback-state",
+        "user-read-currently-playing",
+        "streaming",
+    }
+)
 
 
 def _client_id() -> str:
@@ -111,47 +127,73 @@ class SpotifyClient:
 
     # --- config / status ---
 
+    def granted_scopes(self) -> set[str]:
+        with self._lock:
+            raw = str(self._tokens.get("scope") or "")
+        return {s for s in raw.replace(",", " ").split() if s}
+
+    def missing_scopes(self) -> list[str]:
+        """Scopes we request that are absent from the stored token (needs re-consent)."""
+        granted = self.granted_scopes()
+        if not granted:
+            # Older token files predate scope persistence — treat as unknown/missing.
+            return sorted(REQUIRED_SCOPES)
+        return sorted(REQUIRED_SCOPES - granted)
+
     def status(self) -> dict[str, Any]:
         with self._lock:
             configured = credentials_configured()
             authed = bool(self._tokens.get("access_token") or self._tokens.get("refresh_token"))
+            display_name = self._tokens.get("display_name")
             librespot = _librespot_bin()
-            return {
-                "provider": "spotify",
-                "configured": configured,
-                "authenticated": authed and configured,
-                "display_name": self._tokens.get("display_name"),
-                "librespot_available": bool(librespot),
-                "librespot_running": self._librespot_alive(),
-                "librespot_name": _librespot_name(),
-                "feeder": _feeder_sink(),
-                "redirect_uri": _redirect_uri(),
-                "premium_required": True,
-                "limits": (
-                    []
-                    if configured
-                    else ["Set MUSYNC_SPOTIFY_CLIENT_ID + MUSYNC_SPOTIFY_CLIENT_SECRET"]
-                )
-                + (
-                    []
-                    if librespot
-                    else [
-                        "Install librespot for real PCM into musync_feeder "
-                        "(search/auth still work; Play needs Connect device)"
-                    ]
-                ),
-                "note": (
-                    (
-                        "Spotify Premium + librespot Connect → Pulse sink musync_feeder"
-                        if librespot
-                        else "Connected/search OK — install librespot for hub PCM "
-                        "(Play needs Connect device)"
-                    )
-                    if configured
-                    else "Credentials missing — set MUSYNC_SPOTIFY_CLIENT_ID/SECRET "
-                    "in ~/musync.env (Windows: %USERPROFILE%\\musync.env), then Connect Spotify"
-                ),
-            }
+            running = self._librespot_alive()
+        missing = self.missing_scopes() if authed and configured else []
+        limits: list[str] = []
+        if not configured:
+            limits.append("Set MUSYNC_SPOTIFY_CLIENT_ID + MUSYNC_SPOTIFY_CLIENT_SECRET")
+        if not librespot:
+            limits.append(
+                "Install librespot for real PCM into musync_feeder "
+                "(search/auth still work; Play needs Connect device)"
+            )
+        if missing:
+            limits.append(
+                "Reconnect Spotify (Disconnect → Connect) to approve updated scopes: "
+                + ", ".join(missing)
+            )
+        if not configured:
+            note = (
+                "Credentials missing — set MUSYNC_SPOTIFY_CLIENT_ID/SECRET "
+                "in ~/musync.env (Windows: %USERPROFILE%\\musync.env), then Connect Spotify"
+            )
+        elif missing:
+            note = (
+                "Connected but token is missing scopes for search/playback — "
+                "Streaming → Disconnect → Connect Spotify (re-consent), then search on Queue"
+            )
+        elif librespot:
+            note = "Spotify Premium + librespot Connect → Pulse sink musync_feeder"
+        else:
+            note = (
+                "Connected/search OK — install librespot for hub PCM "
+                "(Play needs Connect device)"
+            )
+        return {
+            "provider": "spotify",
+            "configured": configured,
+            "authenticated": authed and configured,
+            "display_name": display_name,
+            "librespot_available": bool(librespot),
+            "librespot_running": running,
+            "librespot_name": _librespot_name(),
+            "feeder": _feeder_sink(),
+            "redirect_uri": _redirect_uri(),
+            "premium_required": True,
+            "scopes": sorted(self.granted_scopes()),
+            "missing_scopes": missing,
+            "limits": limits,
+            "note": note,
+        }
 
     def configured(self) -> bool:
         return credentials_configured()
@@ -164,7 +206,14 @@ class SpotifyClient:
 
     # --- OAuth ---
 
-    def auth_url(self, *, redirect_uri: Optional[str] = None) -> str:
+    def auth_url(
+        self, *, redirect_uri: Optional[str] = None, force_consent: bool = True
+    ) -> str:
+        """Build Spotify authorize URL.
+
+        ``force_consent=True`` sets ``show_dialog=true`` so users always re-approve
+        scopes (required after SCOPES bumps — refresh tokens keep the old grant).
+        """
         if not credentials_configured():
             raise ValueError(
                 "Spotify not configured — set MUSYNC_SPOTIFY_CLIENT_ID and "
@@ -181,7 +230,8 @@ class SpotifyClient:
             "redirect_uri": redir,
             "scope": SCOPES,
             "state": state,
-            "show_dialog": "false",
+            # Always re-prompt so scope upgrades (e.g. user-read-private for search) apply.
+            "show_dialog": "true" if force_consent else "false",
         }
         return f"{SPOTIFY_AUTH}/authorize?{urllib.parse.urlencode(params)}"
 
@@ -243,6 +293,14 @@ class SpotifyClient:
             return []
         if not self.authenticated():
             raise ValueError("Connect a Spotify account first")
+        missing = self.missing_scopes()
+        if missing:
+            # market=from_token requires user-read-private; refresh tokens keep old grants.
+            raise ValueError(
+                "Spotify token is missing required scopes "
+                f"({', '.join(missing)}). Open Streaming → Disconnect → Connect Spotify "
+                "to re-approve permissions, then search again on Queue."
+            )
         data = self._get_json(
             "/search",
             params={
@@ -250,6 +308,7 @@ class SpotifyClient:
                 "type": "track",
                 "limit": max(1, min(limit, 25)),
                 # Prefer the signed-in user's market so catalog search isn't empty/forbidden.
+                # Requires user-read-private (requested in SCOPES + force-consent authorize).
                 "market": "from_token",
             },
         )
@@ -545,6 +604,9 @@ class SpotifyClient:
             merged["obtained_at"] = time.time()
             if "expires_in" in token:
                 merged["expires_at"] = time.time() + float(token["expires_in"]) - 30
+            # Persist granted scopes (authorize + refresh responses include them).
+            if token.get("scope"):
+                merged["scope"] = str(token.get("scope") or "").strip()
             self._tokens = merged
             self._save_tokens()
 
@@ -647,6 +709,14 @@ class SpotifyClient:
     def _web_api_error_message(cls, path: str, resp: httpx.Response) -> str:
         status = resp.status_code
         detail = cls._spotify_response_detail(resp)
+        detail_l = detail.lower()
+        if "insufficient client scope" in detail_l:
+            return (
+                "Spotify: Insufficient client scope — your token was granted before MuSync "
+                "requested search scopes (user-read-private). Open Streaming → Disconnect → "
+                "Connect Spotify (re-consent dialog), then search again on Queue. "
+                f"({detail})"
+            )
         if path == "/me" and status == 403:
             return (
                 "Spotify /me returned 403 Forbidden — this app is likely in development "
@@ -660,13 +730,13 @@ class SpotifyClient:
                 "Spotify access token rejected — open Streaming → Connect Spotify again. "
                 f"({detail})"
             )
+        if path.startswith("/search"):
+            return f"Spotify search failed ({status}): {detail}"
         if status == 403:
             return (
                 "Spotify API forbidden (403) — check Developer Dashboard User Management "
                 f"allowlist and app scopes, then Connect again. ({path}: {detail})"
             )
-        if path.startswith("/search"):
-            return f"Spotify search failed ({status}): {detail}"
         return f"Spotify API error on {path} ({status}): {detail}"
 
     @staticmethod

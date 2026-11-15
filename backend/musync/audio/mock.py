@@ -775,5 +775,6 @@ class MockAudioBackend(AudioBackend):
                 graph_dry_run=True,
                 spotify_ready=stream.spotify.authenticated,
                 apple_ready=stream.airplay.configured,
+                youtube_ready=stream.youtube.configured,
                 detail=detail,
             )

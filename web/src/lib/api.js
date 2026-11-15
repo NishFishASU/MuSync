@@ -5,7 +5,7 @@
  */
 
 /** @typedef {'stopped' | 'playing' | 'paused'} TransportState */
-/** @typedef {'local' | 'spotify' | 'apple' | 'input'} SourceType */
+/** @typedef {'local' | 'spotify' | 'apple' | 'youtube' | 'input'} SourceType */
 /** @typedef {'audio' | 'video'} MediaKind */
 /** @typedef {'bt_a2dp' | 'usb' | 'hdmi' | 'airplay' | 'network'} CapturePath */
 /** @typedef {'phone' | 'pc' | 'other'} HostKind */
@@ -255,20 +255,26 @@
  * @property {string} [detail]
  * @property {boolean} [spotify_ready]
  * @property {boolean} [apple_ready]
+ * @property {boolean} [youtube_ready]
  */
 
 /**
  * @typedef {Object} StreamingProviderStatus
- * @property {'spotify'} provider
+ * @property {'spotify' | 'youtube'} provider
  * @property {boolean} configured
  * @property {boolean} authenticated
  * @property {string | null} [display_name]
  * @property {boolean | null} [librespot_available]
  * @property {boolean | null} [librespot_running]
  * @property {string | null} [librespot_name]
+ * @property {boolean | null} [ytdlp_available]
+ * @property {boolean | null} [ffmpeg_available]
  * @property {string | null} [feeder]
  * @property {string | null} [redirect_uri]
  * @property {boolean | null} [premium_required]
+ * @property {string[]} [scopes]
+ * @property {string[]} [missing_scopes]
+ * @property {string | null} [playback_mode]
  * @property {string[]} [limits]
  * @property {string} [note]
  */
@@ -289,12 +295,13 @@
  * @typedef {Object} StreamingStatus
  * @property {StreamingProviderStatus} spotify
  * @property {AirplayStatus} airplay
+ * @property {StreamingProviderStatus} youtube
  * @property {boolean} [mock_playback]
  */
 
 /**
  * @typedef {Object} StreamingSearchHit
- * @property {'spotify'} provider
+ * @property {'spotify' | 'youtube'} provider
  * @property {string} id
  * @property {string} uri
  * @property {string} title
@@ -306,7 +313,7 @@
 
 /**
  * @typedef {Object} StreamingSearchResponse
- * @property {'spotify'} provider
+ * @property {'spotify' | 'youtube'} provider
  * @property {string} query
  * @property {StreamingSearchHit[]} hits
  */
@@ -329,7 +336,7 @@
  * @property {boolean} has_password
  */
 
-export const SOURCE_TYPES = /** @type {const} */ (['local', 'spotify', 'apple', 'input']);
+export const SOURCE_TYPES = /** @type {const} */ (['local', 'spotify', 'apple', 'youtube', 'input']);
 export const CAPTURE_PATHS = /** @type {const} */ (['bt_a2dp', 'usb', 'hdmi', 'airplay', 'network']);
 export const HOST_KINDS = /** @type {const} */ (['phone', 'pc', 'other']);
 
@@ -699,7 +706,7 @@ export function logoutSpotify() {
 }
 
 /**
- * @param {'spotify'} provider
+ * @param {'spotify' | 'youtube'} provider
  * @param {string} q
  * @param {number} [limit]
  * @returns {Promise<StreamingSearchResponse>}
@@ -714,7 +721,7 @@ export function searchStreaming(provider, q, limit = 15) {
 }
 
 /**
- * @param {{ provider: 'spotify', uri: string, title?: string, artist?: string, album?: string, cover_url?: string, duration_ms?: number, activate?: boolean }} body
+ * @param {{ provider: 'spotify' | 'youtube', uri: string, title?: string, artist?: string, album?: string, cover_url?: string, duration_ms?: number, activate?: boolean }} body
  * @returns {Promise<QueueItem>}
  */
 export function addStreamingTrack(body) {
@@ -788,6 +795,8 @@ export function sourceTypeLabel(type) {
 			return 'Spotify';
 		case 'apple':
 			return 'AirPlay';
+		case 'youtube':
+			return 'YouTube';
 		case 'input':
 			return 'Live input';
 		default:

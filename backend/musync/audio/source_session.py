@@ -38,11 +38,19 @@ UNAVAILABLE_NOTES: dict[SourceType, str] = {
         "Unavailable — AirPlay receive not ready; install shairport-sync, "
         "Refresh inputs, or set MUSYNC_AIRPLAY_SOURCE (docs/airplay-receive.md)"
     ),
+    SourceType.YOUTUBE: (
+        "Unavailable — set MUSYNC_YOUTUBE_API_KEY and install yt-dlp + ffmpeg "
+        "(docs/youtube.md); sink graph stays up"
+    ),
     SourceType.INPUT: (
         "Unavailable — waiting for live capture "
         "(BT A2DP / USB-A / HDMI / AirPlay / upload)"
     ),
 }
+
+_STREAM_HUB_TYPES = frozenset(
+    {SourceType.SPOTIFY, SourceType.APPLE, SourceType.YOUTUBE}
+)
 
 # Back-compat alias for older imports/tests
 STUB_NOTES = UNAVAILABLE_NOTES
@@ -89,6 +97,20 @@ def is_playable(
                 if host.capture_path == CapturePath.AIRPLAY and host_is_live(host):
                     return True
         return False
+    if source_type == SourceType.YOUTUBE:
+        if input_id:
+            return False
+        if not _hub_stream_ready(SourceType.YOUTUBE):
+            return False
+        loc = (locator or "").strip()
+        if not loc or loc in {"youtube:hub", "youtube:"}:
+            return False
+        try:
+            from ..streaming.youtube import parse_video_id
+
+            return bool(parse_video_id(loc))
+        except Exception:  # noqa: BLE001
+            return loc.startswith("youtube:") and len(loc) > len("youtube:")
     if source_type not in PLAYABLE_SOURCE_TYPES:
         return False
     # Local demo tracks without a file path are playable on the mock clock.
@@ -109,6 +131,16 @@ def unavailable_note(source_type: SourceType) -> Optional[str]:
             return svc.apple_play_note()
         # Live AirPlay input host also counts (mock / after Refresh inputs).
         return UNAVAILABLE_NOTES[SourceType.APPLE]
+    if source_type == SourceType.YOUTUBE:
+        svc = get_streaming_service()
+        if svc.youtube_ready() and not svc.youtube_playable():
+            return (
+                "API key set — install yt-dlp + ffmpeg for hub PCM "
+                "(docs/youtube.md)"
+            )
+        if svc.youtube_ready():
+            return "Pick a YouTube video in Streaming — yt-dlp → ffmpeg → musync_feeder"
+        return UNAVAILABLE_NOTES[SourceType.YOUTUBE]
     return UNAVAILABLE_NOTES.get(source_type)
 
 
@@ -229,6 +261,19 @@ class SourceSession:
                         }
                     )
                 )
+            elif src.type == SourceType.YOUTUBE:
+                out.append(
+                    src.model_copy(
+                        update={
+                            "available": False,
+                            "note": (
+                                "API key set — search & pick a video in Streaming"
+                                if get_streaming_service().youtube_ready()
+                                else stub_note(SourceType.YOUTUBE)
+                            ),
+                        }
+                    )
+                )
             else:
                 out.append(src)
         return out
@@ -251,7 +296,7 @@ class SourceSession:
                 inputs=self._inputs,
                 locator=locator,
             )
-        elif src.type in {SourceType.SPOTIFY, SourceType.APPLE} and not src.input_id:
+        elif src.type in _STREAM_HUB_TYPES and not src.input_id:
             playable = is_playable(
                 src.type, locator=locator, path=src.path, inputs=self._inputs
             )
@@ -298,6 +343,8 @@ class SourceSession:
             return f"{host.name} Spotify session — {path_note}"
         if source_type == SourceType.APPLE:
             return f"{host.name} Apple Music session — {path_note}"
+        if source_type == SourceType.YOUTUBE:
+            return f"{host.name} YouTube session — {path_note}"
         if source_type == SourceType.LOCAL:
             return (
                 f"Unavailable — {host.name} on-device files are not hub PCM; "
@@ -417,7 +464,12 @@ class SourceSession:
     def _resolve_create(self, body: QueueItemCreate) -> QueueItem:
         src: Optional[Source] = None
         if body.source_id:
-            src = self._source_by_id(body.source_id)
+            try:
+                src = self._source_by_id(body.source_id)
+            except KeyError:
+                # Streaming queue passes provider URIs (spotify:track:… / youtube:…)
+                # that are not catalog rows — keep them as free-form source_id.
+                src = None
 
         # Explicit source_type / locator / path win; otherwise inherit catalog.
         source_type = body.source_type
@@ -471,6 +523,7 @@ class SourceSession:
                 SourceType.LOCAL: "Local track",
                 SourceType.SPOTIFY: "Spotify track",
                 SourceType.APPLE: "Apple Music track",
+                SourceType.YOUTUBE: "YouTube video",
                 SourceType.INPUT: "Live input",
             }[source_type]
 
@@ -483,12 +536,13 @@ class SourceSession:
                     SourceType.LOCAL: path or "local:unset",
                     SourceType.SPOTIFY: "spotify:hub",
                     SourceType.APPLE: "apple:hub",
+                    SourceType.YOUTUBE: "youtube:hub",
                     SourceType.INPUT: "input:unset",
                 }[source_type]
 
         if source_type == SourceType.INPUT:
             playable = self._live_input_playable(input_id)
-        elif source_type in {SourceType.SPOTIFY, SourceType.APPLE} and not input_id:
+        elif source_type in _STREAM_HUB_TYPES and not input_id:
             playable = is_playable(source_type, path=path, locator=locator)
         else:
             # Hub-local files; host-bound local/spotify/apple remain stubs.
@@ -599,7 +653,7 @@ class SourceSession:
         if source_type == SourceType.INPUT:
             playable = self._live_input_playable(input_id)
             data["duration_ms"] = 0 if playable else data.get("duration_ms")
-        elif source_type in {SourceType.SPOTIFY, SourceType.APPLE} and not input_id:
+        elif source_type in _STREAM_HUB_TYPES and not input_id:
             playable = is_playable(source_type, path=path, locator=locator)
         else:
             playable = (
@@ -630,6 +684,7 @@ class SourceSession:
                     data["locator"] = {
                         SourceType.SPOTIFY: "spotify:hub",
                         SourceType.APPLE: "apple:hub",
+                        SourceType.YOUTUBE: "youtube:hub",
                         SourceType.INPUT: "input:unset",
                         SourceType.LOCAL: data.get("locator") or "local:host-stub",
                     }.get(source_type, data.get("locator"))
@@ -657,7 +712,7 @@ class SourceSession:
                         self._transport.source_type = item.source_type
                         if playable:
                             self._transport.duration_ms = 0
-                elif item.source_type in {SourceType.SPOTIFY, SourceType.APPLE} and not item.input_id:
+                elif item.source_type in _STREAM_HUB_TYPES and not item.input_id:
                     playable = is_playable(
                         item.source_type,
                         path=item.path,

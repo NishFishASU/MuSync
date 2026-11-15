@@ -73,7 +73,7 @@ Phone **input** (S21 FE → `bluez_input` → feeder): [docs/phone-bt-source-vs-
 USB / PC capture (ALSA auto-detect → feeder): [docs/usb-pc-capture.md](docs/usb-pc-capture.md).  
 HDMI / capture card → feeder: [docs/hdmi-capture.md](docs/hdmi-capture.md).  
 SPP phone **sink**: enable Phone SPP in Device setup, connect Simple Protocol Player to Pi IP:port — [docs/spp-network-sink.md](docs/spp-network-sink.md).  
-**Spotify** (OAuth Connect → librespot → `musync_feeder`) + **AirPlay receive** (shairport-sync → feeder): [docs/spotify-apple.md](docs/spotify-apple.md), [docs/airplay-receive.md](docs/airplay-receive.md) · env template `config/streaming.env.example` → `~/musync.env` (auto-loaded by `run_pi.sh`).  
+**Spotify** (OAuth Connect → librespot → `musync_feeder`) + **AirPlay receive** (shairport-sync → feeder) + **YouTube** (Data API search + yt-dlp → ffmpeg → feeder): [docs/spotify-apple.md](docs/spotify-apple.md), [docs/airplay-receive.md](docs/airplay-receive.md), [docs/youtube.md](docs/youtube.md) · env template `config/streaming.env.example` → `~/musync.env` (auto-loaded by `run_pi.sh`).  
 USB/PC capture needs a **USB-A sound card** — Pi 5 USB-C PD is power-only: [docs/usb-pc-capture.md](docs/usb-pc-capture.md).
 
 ## API (minimum)
@@ -100,10 +100,10 @@ USB/PC capture needs a **USB-A sound card** — Pi 5 USB-C PD is power-only: [do
 | `PATCH` | `/api/queue/{id}` | Switch `source_type` / bind phone-PC host without tearing down sinks |
 | `PUT` | `/api/queue/active` | `{ id }` — play this queue item (feeder swap only) |
 | `DELETE` | `/api/queue/{id}` | Remove a queue item |
-| `GET` | `/api/streaming` | Spotify + AirPlay status (no secrets) |
+| `GET` | `/api/streaming` | Spotify + AirPlay + YouTube status (no secrets) |
 | `GET` | `/api/streaming/spotify/login` | Start Spotify OAuth |
-| `GET` | `/api/streaming/search` | `?provider=spotify&q=` |
-| `POST` | `/api/streaming/queue` | Queue a searched Spotify track (`activate` optional) |
+| `GET` | `/api/streaming/search` | `?provider=spotify\|youtube&q=` |
+| `POST` | `/api/streaming/queue` | Queue a searched Spotify/YouTube track (`activate` optional) |
 | `GET`/`POST` | `/api/inputs` | Register ≤4 hosts (`capture_path`: `bt_a2dp`\|`usb`\|`hdmi`\|`airplay`\|`network`) |
 | `GET` | `/api/inputs/discover` | Live PipeWire sources (`bluez_input` / USB / HDMI / AirPlay) for host binding |
 | `POST` | `/api/inputs/{id}/upload` | Network path: upload file that plays into the feeder |
@@ -128,7 +128,7 @@ Pi tip: `web/build/` is gitignored — build on a laptop (or once on the Pi with
 | Sinks | In-memory fake devices (≤6) | Same model; maps MAC/`pw_node` → WirePlumber ids |
 | Delay | Stored on device object | `pactl module-loopback latency_msec=N` from feeder |
 | Volume/mute | In-memory | `wpctl set-volume` / `set-mute` |
-| Playback | Software clock (+ live/streaming cues) | `mpv` / librespot / capture loopback → `musync_feeder` |
+| Playback | Software clock (+ live/streaming cues) | `mpv` / librespot / yt-dlp\|ffmpeg / capture loopback → `musync_feeder` |
 | Without hardware | Always | **Dry-run**: writes `config/pipewire-graph.plan.sh` |
 | UI | Same SvelteKit `web/build` | Same |
 

@@ -18,6 +18,7 @@ from ..models import (
 from .airplay import AirplayReceiver
 from .apple import AppleMusicClient
 from .spotify import SpotifyClient
+from .youtube import YouTubeClient
 
 log = logging.getLogger(__name__)
 
@@ -41,6 +42,7 @@ class StreamingService:
         self.airplay = AirplayReceiver()
         # SourceType.APPLE play path still uses this thin AirPlay-backed client.
         self.apple = AppleMusicClient()
+        self.youtube = YouTubeClient()
 
     def status(
         self,
@@ -55,9 +57,11 @@ class StreamingService:
             live=airplay_live,
             host_name=airplay_host_name,
         )
+        yt = self.youtube.status()
         return StreamingStatus(
             spotify=StreamingProviderStatus.model_validate(sp),
             airplay=AirplayStatus.model_validate(ap),
+            youtube=StreamingProviderStatus.model_validate(yt),
             mock_playback=streaming_mock_enabled(),
         )
 
@@ -67,6 +71,9 @@ class StreamingService:
     def apple_ready(self) -> bool:
         """True when AirPlay capture is configured or shairport is present."""
         return self.apple.configured()
+
+    def youtube_ready(self) -> bool:
+        return self.youtube.authenticated()
 
     def spotify_playable(self) -> bool:
         """Hub can attempt Spotify play (auth). PipeWire still needs librespot for PCM."""
@@ -81,11 +88,19 @@ class StreamingService:
     def airplay_playable(self) -> bool:
         return self.apple_playable()
 
+    def youtube_playable(self) -> bool:
+        """Playable when API key + yt-dlp + ffmpeg are available (or streaming mock)."""
+        if streaming_mock_enabled() and self.youtube_ready():
+            return True
+        return self.youtube.playable()
+
     def is_hub_stream_playable(self, source_type: SourceType) -> bool:
         if source_type == SourceType.SPOTIFY:
             return self.spotify_playable()
         if source_type == SourceType.APPLE:
             return self.apple_playable()
+        if source_type == SourceType.YOUTUBE:
+            return self.youtube_playable()
         return False
 
     def search(self, provider: str, query: str, *, limit: int = 15) -> StreamingSearchResponse:
@@ -109,12 +124,32 @@ class StreamingService:
         if p in {"apple", "apple_music", "music"}:
             raise ValueError(
                 "Apple Music search removed — use AirPlay receive on Inputs "
-                "(shairport-sync → musync_feeder) or Spotify. See docs/airplay-receive.md"
+                "(shairport-sync → musync_feeder) or Spotify / YouTube. "
+                "See docs/airplay-receive.md"
             )
+        if p in {"youtube", "yt", "ytb"}:
+            tracks = self.youtube.search_tracks(query, limit=limit)
+            hits = [
+                StreamingSearchHit(
+                    provider="youtube",
+                    id=t.id,
+                    uri=t.uri,
+                    title=t.title,
+                    artist=t.artist,
+                    duration_ms=t.duration_ms,
+                    album=t.album,
+                    cover_url=t.cover_url,
+                )
+                for t in tracks
+            ]
+            return StreamingSearchResponse(provider="youtube", query=query, hits=hits)
         raise ValueError(f"Unknown streaming provider: {provider!r}")
 
     def play_spotify(self, uri: str, *, feeder: str) -> dict[str, Any]:
         return self.spotify.play_uri(uri, feeder=feeder)
+
+    def play_youtube(self, uri: str, *, feeder: str) -> dict[str, Any]:
+        return self.youtube.play_uri(uri, feeder=feeder)
 
     def stop_spotify(self) -> None:
         try:
@@ -122,6 +157,12 @@ class StreamingService:
         except Exception as exc:  # noqa: BLE001
             log.debug("spotify pause: %s", exc)
         self.spotify.stop_librespot()
+
+    def stop_youtube(self) -> None:
+        try:
+            self.youtube.stop()
+        except Exception as exc:  # noqa: BLE001
+            log.debug("youtube stop: %s", exc)
 
     def ensure_spotify_player(self, *, feeder: str) -> Optional[str]:
         return self.spotify.ensure_librespot(feeder=feeder)
@@ -148,6 +189,10 @@ def reset_streaming_service() -> None:
         if _service is not None:
             try:
                 _service.spotify.stop_librespot()
+            except Exception:  # noqa: BLE001
+                pass
+            try:
+                _service.youtube.stop()
             except Exception:  # noqa: BLE001
                 pass
         _service = None

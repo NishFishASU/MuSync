@@ -547,11 +547,11 @@ def api_spotify_logout() -> StreamingStatus:
 
 @app.get("/api/streaming/search", response_model=StreamingSearchResponse)
 def api_streaming_search(
-    provider: str = Query(..., description="spotify"),
+    provider: str = Query(..., description="spotify or youtube"),
     q: str = Query(..., min_length=1),
     limit: int = Query(15, ge=1, le=25),
 ) -> StreamingSearchResponse:
-    """Search Spotify. Always returns 400 with a real message — never bare 500."""
+    """Search Spotify/YouTube. Always returns 400 with a real message — never bare 500."""
     p = (provider or "").strip().lower()
     svc = get_streaming_service()
     if p == "spotify" and not svc.spotify.configured():
@@ -562,24 +562,38 @@ def api_streaming_search(
         )
     if p == "spotify" and not svc.spotify.authenticated():
         raise ValueError("Connect Spotify first (Streaming tab), then search from Queue")
+    if p in {"youtube", "yt", "ytb"} and not svc.youtube.configured():
+        raise ValueError(
+            "YouTube not configured — set MUSYNC_YOUTUBE_API_KEY in ~/musync.env "
+            "(YouTube Data API v3), install yt-dlp + ffmpeg, then restart "
+            "./scripts/run_pi.sh (see docs/youtube.md)"
+        )
     try:
         return svc.search(provider, q, limit=limit)
     except ValueError:
         raise
     except Exception as exc:  # noqa: BLE001 — surface provider failures in the UI
-        label = "Spotify" if p == "spotify" else "Streaming"
+        if p == "spotify":
+            label = "Spotify"
+        elif p in {"youtube", "yt", "ytb"}:
+            label = "YouTube"
+        else:
+            label = "Streaming"
         raise ValueError(f"{label} search failed: {exc}") from exc
 
 
 @app.post("/api/streaming/queue", response_model=QueueItem, status_code=201)
 def api_streaming_queue_add(body: StreamingQueueAdd) -> QueueItem:
-    """Add a searched Spotify track to the hub queue and optionally activate it."""
-    if body.provider != "spotify":
+    """Add a searched Spotify/YouTube track to the hub queue and optionally activate it."""
+    if body.provider == "spotify":
+        source_type = SourceType.SPOTIFY
+    elif body.provider == "youtube":
+        source_type = SourceType.YOUTUBE
+    else:
         raise ValueError(
-            "Only Spotify search queue is supported — use AirPlay live input "
+            "Only Spotify/YouTube search queue is supported — use AirPlay live input "
             "for Apple devices (docs/airplay-receive.md)"
         )
-    source_type = SourceType.SPOTIFY
     # Keep title clean; artist/album/cover live on dedicated fields for now-playing.
     title = body.title or body.uri
     item = backend.add_queue_item(

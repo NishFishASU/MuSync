@@ -149,7 +149,7 @@
 	let streaming = $state(null);
 	/** @type {import('$lib/api.js').NowPlaying | null} */
 	let nowPlaying = $state(null);
-	/** @type {'spotify'} */
+	/** @type {'spotify' | 'youtube'} */
 	let streamProvider = $state('spotify');
 	let streamQuery = $state('');
 	/** @type {import('$lib/api.js').StreamingSearchHit[]} */
@@ -626,12 +626,17 @@
 	async function onStreamSearch() {
 		const q = streamQuery.trim();
 		if (!q || streamBusy) return;
-		if (!streaming?.spotify?.configured) {
+		if (streamProvider === 'spotify' && !streaming?.spotify?.configured) {
 			streamMessage =
 				'Spotify not configured — set MUSYNC_SPOTIFY_CLIENT_ID/SECRET in ~/musync.env, restart, then Connect on Streaming';
 			return;
 		}
-		if (!streaming?.spotify?.authenticated) {
+		if (streamProvider === 'youtube' && !streaming?.youtube?.configured) {
+			streamMessage =
+				'YouTube not configured — set MUSYNC_YOUTUBE_API_KEY in ~/musync.env (docs/youtube.md)';
+			return;
+		}
+		if (streamProvider === 'spotify' && !streaming?.spotify?.authenticated) {
 			streamMessage = 'Connect Spotify on the Streaming tab, then search here';
 			return;
 		}
@@ -645,7 +650,15 @@
 				: 'No tracks found';
 		} catch (err) {
 			streamHits = [];
-			streamMessage = err instanceof Error ? err.message : String(err);
+			const raw = err instanceof Error ? err.message : String(err);
+			const lower = raw.toLowerCase();
+			if (lower.includes('insufficient client scope') || lower.includes('missing required scopes')) {
+				streamMessage =
+					raw +
+					' → Streaming tab: Disconnect (optional) → Reconnect Spotify and approve permissions.';
+			} else {
+				streamMessage = raw;
+			}
 		} finally {
 			streamBusy = false;
 		}
@@ -1026,7 +1039,7 @@
 		}
 	}
 
-	/** @param {'spotify' | 'input'} sourceType */
+	/** @param {'spotify' | 'youtube' | 'input'} sourceType */
 	async function addQueueShortcut(sourceType) {
 		try {
 			sourceError = '';
@@ -1043,6 +1056,17 @@
 				sourceError = '';
 				streamProvider = 'spotify';
 				streamMessage = 'Search Spotify below, then Queue & play — that adds a real track';
+				goto('/queue/');
+				return;
+			}
+			if (sourceType === 'youtube') {
+				if (!streaming?.youtube?.configured) {
+					sourceError =
+						'YouTube unavailable — set MUSYNC_YOUTUBE_API_KEY in ~/musync.env (docs/youtube.md)';
+					return;
+				}
+				streamProvider = 'youtube';
+				streamMessage = 'Search YouTube above, then Queue & play — yt-dlp → ffmpeg → feeder';
 				goto('/queue/');
 				return;
 			}
@@ -2284,15 +2308,32 @@
 					{#if streaming?.spotify?.authenticated}
 						<button
 							type="button"
+							class="btn btn-small"
+							disabled={streamBusy}
+							onclick={() => onConnectSpotify()}
+						>
+							{streaming?.spotify?.missing_scopes?.length ? 'Reconnect Spotify' : 'Reconnect'}
+						</button>
+						<button
+							type="button"
 							class="btn btn-ghost btn-small"
 							disabled={streamBusy}
 							onclick={() => onSpotifyLogout()}
 						>
 							Disconnect
 						</button>
-						<p class="hint muted">
-							Connected — search &amp; queue tracks on the <a href="/queue/">Queue</a> tab.
-						</p>
+						{#if streaming?.spotify?.missing_scopes?.length}
+							<p class="hint stream-error" role="alert">
+								Token missing scopes ({streaming.spotify.missing_scopes.join(', ')}). Click
+								<strong>Reconnect Spotify</strong> and approve the consent dialog, then search on
+								Queue.
+							</p>
+						{:else}
+							<p class="hint muted">
+								Connected — search &amp; queue tracks on the <a href="/queue/">Queue</a> tab.
+								Use Reconnect if search says insufficient client scope.
+							</p>
+						{/if}
 					{:else}
 						<button
 							type="button"
@@ -2303,9 +2344,10 @@
 							Connect Spotify
 						</button>
 						<p class="hint muted">
-							Opens Spotify login → returns here with tokens. App Client ID/Secret stay in
-							<code>~/musync.env</code> (Windows: <code>%USERPROFILE%\musync.env</code>) — not
-							typed here. After connect, use Queue to search.
+							Opens Spotify login with a consent dialog (needed scopes for search + playback). App
+							Client ID/Secret stay in <code>~/musync.env</code> (Windows:
+							<code>%USERPROFILE%\musync.env</code>) — not typed here. After connect, use Queue to
+							search.
 						</p>
 					{/if}
 					{#if streaming?.spotify?.librespot_available === false}
@@ -2364,8 +2406,39 @@
 						Setup details: <code>docs/airplay-receive.md</code>
 					</p>
 				</div>
+				<div class="stream-card">
+					<strong>YouTube</strong>
+					<span class="status-pill {streaming?.youtube?.configured ? 'linked' : 'missing'}">
+						{streaming?.youtube?.configured
+							? streaming.youtube.playback_mode === 'ytdlp_ffmpeg'
+								? 'search + play'
+								: 'API key · need yt-dlp/ffmpeg'
+							: 'not configured'}
+					</span>
+					<p class="hint muted">
+						Data API key in <code>~/musync.env</code> (<code>MUSYNC_YOUTUBE_API_KEY</code>).
+						Hub PCM: <code>yt-dlp</code> → <code>ffmpeg</code> →
+						<code>musync_feeder</code> — see docs/youtube.md.
+					</p>
+					{#if streaming?.youtube?.ytdlp_available === false}
+						<p class="hint muted">Install <code>yt-dlp</code> on the Pi for hub PCM.</p>
+					{/if}
+					{#if streaming?.youtube?.ffmpeg_available === false}
+						<p class="hint muted">Install <code>ffmpeg</code> on the Pi for hub PCM.</p>
+					{/if}
+					{#if !streaming?.youtube?.configured}
+						<p class="hint muted">
+							Setup: enable YouTube Data API v3, create an API key, add
+							<code>MUSYNC_YOUTUBE_API_KEY</code> to <code>~/musync.env</code>, restart
+							<code>./scripts/run_pi.sh</code>.
+						</p>
+					{/if}
+					{#if streaming?.youtube?.note}
+						<p class="hint muted">{streaming.youtube.note}</p>
+					{/if}
+				</div>
 			</div>
-			{#if streamMessage && !streaming?.spotify?.authenticated}
+			{#if streamMessage}
 				<p class="hint" role="status">{streamMessage}</p>
 			{/if}
 		</section>
@@ -2376,7 +2449,7 @@
 		<section class="panel queue-panel" aria-labelledby="queue-heading">
 			<div class="panel-head">
 				<h2 id="queue-heading">Song queue</h2>
-				<p class="hint">Search Spotify · AirPlay via Inputs · sinks stay linked</p>
+				<p class="hint">Search Spotify/YouTube · AirPlay via Inputs · sinks stay linked</p>
 			</div>
 			<form
 				class="stream-search"
@@ -2389,11 +2462,12 @@
 					<span class="sr-only">Provider</span>
 					<select bind:value={streamProvider} aria-label="Streaming provider">
 						<option value="spotify">Spotify</option>
+						<option value="youtube">YouTube</option>
 					</select>
 				</label>
 				<input
 					type="search"
-					placeholder="Search Spotify tracks"
+					placeholder="Search Spotify or YouTube"
 					bind:value={streamQuery}
 					aria-label="Search tracks"
 				/>
@@ -2436,10 +2510,10 @@
 					</li>
 				{:else}
 					<li class="empty-group">
-						{#if streaming?.spotify?.authenticated}
-							Search Spotify to pick a track — AirPlay uses Inputs → live host
+						{#if streaming?.spotify?.authenticated || streaming?.youtube?.configured}
+							Search Spotify or YouTube — AirPlay uses Inputs → live host
 						{:else}
-							Connect Spotify on Streaming to search here · AirPlay: Inputs → Refresh
+							Connect Spotify / set YouTube key on Streaming · AirPlay: Inputs → Refresh
 						{/if}
 					</li>
 				{/each}
@@ -2484,6 +2558,13 @@
 					onclick={() => addQueueShortcut('input')}
 				>
 					+ Live{liveHosts.length ? ` · ${liveHosts[0].name}` : ''}
+				</button>
+				<button
+					type="button"
+					class="btn btn-ghost btn-small"
+					onclick={() => addQueueShortcut('youtube')}
+				>
+					+ YouTube
 				</button>
 			</div>
 			{#if !liveHosts.length}
@@ -2530,7 +2611,10 @@
 										(t === 'apple' &&
 											(streaming?.airplay?.receiving ||
 												streaming?.airplay?.configured ||
-												liveHosts.some((h) => h.capture_path === 'airplay')))
+												liveHosts.some((h) => h.capture_path === 'airplay'))) ||
+										(t === 'youtube' &&
+											streaming?.youtube?.configured &&
+											streaming?.youtube?.playback_mode === 'ytdlp_ffmpeg')
 											? ''
 											: ' (unavailable)'}</option
 									>
