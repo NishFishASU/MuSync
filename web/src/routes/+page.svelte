@@ -634,6 +634,7 @@
 		try {
 			sourceError = '';
 			applyTransport(await putTransport(body));
+			nowPlaying = await getNowPlaying().catch(() => nowPlaying);
 		} catch (err) {
 			sourceError = err instanceof Error ? err.message : String(err);
 		}
@@ -646,6 +647,7 @@
 			const t = await setActiveSource(id);
 			queue = await listQueue();
 			applyTransport(t);
+			nowPlaying = await getNowPlaying().catch(() => nowPlaying);
 			const active = queue.find((q) => q.id === t.queue_item_id);
 			if (active && !active.available) {
 				sourceError =
@@ -662,6 +664,7 @@
 		try {
 			sourceError = '';
 			applyTransport(await setActiveQueueItem(id));
+			nowPlaying = await getNowPlaying().catch(() => nowPlaying);
 		} catch (err) {
 			sourceError = err instanceof Error ? err.message : String(err);
 		}
@@ -683,6 +686,7 @@
 			const updated = await patchQueueItem(id, patch);
 			queue = queue.map((q) => (q.id === id ? updated : q));
 			applyTransport(await getTransport());
+			nowPlaying = await getNowPlaying().catch(() => nowPlaying);
 			if (!updated.available) {
 				sourceError = updated.note || `${sourceTypeLabel(sourceType)} is a stub — sinks stay linked`;
 			}
@@ -702,6 +706,7 @@
 			const updated = await patchQueueItem(id, { input_id: inputId || null });
 			queue = queue.map((q) => (q.id === id ? updated : q));
 			applyTransport(await getTransport());
+			nowPlaying = await getNowPlaying().catch(() => nowPlaying);
 			if (!updated.available) {
 				sourceError = updated.note || 'Host-bound source is a stub — sinks stay linked';
 			}
@@ -955,7 +960,7 @@
 </header>
 
 <nav class="jump" aria-label="Sections">
-	<a href="#transport-heading">Transport</a>
+	<a href="#now-playing-heading">Now playing</a>
 	<a href="#wifi-heading">Wi-Fi</a>
 	<a href="#setup-heading">Outputs</a>
 	<a href="#inputs-heading">Inputs</a>
@@ -964,38 +969,51 @@
 </nav>
 
 <main class="layout">
-		<section class="panel panel-primary transport-panel" aria-labelledby="transport-heading">
+		<section class="panel panel-primary transport-panel" aria-labelledby="now-playing-heading">
 		<div class="panel-head">
-			<h2 id="transport-heading">Transport</h2>
+			<h2 id="now-playing-heading">Now playing</h2>
+			<p class="hint">
+				{sourceTypeLabel(nowPlaying?.source_type || transport?.source_type)}
+				{#if transport?.state}
+					· {transport.state}
+				{/if}
+			</p>
 		</div>
 		<div class="now-playing-block">
 			{#if nowPlaying?.cover_url || transport?.cover_url}
 				<img
 					class="cover-art"
 					src={nowPlaying?.cover_url || transport?.cover_url || ''}
-					alt=""
-					width="72"
-					height="72"
+					alt={(nowPlaying?.album || transport?.album || 'Album') + ' cover'}
+					width="88"
+					height="88"
 				/>
+			{:else}
+				<div class="cover-art cover-art-empty" aria-hidden="true"></div>
 			{/if}
 			<div class="now-playing-text">
-				<p class="now-playing">
+				<p class="now-playing-title">
 					{nowPlaying?.title || transport?.title || 'No track'}
-					{#if transport?.source_type}
-						<span class="type-chip">{sourceTypeLabel(transport.source_type)}</span>
+				</p>
+				<p class="now-playing-meta">
+					{nowPlaying?.artist || transport?.artist || 'Unknown artist'}
+				</p>
+				{#if nowPlaying?.album || transport?.album}
+					<p class="now-playing-meta muted">{nowPlaying?.album || transport?.album}</p>
+				{/if}
+				<div class="now-playing-chips">
+					{#if nowPlaying?.source_type || transport?.source_type}
+						<span class="type-chip">{sourceTypeLabel(nowPlaying?.source_type || transport?.source_type)}</span>
 					{/if}
 					{#if activeIsVideo}
 						<span class="type-chip">Video</span>
 					{/if}
-				</p>
-				{#if nowPlaying?.artist || transport?.artist}
-					<p class="now-playing-meta">{nowPlaying?.artist || transport?.artist}</p>
-				{/if}
-				{#if nowPlaying?.album || transport?.album}
-					<p class="now-playing-meta muted">{nowPlaying?.album || transport?.album}</p>
-				{/if}
+				</div>
 			</div>
 		</div>
+		{#if nowPlaying?.note}
+			<p class="hint muted" role="status">{nowPlaying.note}</p>
+		{/if}
 		{#if activeIsStub}
 			<p class="stub-banner" role="status">
 				Not playable yet

@@ -533,9 +533,10 @@ class MockAudioBackend(AudioBackend):
             )
 
     def get_now_playing(self):
-        from ..nowplaying import build_now_playing
+        from ..nowplaying import apply_mock_sample_metadata, build_now_playing
 
-        return build_now_playing(self._session)
+        # Laptop mock always returns title / artist / album / cover for the header.
+        return apply_mock_sample_metadata(build_now_playing(self._session), self._session)
 
     def health(self) -> Health:
         with self._lock:
