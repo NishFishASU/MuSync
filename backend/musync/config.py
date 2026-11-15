@@ -15,6 +15,7 @@ import yaml
 
 from .models import (
     MAX_BT_SINKS,
+    MAX_CAST_SINKS,
     MAX_SPP_SINKS,
     Device,
     DeviceConfigEntry,
@@ -49,6 +50,28 @@ DEFAULT_SPP_DEVICE: dict[str, Any] = {
     "listen_port": 1234,
     "sample_rate": 48000,
     "channels": 1,
+}
+
+# Nest Mini / Chromecast template — opt-in via discovery (Wi‑Fi Cast).
+# Default delay is higher than BT: Cast path buffers more than A2DP.
+DEFAULT_CAST_DEVICE: dict[str, Any] = {
+    "id": "cast-1",
+    "name": "Nest Mini",
+    "kind": "cast",
+    "mac": "",
+    "hci": "",
+    "connected": False,
+    "delay_ms": 300,
+    "volume": 0.85,
+    "mute": False,
+    "enabled": False,
+    "listen_host": "0.0.0.0",
+    "listen_port": 8090,
+    "sample_rate": 48000,
+    "channels": 2,
+    "cast_uuid": "",
+    "cast_host": "",
+    "cast_port": 8009,
 }
 
 # Default mock sinks (≤6 BT + SPP) for cloud/dev without hardware.
@@ -171,15 +194,18 @@ def web_root() -> Path:
 
 
 def validate_devices(devices: list[Device], *, require_min: int | None = None) -> list[Device]:
-    """Harden BlueZ HCI BT (≤6) + SPP network sinks (≤4): unique id/mac/hci/port."""
+    """Harden BT (≤6) + SPP (≤4) + Cast (≤4): unique id/mac/hci/port/uuid."""
     bt = [d for d in devices if d.kind == DeviceKind.BLUETOOTH]
     spp = [d for d in devices if d.kind == DeviceKind.NETWORK_SPP]
+    cast = [d for d in devices if d.kind == DeviceKind.CAST]
     if len(bt) > MAX_BT_SINKS:
         raise ValueError(
             f"MuSync supports at most {MAX_BT_SINKS} Bluetooth sinks (one A2DP per HCI)"
         )
     if len(spp) > MAX_SPP_SINKS:
         raise ValueError(f"MuSync supports at most {MAX_SPP_SINKS} SPP network sinks")
+    if len(cast) > MAX_CAST_SINKS:
+        raise ValueError(f"MuSync supports at most {MAX_CAST_SINKS} Cast sinks")
     if require_min is not None and len(devices) < require_min:
         raise ValueError(f"Expected at least {require_min} devices, got {len(devices)}")
 
@@ -187,6 +213,7 @@ def validate_devices(devices: list[Device], *, require_min: int | None = None) -
     seen_macs: set[str] = set()
     seen_hcis: set[str] = set()
     seen_ports: set[int] = set()
+    seen_cast_uuids: set[str] = set()
     for d in devices:
         if not d.id.strip():
             raise ValueError("Device id must be non-empty")
@@ -200,6 +227,19 @@ def validate_devices(devices: list[Device], *, require_min: int | None = None) -
             seen_ports.add(d.listen_port)
             if not d.listen_host.strip():
                 raise ValueError(f"SPP sink {d.id} needs listen_host")
+            continue
+
+        if d.kind == DeviceKind.CAST:
+            if d.listen_port in seen_ports:
+                raise ValueError(f"Duplicate Cast/SPP listen_port: {d.listen_port}")
+            seen_ports.add(d.listen_port)
+            if not d.listen_host.strip():
+                raise ValueError(f"Cast sink {d.id} needs listen_host")
+            uuid = d.cast_uuid.strip().lower()
+            if uuid:
+                if uuid in seen_cast_uuids:
+                    raise ValueError(f"Duplicate Cast uuid: {uuid}")
+                seen_cast_uuids.add(uuid)
             continue
 
         mac = d.mac.strip().upper()
@@ -221,6 +261,10 @@ def validate_devices(devices: list[Device], *, require_min: int | None = None) -
 
 def default_spp_device() -> Device:
     return Device.model_validate(DEFAULT_SPP_DEVICE)
+
+
+def default_cast_device() -> Device:
+    return Device.model_validate(DEFAULT_CAST_DEVICE)
 
 
 def default_devices(*, backend: str = "mock") -> list[Device]:
@@ -308,6 +352,7 @@ def save_devices(devices: list[Device]) -> Path:
         "version": 1,
         "max_sinks": MAX_BT_SINKS,
         "max_spp_sinks": MAX_SPP_SINKS,
+        "max_cast_sinks": MAX_CAST_SINKS,
         "devices": [d.model_dump(mode="json") for d in devices],
     }
     text = yaml.safe_dump(payload, sort_keys=False)
@@ -340,15 +385,19 @@ def resolve_devices_from_config(
     existing: list[Device] | None = None,
     discovery_by_name: dict[str, dict[str, Any]] | None = None,
     discovery_by_mac: dict[str, dict[str, Any]] | None = None,
+    cast_by_name: dict[str, dict[str, Any]] | None = None,
+    cast_by_uuid: dict[str, dict[str, Any]] | None = None,
 ) -> list[Device]:
-    """Turn UI config entries into Device rows; fill MAC/pw_node from discovery by name.
+    """Turn UI config entries into Device rows; fill MAC/pw_node/cast from discovery.
 
     ``discovery_by_name`` / ``discovery_by_mac`` map lower-name / upper-mac →
-    ``{mac, pw_node, pw_name, hci, connected}``. Callers build these from
-    PipeWire/bluetoothctl (or mock fixtures). No manual MAC typing required.
+    ``{mac, pw_node, pw_name, hci, connected}``. ``cast_by_name`` /
+    ``cast_by_uuid`` map → ``{uuid, host, port, model, connected}``.
     """
     by_name = {k.strip().lower(): v for k, v in (discovery_by_name or {}).items()}
     by_mac = {k.strip().upper(): v for k, v in (discovery_by_mac or {}).items()}
+    cast_name = {k.strip().lower(): v for k, v in (cast_by_name or {}).items()}
+    cast_uuid = {k.strip().lower(): v for k, v in (cast_by_uuid or {}).items()}
     existing_by_id = {d.id: d for d in (existing or [])}
     used_ids: set[str] = set()
     out: list[Device] = []
@@ -356,9 +405,16 @@ def resolve_devices_from_config(
     for entry in entries:
         kind = entry.kind
         name = entry.name.strip() or (
-            "Phone SPP" if kind == DeviceKind.NETWORK_SPP else "Speaker"
+            "Phone SPP"
+            if kind == DeviceKind.NETWORK_SPP
+            else ("Nest Mini" if kind == DeviceKind.CAST else "Speaker")
         )
-        prefix = "spp" if kind == DeviceKind.NETWORK_SPP else "bt"
+        if kind == DeviceKind.NETWORK_SPP:
+            prefix = "spp"
+        elif kind == DeviceKind.CAST:
+            prefix = "cast"
+        else:
+            prefix = "bt"
         device_id = (entry.id or "").strip() or slug_device_id(prefix, name, used_ids)
         if device_id in used_ids:
             device_id = slug_device_id(prefix, name, used_ids)
@@ -369,6 +425,17 @@ def resolve_devices_from_config(
         hci = (entry.hci or (prev.hci if prev else "") or "").strip()
         pw_node = (entry.pw_node or (prev.pw_node if prev else "") or "").strip()
         connected = bool(prev.connected) if prev else False
+        cast_id = (
+            entry.cast_uuid or (prev.cast_uuid if prev else "") or ""
+        ).strip()
+        cast_host = (
+            entry.cast_host or (prev.cast_host if prev else "") or ""
+        ).strip()
+        cast_port = (
+            entry.cast_port
+            if entry.cast_port is not None
+            else (prev.cast_port if prev else 8009)
+        )
 
         if kind == DeviceKind.BLUETOOTH:
             hint = by_name.get(name.lower())
@@ -380,7 +447,42 @@ def resolve_devices_from_config(
                 hci = hint.get("hci") or hci
                 connected = bool(hint.get("connected", connected))
 
+        if kind == DeviceKind.CAST:
+            hint = cast_name.get(name.lower())
+            if not hint and cast_id:
+                hint = cast_uuid.get(cast_id.lower())
+            if hint:
+                cast_id = hint.get("uuid") or cast_id
+                cast_host = hint.get("host") or cast_host
+                cast_port = int(hint.get("port") or cast_port or 8009)
+                connected = bool(hint.get("connected", connected or bool(entry.enabled)))
+
         spp = prev if prev and prev.kind == DeviceKind.NETWORK_SPP else default_spp_device()
+        cast_defaults = (
+            prev if prev and prev.kind == DeviceKind.CAST else default_cast_device()
+        )
+        if kind == DeviceKind.CAST:
+            default_delay = (
+                prev.delay_ms
+                if prev and prev.kind == DeviceKind.CAST
+                else cast_defaults.delay_ms
+            )
+            default_listen_port = cast_defaults.listen_port
+            default_channels = cast_defaults.channels
+        elif kind == DeviceKind.NETWORK_SPP:
+            default_delay = prev.delay_ms if prev else 0
+            default_listen_port = spp.listen_port
+            default_channels = spp.channels
+        else:
+            default_delay = prev.delay_ms if prev else 0
+            default_listen_port = spp.listen_port
+            default_channels = 1
+
+        if kind == DeviceKind.BLUETOOTH:
+            connected_out = connected
+        else:
+            connected_out = bool(entry.enabled)
+
         device = Device(
             id=device_id,
             name=name,
@@ -388,32 +490,55 @@ def resolve_devices_from_config(
             mac=mac,
             hci=hci,
             pw_node=pw_node,
-            connected=connected if kind == DeviceKind.BLUETOOTH else bool(entry.enabled),
+            connected=connected_out,
             enabled=entry.enabled,
-            delay_ms=entry.delay_ms if entry.delay_ms is not None else (prev.delay_ms if prev else 0),
+            delay_ms=(
+                entry.delay_ms
+                if entry.delay_ms is not None
+                else default_delay
+            ),
             volume=entry.volume if entry.volume is not None else (prev.volume if prev else 0.85),
             gain=entry.gain if entry.gain is not None else (prev.gain if prev else 1.0),
             mute=entry.mute if entry.mute is not None else (prev.mute if prev else False),
             listen_host=(
                 entry.listen_host
                 if entry.listen_host is not None
-                else (prev.listen_host if prev else spp.listen_host)
+                else (
+                    prev.listen_host
+                    if prev
+                    else (
+                        cast_defaults.listen_host
+                        if kind == DeviceKind.CAST
+                        else spp.listen_host
+                    )
+                )
             ),
             listen_port=(
                 entry.listen_port
                 if entry.listen_port is not None
-                else (prev.listen_port if prev else spp.listen_port)
+                else (
+                    prev.listen_port
+                    if prev and prev.kind == kind
+                    else default_listen_port
+                )
             ),
             sample_rate=(
                 entry.sample_rate
                 if entry.sample_rate is not None
-                else (prev.sample_rate if prev else spp.sample_rate)
+                else (prev.sample_rate if prev else 48000)
             ),
             channels=(
                 entry.channels
                 if entry.channels is not None
-                else (prev.channels if prev else spp.channels)
+                else (
+                    prev.channels
+                    if prev and prev.kind == kind
+                    else default_channels
+                )
             ),
+            cast_uuid=cast_id if kind == DeviceKind.CAST else "",
+            cast_host=cast_host if kind == DeviceKind.CAST else "",
+            cast_port=int(cast_port) if kind == DeviceKind.CAST else 8009,
         )
         out.append(device)
 

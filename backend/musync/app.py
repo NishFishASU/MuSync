@@ -129,18 +129,20 @@ def api_list_devices() -> list[Device]:
 
 @app.get("/api/devices/discover", response_model=DeviceDiscoverResponse)
 def api_discover_devices() -> DeviceDiscoverResponse:
-    """Auto-discover bluez sinks by name + always-available SPP defaults.
+    """Auto-discover bluez + Cast (Nest Mini) + always-available SPP defaults.
 
-    UI sets sink type and SPP host/port/rate/channels — no manual MAC entry.
+    UI sets sink type, SPP host/port, and Cast enable — no manual MAC entry.
     """
     return backend.discover_device_setup()
 
 
 @app.put("/api/devices/config", response_model=list[Device])
 def api_put_devices_config(body: DevicesConfigPut) -> list[Device]:
-    """Save enabled sinks from the web UI (MAC filled from discovery by name)."""
+    """Save enabled sinks from the web UI (MAC/Cast UUID filled from discovery)."""
     if not body.devices:
-        raise ValueError("At least one sink is required (enable Phone SPP or a BT device)")
+        raise ValueError(
+            "At least one sink is required (enable Phone SPP, Cast, or a BT device)"
+        )
     return backend.apply_devices_config(body.devices)
 
 

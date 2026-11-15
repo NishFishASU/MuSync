@@ -1,6 +1,6 @@
 # MuSync
 
-Multi-room Bluetooth audio sync on a **Raspberry Pi 5**: one local-file transport fans out through **PipeWire** to up to **6× BlueZ HCI** A2DP sinks (onboard + USB dongles), with per-sink delay/volume from a responsive web UI on the LAN.
+Multi-room audio sync on a **Raspberry Pi 5**: one local-file transport fans out through **PipeWire** to up to **6× BlueZ HCI** A2DP sinks (onboard + USB dongles), plus optional **SPP TCP** and **Cast / Nest Mini** Wi‑Fi sinks, with per-sink delay/volume from a responsive web UI on the LAN.
 
 Cloud/dev uses **MockAudioBackend**; the Pi uses **PipeWireBackend** (feeder → per-sink delay/volume → bluez). The control UI is a **SvelteKit** static SPA (`@sveltejs/adapter-static`) served by FastAPI from `web/build/`.
 
@@ -65,6 +65,7 @@ config/
 docs/pi-pipewire.md
 docs/demo-checklist.md                # Qudelix + Phone SPP demo path
 docs/spp-network-sink.md              # phone as SPP TCP *output*
+docs/cast-nest-mini.md                # Nest Mini / Chromecast Cast *output*
 docs/phone-bt-source-vs-spp-sink.md   # phone as BT A2DP *source* vs SPP sink
 docs/wifi-join.md                     # phone hotspot join (nmcli)
 docs/volume-profiles.md               # silent-disco preferred × gain + S_u × G_d learning
@@ -76,6 +77,8 @@ Phone **input** (S21 FE → `bluez_input` → feeder): [docs/phone-bt-source-vs-
 USB / PC capture (ALSA auto-detect → feeder): [docs/usb-pc-capture.md](docs/usb-pc-capture.md).  
 HDMI / capture card → feeder: [docs/hdmi-capture.md](docs/hdmi-capture.md).  
 SPP phone **sink**: enable Phone SPP in Device setup, connect Simple Protocol Player to Pi IP:port — [docs/spp-network-sink.md](docs/spp-network-sink.md).  
+**Nest Mini / Cast** (Wi‑Fi, higher latency than BT): enable in Device setup after Refresh — [docs/cast-nest-mini.md](docs/cast-nest-mini.md).  
+
 **Spotify** (OAuth Connect → librespot → `musync_feeder`) + **AirPlay receive** (shairport-sync → feeder) + **YouTube** (Data API search + yt-dlp → ffmpeg → feeder): [docs/spotify-apple.md](docs/spotify-apple.md), [docs/airplay-receive.md](docs/airplay-receive.md), [docs/youtube.md](docs/youtube.md) · env template `config/streaming.env.example` → `~/musync.env` (auto-loaded by `run_pi.sh`).  
 USB/PC capture needs a **USB-A sound card** — Pi 5 USB-C PD is power-only: [docs/usb-pc-capture.md](docs/usb-pc-capture.md).
 

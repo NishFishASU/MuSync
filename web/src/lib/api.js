@@ -51,7 +51,7 @@ export function spaPollRequestsPerSecond(cadence) {
 /** @typedef {'bt_a2dp' | 'usb' | 'hdmi' | 'airplay' | 'network'} CapturePath */
 /** @typedef {'phone' | 'pc' | 'other'} HostKind */
 
-/** @typedef {'bluetooth' | 'network_spp'} DeviceKind */
+/** @typedef {'bluetooth' | 'network_spp' | 'cast'} DeviceKind */
 
 /**
  * @typedef {Object} Device
@@ -70,6 +70,9 @@ export function spaPollRequestsPerSecond(cadence) {
  * @property {number} [listen_port]
  * @property {number} [sample_rate]
  * @property {number} [channels]
+ * @property {string} [cast_uuid]
+ * @property {string} [cast_host]
+ * @property {number} [cast_port]
  */
 
 /**
@@ -120,6 +123,17 @@ export function spaPollRequestsPerSecond(cadence) {
  */
 
 /**
+ * @typedef {Object} DiscoveredCastSink
+ * @property {string} name
+ * @property {string} [uuid]
+ * @property {string} [host]
+ * @property {number} [port]
+ * @property {string} [model]
+ * @property {boolean} [connected]
+ * @property {string | null} [configured_id]
+ */
+
+/**
  * @typedef {Object} BluetoothAdapter
  * @property {string} hci
  * @property {string} [mac]
@@ -135,6 +149,7 @@ export function spaPollRequestsPerSecond(cadence) {
 /**
  * @typedef {Object} DeviceDiscoverResponse
  * @property {DiscoveredBluetoothSink[]} bluetooth
+ * @property {DiscoveredCastSink[]} [cast]
  * @property {Device} spp_default
  * @property {BluetoothAdapter[]} [adapters]
  * @property {number} [adapter_capacity]
@@ -182,6 +197,9 @@ export function spaPollRequestsPerSecond(cadence) {
  * @property {number} [listen_port]
  * @property {number} [sample_rate]
  * @property {number} [channels]
+ * @property {string} [cast_uuid]
+ * @property {string} [cast_host]
+ * @property {number} [cast_port]
  */
 
 /**
