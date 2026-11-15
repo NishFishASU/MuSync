@@ -729,6 +729,33 @@ def discover_bluetooth_remotes(
     return remotes, f"bluetoothctl → {len(remotes)} remotes"
 
 
+def bluetoothctl_connect(
+    bluetoothctl: Optional[str],
+    mac: str,
+    *,
+    timeout: float = 10.0,
+) -> tuple[bool, str]:
+    """Soft ``bluetoothctl connect <mac>`` for demo reboot recovery.
+
+    Returns ``(ok, detail)``. Already-connected remotes usually succeed quickly.
+    Never raises — demo path prefers MISSING over a hung API.
+    """
+    if not bluetoothctl:
+        return False, "bluetoothctl missing"
+    want = normalize_mac(mac)
+    if not want or want.count(":") != 5:
+        return False, f"invalid mac: {mac!r}"
+    try:
+        proc = run_cmd([bluetoothctl, "connect", want], timeout=timeout)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return False, f"connect {want}: {exc}"
+    out = ((proc.stdout or "") + (proc.stderr or "")).strip()
+    low = out.lower()
+    if proc.returncode == 0 or "connection successful" in low or "already connected" in low:
+        return True, out or f"connected {want}"
+    return False, out or f"connect {want} failed (rc={proc.returncode})"
+
+
 def friendly_bluez_label(node: PwNode, remotes_by_mac: dict[str, BtRemote]) -> str:
     """Prefer bluetoothctl name, then node description, then truncated node name."""
     if node.mac:

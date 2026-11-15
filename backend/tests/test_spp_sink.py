@@ -14,6 +14,7 @@ from musync.audio.spp import (
     build_spp_ffmpeg_from_file,
     build_spp_ffmpeg_from_pulse,
     build_spp_ffmpeg_idle,
+    free_spp_listen_port,
     spp_tcp_url,
 )
 from musync.config import validate_devices
@@ -185,6 +186,56 @@ def test_sync_spp_revives_dead_listener(tmp_path, monkeypatch) -> None:
     )
     backend._sync_spp_listeners()
     assert revived == ["spp-1"]
+
+
+def test_free_spp_listen_port_reports_pkill_result(monkeypatch) -> None:
+    calls: list[list[str]] = []
+
+    def fake_run(args, **_kwargs):
+        calls.append(list(args))
+        return MagicMock(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr("musync.audio.spp.subprocess.run", fake_run)
+    monkeypatch.setattr("musync.audio.spp.time.sleep", lambda _s: None)
+    detail = free_spp_listen_port(1234)
+    assert "killed" in detail
+    assert calls and calls[0][:2] == ["pkill", "-f"]
+    assert "ffmpeg.*:1234" in calls[0][2]
+
+
+def test_free_spp_listen_port_when_nothing_to_kill(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "musync.audio.spp.subprocess.run",
+        lambda *_a, **_k: MagicMock(returncode=1, stdout="", stderr=""),
+    )
+    monkeypatch.setattr("musync.audio.spp.time.sleep", lambda _s: None)
+    assert "free" in free_spp_listen_port(1234)
+
+
+def test_restart_spp_frees_port_before_listen(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("MUSYNC_DEVICES_CONFIG", str(tmp_path / "devices.yaml"))
+    monkeypatch.setenv("MUSYNC_MEDIA_DIR", str(tmp_path / "media"))
+    monkeypatch.setenv("MUSYNC_PW_DRY_RUN", "0")
+    devices = [
+        Device(
+            id="spp-1",
+            name="Phone",
+            kind=DeviceKind.NETWORK_SPP,
+            enabled=True,
+            listen_port=1234,
+        ),
+    ]
+    backend = PipeWireBackend(devices=devices)
+    freed: list[int] = []
+    monkeypatch.setattr(
+        "musync.audio.pipewire.free_spp_listen_port",
+        lambda port, **_k: freed.append(int(port)) or "killed",
+    )
+    monkeypatch.setattr(backend, "_env_dry_run", lambda: False)
+    backend._tools["ffmpeg"] = None  # stop before Popen
+    backend._restart_spp_listener(backend._devices["spp-1"])
+    assert freed == [1234]
+    assert backend._devices["spp-1"].connected is False
 
 
 def test_spp_desired_source_switches_on_play(tmp_path, monkeypatch) -> None:

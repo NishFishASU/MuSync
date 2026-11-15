@@ -17,11 +17,50 @@ silence while idle so the port stays fed with PCM.
 
 from __future__ import annotations
 
+import logging
+import subprocess
+import time
 from typing import Literal
 
 from ..models import Device, DeviceKind
 
+log = logging.getLogger(__name__)
+
 SppInputKind = Literal["file", "lavfi", "pulse"]
+
+
+def free_spp_listen_port(port: int, *, settle_s: float = 0.2) -> str:
+    """Best-effort: stop orphan ``ffmpeg`` holding an SPP TCP listen port.
+
+    Manual demos and crashed MuSync runs often leave ``ffmpeg … :PORT?listen=1``
+    bound, so the next MuSync start cannot listen. Safe to call before every
+    SPP restart — our tracked listener should already be terminated.
+    """
+    port = int(port)
+    if port < 1 or port > 65535:
+        return "invalid port"
+    # Match both ``tcp://0.0.0.0:1234?listen=1`` and ``:1234`` argv forms.
+    pattern = f"ffmpeg.*:{port}"
+    try:
+        proc = subprocess.run(
+            ["pkill", "-f", pattern],
+            capture_output=True,
+            text=True,
+            timeout=3.0,
+        )
+    except FileNotFoundError:
+        return "pkill missing"
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return f"pkill error: {exc}"
+    if settle_s > 0:
+        time.sleep(settle_s)
+    # pkill returns 0 when it signaled something, 1 when no match.
+    if proc.returncode == 0:
+        return f"killed stray ffmpeg on :{port}"
+    if proc.returncode == 1:
+        return f"port :{port} free (no stray ffmpeg)"
+    detail = (proc.stderr or proc.stdout or "").strip()
+    return f"pkill rc={proc.returncode}" + (f" ({detail})" if detail else "")
 
 
 def spp_tcp_url(device: Device) -> str:

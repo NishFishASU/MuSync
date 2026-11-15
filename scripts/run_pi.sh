@@ -91,14 +91,64 @@ if [[ "$missing" -eq 1 ]]; then
   echo "  Continuing — backend will dry-run the graph if PipeWire is down."
 fi
 
+# Collect SPP listen ports from devices.yaml (default 1234).
+SPP_PORTS=()
+if [[ -f "$MUSYNC_DEVICES_CONFIG" ]]; then
+  while IFS= read -r port; do
+    [[ "$port" =~ ^[0-9]+$ ]] || continue
+    SPP_PORTS+=("$port")
+  done < <(grep -E '^\s*listen_port:\s*[0-9]+' "$MUSYNC_DEVICES_CONFIG" 2>/dev/null | grep -oE '[0-9]+' || true)
+fi
+if [[ ${#SPP_PORTS[@]} -eq 0 ]]; then
+  SPP_PORTS=(1234)
+fi
+# Unique ports
+mapfile -t SPP_PORTS < <(printf '%s\n' "${SPP_PORTS[@]}" | sort -nu)
+
+# Kill stray ffmpeg listens so MuSync can bind (manual demo / crashed prior run).
+echo
+echo "Clearing stray SPP ffmpeg on ports: ${SPP_PORTS[*]}"
+for port in "${SPP_PORTS[@]}"; do
+  if pkill -f "ffmpeg.*:${port}" 2>/dev/null; then
+    echo "  killed ffmpeg matching :${port}"
+  else
+    echo "  :${port} — no stray ffmpeg"
+  fi
+done
+sleep 0.2
+
 # Optional: show orphan MuSync feeders before boot (backend purges on startup).
 if command -v pactl >/dev/null 2>&1; then
   feeder_n=$(pactl list modules short 2>/dev/null | grep -c "module-null-sink.*sink_name=${MUSYNC_PW_FEEDER}" || true)
   if [[ "${feeder_n:-0}" -gt 1 ]]; then
     echo
     echo "NOTE: found ${feeder_n} ${MUSYNC_PW_FEEDER} null-sink modules — MuSync will purge orphans on startup."
+  elif [[ "${feeder_n:-0}" -eq 1 ]]; then
+    echo "  feeder: one ${MUSYNC_PW_FEEDER} module present (idempotent)"
+  else
+    echo "  feeder: no ${MUSYNC_PW_FEEDER} yet (created on startup)"
   fi
 fi
+
+echo
+echo "Preflight health:"
+if command -v ffmpeg >/dev/null 2>&1; then
+  echo "  ffmpeg: READY ($(command -v ffmpeg))"
+else
+  echo "  ffmpeg: MISSING (Phone SPP will not listen)"
+fi
+if command -v wpctl >/dev/null 2>&1 && wpctl status >/dev/null 2>&1; then
+  echo "  PipeWire: READY"
+else
+  echo "  PipeWire: MISSING/down (graph dry-run until up)"
+fi
+for port in "${SPP_PORTS[@]}"; do
+  if command -v ss >/dev/null 2>&1 && ss -ltn 2>/dev/null | grep -qE ":${port}\\s"; then
+    echo "  TCP :${port}: STILL BUSY — stop the process holding it before Phone SPP can bind"
+  else
+    echo "  TCP :${port}: free"
+  fi
+done
 
 if command -v bluetoothctl >/dev/null 2>&1; then
   echo
@@ -116,13 +166,15 @@ fi
 
 echo
 echo "Qudelix + SPP via web UI:"
-echo "  1) export MUSYNC_BACKEND=pipewire"
-echo "  2) Pair: ./scripts/pair_bt600.sh hci0   # or bluetoothctl"
-echo "  3) ./scripts/run_pi.sh  (this script — uses .venv)"
-echo "  4) Open http://<Pi-IP>:8080 → Device setup"
-echo "     - enable discovered BT by name (Qudelix) — no MAC typing"
-echo "     - enable Phone SPP; set port/rate/channels if needed → Save sinks"
-echo "  5) Play hub-local; phone SPP app → Pi IP:port, s16le"
+echo "  1) Pair Qudelix (./scripts/pair_bt600.sh hci0 or bluetoothctl)"
+echo "  2) ./scripts/run_pi.sh  (this script — uses .venv, clears stray ffmpeg)"
+echo "  3) Open http://<Pi-IP>:8080 → Device setup"
+echo "     - Refresh → enable BT by name (Qudelix) — no MAC typing"
+echo "     - enable Phone SPP → Save sinks"
+echo "  4) Play hub-local; phone SPP app → Pi IP:port (not 0.0.0.0), s16le"
+echo "  Checklist: docs/demo-checklist.md"
+echo
+echo "After boot, curl http://127.0.0.1:${MUSYNC_PORT}/api/health — look for READY=… MISSING=…"
 echo
 
 exec "$PY" -m musync
