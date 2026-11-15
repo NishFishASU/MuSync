@@ -373,12 +373,29 @@ export function spaPollRequestsPerSecond(cadence) {
  */
 
 /**
+ * @typedef {Object} SpotifyHttpsTunnelInfo
+ * @property {number} port
+ * @property {boolean} ready
+ * @property {string} command
+ * @property {string} [example_redirect_uri]
+ * @property {string} [loopback_uri]
+ * @property {string} [callback_path]
+ * @property {string} [script_sh]
+ * @property {string[]} [steps]
+ * @property {string} [hint]
+ * @property {string} [docs]
+ */
+
+/**
  * @typedef {Object} StreamingStatus
  * @property {StreamingProviderStatus} spotify
  * @property {AirplayStatus} airplay
  * @property {StreamingProviderStatus} youtube
  * @property {boolean} [mock_playback]
  * @property {SpotifySshTunnelInfo | null} [ssh_tunnel]
+ * @property {SpotifyHttpsTunnelInfo | null} [https_tunnel]
+ * @property {string | null} [lan_ip]
+ * @property {string | null} [lan_ui_url]
  */
 
 /**
@@ -419,6 +436,13 @@ export function spaPollRequestsPerSecond(cadence) {
  * @property {boolean} youtube_configured
  * @property {string[]} [updated_keys]
  * @property {boolean} [saved]
+ * @property {boolean} [created]
+ * @property {string} [lan_ip]
+ * @property {string} [lan_ui_url]
+ * @property {number} [hub_port]
+ * @property {string} [oauth_loopback_uri]
+ * @property {boolean} [redirect_uri_allowed]
+ * @property {string} [redirect_uri_warning]
  */
 
 /**
@@ -821,12 +845,16 @@ export function saveStreamingCredentials(body) {
 	});
 }
 
-/** Spotify OAuth start — loopback redirect (127.0.0.1) so Pi musync.local UI still works. */
+/**
+ * Spotify OAuth start. Honors MUSYNC_SPOTIFY_REDIRECT_URI when it is Spotify-legal
+ * (https://… or http://127.0.0.1:…). Never uses http://LAN-IP (Dashboard rejects it).
+ */
 export const SPOTIFY_LOGIN_HREF = '/api/streaming/spotify/login?loopback=1';
 
 /**
  * Preflight Connect Spotify — returns authorize URL or a clear missing-env error.
- * Defaults to loopback=1 (127.0.0.1 callback). Pass `{ loopback: false }` for LAN Host.
+ * Defaults to loopback=1; HTTPS env override still wins. Pass `{ loopback: false }`
+ * only for request-Host derivation (LAN http is rewritten to 127.0.0.1).
  * @param {{ loopback?: boolean }} [opts]
  * @returns {Promise<{ ok: boolean, url?: string, error?: string, redirect_uri?: string, loopback?: boolean }>}
  */

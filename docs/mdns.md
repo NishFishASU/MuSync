@@ -10,12 +10,17 @@ Hostname is always the label **`musync`** (→ `musync.local`) — not `Mu.Sync`
 
 ## Spotify OAuth — not mDNS
 
-Spotify **forbids** `localhost` and `*.local` redirect URIs. Register **`127.0.0.1`** callbacks only (both ports on one Dashboard app):
+Spotify **forbids** `localhost`, `*.local`, and plain `http://<LAN-IP>` redirect URIs
+(Dashboard: **Invalid redirect URI**). Register **`127.0.0.1`** and/or **`https://`**
+callbacks only:
 
 - `http://127.0.0.1:8080/api/streaming/spotify/callback` — **Pi + laptop default** (`MUSYNC_PORT=8080`)
 - `http://127.0.0.1:8081/api/streaming/spotify/callback` — laptop override when 8080 is busy
+- `https://….trycloudflare.com/api/streaming/spotify/callback` — phone / off-Pi (Cloudflare Tunnel)
 
-Pi keeps `:8080` via `run_pi.sh` / systemd. Optional Pi LAN OAuth from another device: `http://<Pi-IP>:8080/api/streaming/spotify/callback` (IP, not musync.local).
+Pi keeps `:8080` via `run_pi.sh` / systemd. Open the UI at `http://musync.local:8080` or
+`http://<Pi-IP>:8080` — those hosts are **not** Spotify OAuth redirects (use SSH `-L` or
+an HTTPS tunnel; see [spotify-apple.md](spotify-apple.md)).
 
 Details: [spotify-apple.md](./spotify-apple.md).
 

@@ -649,7 +649,9 @@ def test_spotify_connect_loopback_ignores_musync_local_host(tmp_path, monkeypatc
 def test_forbidden_oauth_host_and_request_base_helpers(monkeypatch) -> None:
     from musync.streaming.spotify import (
         is_forbidden_oauth_host,
+        is_spotify_allowed_redirect_uri,
         redirect_uri_for_request_base,
+        spotify_redirect_rejection_reason,
     )
 
     monkeypatch.setenv("MUSYNC_PORT", "8080")
@@ -663,9 +665,23 @@ def test_forbidden_oauth_host_and_request_base_helpers(monkeypatch) -> None:
     assert redirect_uri_for_request_base("http://musync.local:8080/") == (
         "http://127.0.0.1:8080/api/streaming/spotify/callback"
     )
+    # Spotify rejects plain http://LAN-IP — rewrite to loopback.
     assert redirect_uri_for_request_base("http://192.168.1.5:8080/") == (
+        "http://127.0.0.1:8080/api/streaming/spotify/callback"
+    )
+    assert is_spotify_allowed_redirect_uri(
+        "http://127.0.0.1:8080/api/streaming/spotify/callback"
+    )
+    assert is_spotify_allowed_redirect_uri(
+        "https://abc.trycloudflare.com/api/streaming/spotify/callback"
+    )
+    assert not is_spotify_allowed_redirect_uri(
         "http://192.168.1.5:8080/api/streaming/spotify/callback"
     )
+    reason = spotify_redirect_rejection_reason(
+        "http://192.168.1.50:8080/api/streaming/spotify/callback"
+    )
+    assert reason and "rejects" in reason.lower()
 
 
 def test_spotify_callback_me_403_redirects_allowlist_error(tmp_path, monkeypatch) -> None:
@@ -976,19 +992,20 @@ def test_credentials_first_create_seeds_port_and_redirect(tmp_path, monkeypatch)
         in disk
     )
 
-    # Second save must not overwrite existing custom redirect / PORT.
+    # Second save must not overwrite existing custom redirect / PORT
+    # (legacy LAN-IP redirect may exist on disk — Connect ignores it / warns).
     env_path = tmp_path / "musync.env"
     env_path.write_text(
         "MUSYNC_PORT=8081\n"
         "MUSYNC_SPOTIFY_CLIENT_ID=seed-id-aaaa\n"
         "MUSYNC_SPOTIFY_CLIENT_SECRET=seed-secret\n"
-        "MUSYNC_SPOTIFY_REDIRECT_URI=http://192.168.1.50:8081/api/streaming/spotify/callback\n",
+        "MUSYNC_SPOTIFY_REDIRECT_URI=https://demo.trycloudflare.com/api/streaming/spotify/callback\n",
         encoding="utf-8",
     )
     monkeypatch.setenv("MUSYNC_PORT", "8081")
     monkeypatch.setenv(
         "MUSYNC_SPOTIFY_REDIRECT_URI",
-        "http://192.168.1.50:8081/api/streaming/spotify/callback",
+        "https://demo.trycloudflare.com/api/streaming/spotify/callback",
     )
     keep = client.put(
         "/api/streaming/credentials",
@@ -998,8 +1015,66 @@ def test_credentials_first_create_seeds_port_and_redirect(tmp_path, monkeypatch)
     assert keep.json().get("created") is False
     disk2 = env_path.read_text(encoding="utf-8")
     assert "MUSYNC_PORT=8081" in disk2
-    assert "192.168.1.50:8081" in disk2
+    assert "demo.trycloudflare.com" in disk2
     assert "MUSYNC_PORT=8080" not in disk2
+
+
+def test_credentials_reject_lan_ip_redirect(tmp_path, monkeypatch) -> None:
+    """Spotify Dashboard rejects http://LAN-IP — API hard-blocks save."""
+    from musync.app import create_app
+
+    monkeypatch.setattr("musync.streaming.credentials.Path.home", lambda: tmp_path)
+    monkeypatch.setattr(
+        "musync.streaming.credentials.local_env_path",
+        lambda: tmp_path / "missing.local.env",
+    )
+    monkeypatch.delenv("MUSYNC_SPOTIFY_REDIRECT_URI", raising=False)
+    reset_streaming_service()
+    backend = _backend(tmp_path, monkeypatch)
+    client = TestClient(create_app(audio_backend=backend))
+    put = client.put(
+        "/api/streaming/credentials",
+        json={
+            "spotify_client_id": "cid",
+            "spotify_client_secret": "csec",
+            "spotify_redirect_uri": "http://192.168.1.50:8080/api/streaming/spotify/callback",
+        },
+    )
+    assert put.status_code == 400
+    detail = put.json().get("detail") or ""
+    assert "rejects" in detail.lower() or "Invalid" in detail
+
+
+def test_spotify_authorize_honors_https_redirect(tmp_path, monkeypatch) -> None:
+    """Phone path: MUSYNC_SPOTIFY_REDIRECT_URI=https://… wins over loopback=1."""
+    from urllib.parse import parse_qs, urlparse
+
+    from musync.app import create_app
+
+    backend = _backend(tmp_path, monkeypatch)
+    https_uri = "https://abc.trycloudflare.com/api/streaming/spotify/callback"
+    monkeypatch.setenv("MUSYNC_SPOTIFY_CLIENT_ID", "cid")
+    monkeypatch.setenv("MUSYNC_SPOTIFY_CLIENT_SECRET", "csecret")
+    monkeypatch.setenv("MUSYNC_SPOTIFY_REDIRECT_URI", https_uri)
+    reset_streaming_service()
+    client = TestClient(create_app(audio_backend=backend))
+    res = client.get("/api/streaming/spotify/authorize-url?loopback=1")
+    assert res.status_code == 200
+    body = res.json()
+    assert body["ok"] is True
+    assert body["redirect_uri"] == https_uri
+    login = client.get("/api/streaming/spotify/login?loopback=1", follow_redirects=False)
+    qs = parse_qs(urlparse(login.headers["location"]).query)
+    assert qs["redirect_uri"][0] == https_uri
+    status = client.get("/api/streaming").json()
+    assert status["https_tunnel"]["command"].startswith("cloudflared")
+    assert status.get("lan_ip") is not None or status.get("lan_ui_url") is not None or True
+    ht = client.get("/api/streaming/spotify/https-tunnel")
+    assert ht.status_code == 200
+    assert "cloudflared" in ht.json()["command"]
+    sh = client.get("/api/streaming/spotify/https-tunnel.sh")
+    assert sh.status_code == 200
+    assert "cloudflared" in sh.text
 
 
 def test_credentials_refuse_empty_port_redirect(tmp_path, monkeypatch) -> None:

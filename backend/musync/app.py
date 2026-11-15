@@ -18,6 +18,10 @@ from .audio import AudioBackend, create_backend
 from .config import media_library_path, resolve_media_file, web_root
 from .lan_url import enrich_wifi_status, lan_ui_url, svg_qr
 from .mdns import get_mdns_status, start_hub_mdns, stop_hub_mdns
+from .streaming.https_tunnel import (
+    bash_https_tunnel_script,
+    build_https_tunnel_info,
+)
 from .streaming.spotify import default_redirect_uri
 from .streaming.ssh_tunnel import (
     bash_tunnel_script,
@@ -48,6 +52,7 @@ from .models import (
     QueueItemPatch,
     Source,
     SourceType,
+    SpotifyHttpsTunnelInfo,
     SpotifySshTunnelInfo,
     StreamingCredentialsPut,
     StreamingCredentialsStatus,
@@ -478,9 +483,15 @@ def _ssh_tunnel_info(host: str | None = None) -> SpotifySshTunnelInfo:
     )
 
 
+def _https_tunnel_info() -> SpotifyHttpsTunnelInfo:
+    """Cloudflare / HTTPS tunnel helper for phone Spotify Connect."""
+    return SpotifyHttpsTunnelInfo.model_validate(build_https_tunnel_info())
+
+
 def _streaming_status_with_airplay() -> StreamingStatus:
     """Spotify + AirPlay status; enrich AirPlay from live input hosts when possible."""
     from .audio.input_registry import host_is_live
+    from .lan_url import hub_port, pick_lan_ip
     from .models import CapturePath
 
     discovered = None
@@ -506,6 +517,11 @@ def _streaming_status_with_airplay() -> StreamingStatus:
         airplay_host_name=host_name,
     )
     status.ssh_tunnel = _ssh_tunnel_info()
+    status.https_tunnel = _https_tunnel_info()
+    ips = _wifi_ips_for_tunnel()
+    lan = pick_lan_ip(ips)
+    status.lan_ip = lan or None
+    status.lan_ui_url = lan_ui_url(ips, port=hub_port()) or None
     return status
 
 
@@ -529,22 +545,26 @@ def api_streaming_credentials_put(
 
     Soft-fails on empty body (no write). Applies to process env immediately
     so Connect / YouTube search work without a restart when possible.
+    Rejects Spotify-illegal ``http://<LAN-IP>`` redirects (Dashboard Invalid URI).
     """
     from .streaming.service import reset_streaming_service
 
-    result = save_streaming_credentials(
-        spotify_client_id=body.spotify_client_id,
-        spotify_client_secret=body.spotify_client_secret,
-        spotify_redirect_uri=body.spotify_redirect_uri,
-        youtube_api_key=body.youtube_api_key,
-    )
+    try:
+        result = save_streaming_credentials(
+            spotify_client_id=body.spotify_client_id,
+            spotify_client_secret=body.spotify_client_secret,
+            spotify_redirect_uri=body.spotify_redirect_uri,
+            youtube_api_key=body.youtube_api_key,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     # Rebuild clients so configured()/auth_url pick up new env.
     reset_streaming_service()
     return StreamingCredentialsStatus.model_validate(result)
 
 
 def _spotify_loopback_requested(request: Request) -> bool:
-    """UI Connect defaults to loopback; ``?loopback=0`` uses env / LAN Host when allowed."""
+    """UI Connect defaults to loopback; ``?loopback=0`` uses env / request base."""
     raw = (request.query_params.get("loopback") or "1").strip().lower()
     return raw not in {"0", "false", "no", "off"}
 
@@ -552,36 +572,31 @@ def _spotify_loopback_requested(request: Request) -> bool:
 def _spotify_redirect_uri(request: Request) -> str:
     """Resolve the OAuth redirect URI Spotify will call back to.
 
-    - ``?loopback=1`` (default for Connect): always host ``127.0.0.1`` (never
-      ``musync.local`` / LAN). Port from loopback env redirect or ``MUSYNC_PORT``.
-    - ``?loopback=0``: ``MUSYNC_SPOTIFY_REDIRECT_URI`` if set (forbidden hosts
-      rewritten), else request Host (forbidden → loopback).
+    - ``MUSYNC_SPOTIFY_REDIRECT_URI`` that is Spotify-legal always wins:
+      ``https://…`` (phone / Cloudflare Tunnel) or ``http://127.0.0.1:…``.
+    - ``?loopback=1`` (default Connect): otherwise ``http://127.0.0.1:<port>/…``.
+    - ``?loopback=0``: env if set, else request Host rewritten (LAN http → loopback;
+      Spotify rejects plain ``http://<LAN-IP>``).
 
-    Never returns ``http://host:/path`` (empty port).
+    Never returns ``http://host:/path`` (empty port) or ``http://<LAN-IP>``.
     """
     import os
-    from urllib.parse import urlparse
 
     from .streaming.spotify import (
-        _CALLBACK_PATH,
-        default_redirect_uri,
-        normalize_spotify_redirect_uri,
+        effective_oauth_redirect_uri,
         redirect_uri_for_request_base,
-        _redirect_uri as env_redirect_uri,
     )
 
+    configured = (os.environ.get("MUSYNC_SPOTIFY_REDIRECT_URI") or "").strip()
+    if configured:
+        # HTTPS tunnel or loopback env — honor for Connect (phone + laptop).
+        return effective_oauth_redirect_uri(
+            prefer_loopback=_spotify_loopback_requested(request)
+        )
+
     if _spotify_loopback_requested(request):
-        configured = (os.environ.get("MUSYNC_SPOTIFY_REDIRECT_URI") or "").strip()
-        if configured:
-            fixed = normalize_spotify_redirect_uri(configured)
-            host = (urlparse(fixed).hostname or "").lower()
-            port = urlparse(fixed).port
-            if host in {"127.0.0.1", "::1", "[::1]"} and port:
-                return f"http://127.0.0.1:{port}{_CALLBACK_PATH}"
         return default_redirect_uri()
 
-    if (os.environ.get("MUSYNC_SPOTIFY_REDIRECT_URI") or "").strip():
-        return env_redirect_uri()
     return redirect_uri_for_request_base(str(request.base_url))
 
 
@@ -589,9 +604,10 @@ def _spotify_redirect_uri(request: Request) -> str:
 def api_spotify_login(request: Request) -> RedirectResponse:
     """Link-style OAuth: redirect browser to Spotify authorize → callback → tokens.
 
-    Defaults to **loopback** redirect (``127.0.0.1``) so Pi + musync.local UI still
-    matches the Spotify Dashboard URI used on the laptop mock. Pass ``?loopback=0``
-    to derive from Host (Pi LAN IP) when that URI is registered in the Dashboard.
+    Uses ``MUSYNC_SPOTIFY_REDIRECT_URI`` when it is Spotify-legal (``https://…`` or
+    ``http://127.0.0.1:…``). Otherwise loopback. Never uses ``http://<LAN-IP>`` —
+    Spotify rejects that as Invalid redirect URI. Pass ``?loopback=0`` only to
+    derive from request Host (still rewritten off forbidden / LAN http hosts).
     """
     from urllib.parse import quote
 
@@ -746,6 +762,27 @@ def api_spotify_ssh_tunnel_ps1(
         media_type="text/plain",
         headers={
             "Content-Disposition": 'attachment; filename="musync-spotify-ssh-tunnel.ps1"',
+            "Cache-Control": "no-store",
+        },
+    )
+
+
+@app.get("/api/streaming/spotify/https-tunnel", response_model=SpotifyHttpsTunnelInfo)
+def api_spotify_https_tunnel() -> SpotifyHttpsTunnelInfo:
+    """JSON helper: cloudflared steps for phone Spotify Connect (HTTPS redirect)."""
+    return _https_tunnel_info()
+
+
+@app.get("/api/streaming/spotify/https-tunnel.sh")
+def api_spotify_https_tunnel_sh() -> Response:
+    """Downloadable bash script that starts a Cloudflare quick tunnel to the hub."""
+    info = _https_tunnel_info()
+    body = bash_https_tunnel_script(port=info.port)
+    return Response(
+        content=body,
+        media_type="text/x-shellscript",
+        headers={
+            "Content-Disposition": 'attachment; filename="musync-spotify-https-tunnel.sh"',
             "Cache-Control": "no-store",
         },
     )

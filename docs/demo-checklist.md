@@ -18,7 +18,7 @@ export MUSYNC_BACKEND=pipewire
 ./scripts/run_pi.sh
 ```
 
-`run_pi.sh` clears stray `ffmpeg` on the SPP port, uses `.venv`, prints preflight READY/MISSING lines, and prints an HDMI/console **LAN URL + printable QR** (`http://<Pi-IP>:8080`). Open that URL, scan the QR, or use `http://musync.local:8080` (mDNS UI). Spotify OAuth still needs `127.0.0.1` redirect URIs — not `musync.local` ([spotify-apple.md](spotify-apple.md), [mdns.md](mdns.md), [wifi-join.md](wifi-join.md)).
+`run_pi.sh` clears stray `ffmpeg` on the SPP port, uses `.venv`, prints preflight READY/MISSING lines, and prints an HDMI/console **LAN URL + printable QR** (`http://<Pi-IP>:8080`). Open that URL, scan the QR, or use `http://musync.local:8080` (mDNS UI). Spotify OAuth needs `127.0.0.1` (SSH tunnel) or `https://…` (Cloudflare Tunnel) — not `musync.local` or plain `http://<Pi-IP>` ([spotify-apple.md](spotify-apple.md), [mdns.md](mdns.md), [wifi-join.md](wifi-join.md)).
 
 ## Device setup (once per reboot if sinks look MISSING)
 

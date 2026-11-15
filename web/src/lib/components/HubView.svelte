@@ -173,7 +173,9 @@
 	let credMessage = $state('');
 	let guidesOpen = $state(false);
 	let tunnelOpen = $state(true);
+	let httpsTunnelOpen = $state(false);
 	let tunnelCopyMessage = $state('');
+	let httpsCopyMessage = $state('');
 
 	/** @type {Record<string, ReturnType<typeof setTimeout>>} */
 	const patchTimers = {};
@@ -207,6 +209,45 @@
 	);
 	const sshTunnelOpenUrl = $derived(
 		sshTunnel?.open_url || `http://127.0.0.1:${wifi?.port || 8080}/streaming/`
+	);
+	/** Cloudflare / HTTPS tunnel helper for phone Spotify Connect. */
+	const httpsTunnel = $derived(streaming?.https_tunnel ?? null);
+	const httpsTunnelCommand = $derived(
+		httpsTunnel?.command ||
+			`cloudflared tunnel --url http://127.0.0.1:${wifi?.port || 8080}`
+	);
+	const piLanIp = $derived(
+		streaming?.lan_ip || streamCreds?.lan_ip || wifi?.ips?.[0] || ''
+	);
+	const piLanUiUrl = $derived(
+		streaming?.lan_ui_url || streamCreds?.lan_ui_url || wifiLanUrl || ''
+	);
+	const oauthLoopbackUri = $derived(
+		streamCreds?.oauth_loopback_uri ||
+			streaming?.spotify?.oauth_loopback_uri ||
+			`http://127.0.0.1:${wifi?.port || 8080}/api/streaming/spotify/callback`
+	);
+	/** Client-side guess: Spotify rejects plain http://LAN-IP redirects. */
+	const redirectUriLanWarn = $derived(
+		(() => {
+			const u = credRedirectUri.trim();
+			if (!u) return '';
+			try {
+				const parsed = new URL(u);
+				if (parsed.protocol === 'https:') return '';
+				const h = parsed.hostname;
+				if (h === '127.0.0.1' || h === '::1') return '';
+				if (h === 'localhost' || h.endsWith('.local')) {
+					return 'Spotify forbids localhost / *.local — use 127.0.0.1 or https://…';
+				}
+				if (parsed.protocol === 'http:') {
+					return `Spotify rejects http://${h} redirects (Invalid redirect URI). Use 127.0.0.1 + SSH tunnel, or an https:// Cloudflare tunnel URI. Pi IP is for the UI only.`;
+				}
+			} catch {
+				return '';
+			}
+			return '';
+		})()
 	);
 	const onLoopbackHost = $derived(
 		typeof window !== 'undefined' &&
@@ -690,6 +731,11 @@
 			credBusy = false;
 			return;
 		}
+		if (redirectUriLanWarn) {
+			credMessage = redirectUriLanWarn;
+			credBusy = false;
+			return;
+		}
 		if (id) body.spotify_client_id = id;
 		if (secret) body.spotify_client_secret = secret;
 		if (redirect) body.spotify_redirect_uri = redirect;
@@ -715,6 +761,21 @@
 			credMessage = err instanceof Error ? err.message : String(err);
 		} finally {
 			credBusy = false;
+		}
+	}
+
+	function useLoopbackRedirect() {
+		credRedirectUri = oauthLoopbackUri;
+		credMessage = 'Prefill loopback redirect — register the same URI in Spotify Dashboard.';
+	}
+
+	async function onCopyHttpsTunnel() {
+		httpsCopyMessage = '';
+		try {
+			await navigator.clipboard.writeText(httpsTunnelCommand);
+			httpsCopyMessage = 'Copied cloudflared command';
+		} catch {
+			httpsCopyMessage = httpsTunnelCommand;
 		}
 	}
 
@@ -2640,11 +2701,31 @@
 							type="url"
 							autocomplete="off"
 							spellcheck="false"
-							placeholder="http://&lt;Pi-IP&gt;:8080/api/streaming/spotify/callback"
+							placeholder={oauthLoopbackUri}
 							bind:value={credRedirectUri}
 							aria-label="Spotify redirect URI"
+							aria-invalid={redirectUriLanWarn ? 'true' : undefined}
 						/>
 					</label>
+					<div class="cred-redirect-actions">
+						<button type="button" class="btn btn-ghost btn-small" onclick={() => useLoopbackRedirect()}>
+							Use 127.0.0.1 (SSH / on-Pi)
+						</button>
+						{#if piLanIp}
+							<span class="hint muted lan-ip-note" title="UI and SPP only — not for Spotify OAuth">
+								Pi LAN: <code>{piLanIp}</code>
+								{#if piLanUiUrl}
+									· UI <a href={piLanUiUrl}>{piLanUiUrl}</a>
+								{/if}
+								— Spotify rejects <code>http://{piLanIp}/…</code>
+							</span>
+						{/if}
+					</div>
+					{#if redirectUriLanWarn || streamCreds?.redirect_uri_warning}
+						<p class="hint stream-error" role="alert">
+							{redirectUriLanWarn || streamCreds?.redirect_uri_warning}
+						</p>
+					{/if}
 					<label class="cred-field">
 						<span>YouTube Data API key</span>
 						<input
@@ -2690,14 +2771,17 @@
 								</li>
 								<li>Copy <em>Client ID</em> and <em>Client Secret</em> into the fields above</li>
 								<li>
-									Dashboard redirect URIs (register <em>both</em>; Spotify forbids
-									<code>localhost</code> / <code>musync.local</code>):
+									Dashboard redirect URIs — Spotify allows only
+									<code>http://127.0.0.1:&lt;port&gt;/…</code> or
+									<code>https://…</code> (not <code>localhost</code>,
+									<code>musync.local</code>, or plain <code>http://&lt;Pi-IP&gt;</code>).
+									Register both loopbacks:
 									<code>http://127.0.0.1:8080/api/streaming/spotify/callback</code>
 									and
 									<code>http://127.0.0.1:8081/api/streaming/spotify/callback</code>.
-									Set env to the API port you run (not Vite :5173). UI may use
-									<code>http://musync.local:8080</code> — OAuth still needs
-									<code>127.0.0.1</code> or Pi IP.
+									Phone Connect: add your Cloudflare
+									<code>https://….trycloudflare.com/api/streaming/spotify/callback</code>.
+									Pi LAN IP is for opening the UI only.
 								</li>
 								<li>Save here → <strong>Connect Spotify</strong> below → search on Queue</li>
 							</ol>
@@ -2724,7 +2808,7 @@
 			</section>
 
 			<details class="ssh-tunnel-panel cred-guides" bind:open={tunnelOpen}>
-				<summary>Connect from laptop (SSH tunnel)</summary>
+				<summary>Connect from laptop (SSH tunnel — zero cost)</summary>
 				{#if onLoopbackHost}
 					<p class="hint muted">
 						You are already on <code>127.0.0.1</code> — Connect Spotify here without a tunnel
@@ -2733,7 +2817,10 @@
 				{:else}
 					<p class="hint muted">
 						Spotify OAuth callback is loopback (<code>127.0.0.1</code>), not
-						<code>musync.local</code>. Tunnel the Pi port to this laptop, then Connect.
+						<code>musync.local</code> / Pi IP. Tunnel the Pi port to this laptop, then Connect.
+						{#if piLanIp}
+							Pi LAN (UI only): <code>{piLanIp}</code>.
+						{/if}
 					</p>
 				{/if}
 				<ol class="ssh-tunnel-steps">
@@ -2772,6 +2859,51 @@
 				{/if}
 				{#if sshTunnel?.hint}
 					<p class="hint muted">{sshTunnel.hint}</p>
+				{/if}
+			</details>
+
+			<details class="ssh-tunnel-panel https-tunnel-panel cred-guides" bind:open={httpsTunnelOpen}>
+				<summary>Connect from phone (HTTPS tunnel)</summary>
+				<p class="hint muted">
+					Spotify rejects <code>http://&lt;Pi-IP&gt;</code> redirects. Use a free Cloudflare quick
+					tunnel so the callback is <code>https://…</code>, then Save that URI here and Connect
+					from the phone while the tunnel is up.
+				</p>
+				<ol class="ssh-tunnel-steps">
+					{#each httpsTunnel?.steps?.length ? httpsTunnel.steps : [
+						`On the Pi: cloudflared tunnel --url http://127.0.0.1:${wifi?.port || 8080}`,
+						'Copy https://….trycloudflare.com from the log.',
+						'Spotify Dashboard → add https://….trycloudflare.com/api/streaming/spotify/callback',
+						'Paste that full callback into Spotify redirect URI above → Save.',
+						'Keep tunnel up → Connect Spotify on the phone (hotspot UI URL is fine).'
+					] as step}
+						<li>{step}</li>
+					{/each}
+				</ol>
+				<div class="ssh-tunnel-cmd-row">
+					<code class="ssh-tunnel-cmd">{httpsTunnelCommand}</code>
+					<button
+						type="button"
+						class="btn btn-ghost btn-small wifi-copy-btn"
+						onclick={() => onCopyHttpsTunnel()}
+					>
+						Copy
+					</button>
+				</div>
+				<p class="hint muted ssh-tunnel-links">
+					Optional:
+					<a href={httpsTunnel?.script_sh || '/api/streaming/spotify/https-tunnel.sh'} download
+						>Download .sh</a
+					>
+					· <code>scripts/spotify_oauth_https_tunnel.sh</code>
+					· example redirect
+					<code>{httpsTunnel?.example_redirect_uri || 'https://YOUR-SUBDOMAIN.trycloudflare.com/api/streaming/spotify/callback'}</code>
+				</p>
+				{#if httpsCopyMessage}
+					<p class="hint" role="status">{httpsCopyMessage}</p>
+				{/if}
+				{#if httpsTunnel?.hint}
+					<p class="hint muted">{httpsTunnel.hint}</p>
 				{/if}
 			</details>
 
@@ -2841,9 +2973,18 @@
 						</p>
 					{/if}
 					<p class="hint muted scopes-line">
-						OAuth callback (Connect = loopback):
-						<code>{streaming?.spotify?.oauth_loopback_uri || streaming?.spotify?.redirect_uri || 'http://127.0.0.1:8080/api/streaming/spotify/callback'}</code>
+						OAuth callback (effective):
+						<code>{streaming?.spotify?.redirect_uri || oauthLoopbackUri}</code>
+						{#if streaming?.spotify?.oauth_loopback_uri && streaming?.spotify?.redirect_uri !== streaming?.spotify?.oauth_loopback_uri}
+							· loopback fallback <code>{streaming.spotify.oauth_loopback_uri}</code>
+						{/if}
 					</p>
+					{#if piLanUiUrl}
+						<p class="hint muted scopes-line">
+							Pi UI (not for Spotify redirect):
+							<a href={piLanUiUrl}><code>{piLanUiUrl}</code></a>
+						</p>
+					{/if}
 					<p class="hint muted">
 						librespot:
 						<span

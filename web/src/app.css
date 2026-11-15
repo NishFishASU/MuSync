@@ -827,6 +827,23 @@ body {
 	align-items: center;
 }
 
+.cred-redirect-actions {
+	grid-column: 1 / -1;
+	display: flex;
+	flex-wrap: wrap;
+	gap: 0.55rem;
+	align-items: center;
+}
+
+.cred-redirect-actions .lan-ip-note {
+	margin: 0;
+	flex: 1 1 200px;
+}
+
+.cred-field input[aria-invalid='true'] {
+	border-color: color-mix(in srgb, var(--danger, #e07070) 70%, var(--line));
+}
+
 .cred-guides {
 	margin-top: 0.75rem;
 	font-size: 0.85rem;
