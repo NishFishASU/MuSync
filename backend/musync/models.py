@@ -616,6 +616,8 @@ class StreamingCredentialsStatus(BaseModel):
     youtube_configured: bool = False
     updated_keys: list[str] = Field(default_factory=list)
     saved: bool = False
+    # True only when this PUT created ~/musync.env (seeded PORT + redirect).
+    created: bool = False
 
 
 class StreamingCredentialsPut(BaseModel):

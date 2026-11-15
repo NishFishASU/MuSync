@@ -8,10 +8,18 @@ if (-not $Root) { $Root = (Resolve-Path "$PSScriptRoot\..").Path }
 $env:PYTHONPATH = if ($env:PYTHONPATH) { "$Root\backend;$env:PYTHONPATH" } else { "$Root\backend" }
 $env:MUSYNC_BACKEND = if ($env:MUSYNC_BACKEND) { $env:MUSYNC_BACKEND } else { "mock" }
 $env:MUSYNC_HOST = if ($env:MUSYNC_HOST) { $env:MUSYNC_HOST } else { "127.0.0.1" }
-$env:MUSYNC_PORT = if ($env:MUSYNC_PORT) { $env:MUSYNC_PORT } else { "8080" }
+# Refuse empty MUSYNC_PORT (would build http://127.0.0.1:/…).
+if (-not $env:MUSYNC_PORT) { $env:MUSYNC_PORT = "8080" }
 $env:MUSYNC_WEB_DIR = if ($env:MUSYNC_WEB_DIR) { $env:MUSYNC_WEB_DIR } else { "$Root\web\build" }
 
 Set-Location $Root
+
+# Refuse empty-port Spotify redirect from env (host:/path).
+$redir = $env:MUSYNC_SPOTIFY_REDIRECT_URI
+if ($redir -and ($redir -match '://[^/]+:/' -or $redir -match '://[^/]+:$')) {
+  Write-Host "  warn:    refusing empty-port Spotify redirect — using 127.0.0.1:$($env:MUSYNC_PORT)"
+  $env:MUSYNC_SPOTIFY_REDIRECT_URI = "http://127.0.0.1:$($env:MUSYNC_PORT)/api/streaming/spotify/callback"
+}
 
 if (-not (Test-Path "$env:MUSYNC_WEB_DIR\index.html")) {
   Write-Host "UI not built — run: cd web; npm ci; npm run build"

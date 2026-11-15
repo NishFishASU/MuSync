@@ -664,8 +664,15 @@
 		const body = {};
 		const id = credClientId.trim();
 		const secret = credClientSecret.trim();
-		const redirect = credRedirectUri.trim();
+		let redirect = credRedirectUri.trim();
 		const yt = credYoutubeKey.trim();
+		// Refuse empty port (http://host:/path) — backend also normalizes.
+		if (redirect && /:\/\/[^/]+:\//.test(redirect)) {
+			credMessage =
+				'Redirect URI has an empty port (host:/path) — use :8080 (or your MUSYNC_PORT).';
+			credBusy = false;
+			return;
+		}
 		if (id) body.spotify_client_id = id;
 		if (secret) body.spotify_client_secret = secret;
 		if (redirect) body.spotify_redirect_uri = redirect;

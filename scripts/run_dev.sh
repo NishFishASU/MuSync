@@ -5,7 +5,10 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 export PYTHONPATH="${ROOT}/backend${PYTHONPATH:+:$PYTHONPATH}"
 export MUSYNC_BACKEND="${MUSYNC_BACKEND:-mock}"
 export MUSYNC_HOST="${MUSYNC_HOST:-127.0.0.1}"
-export MUSYNC_PORT="${MUSYNC_PORT:-8080}"
+# Refuse empty MUSYNC_PORT (would build http://127.0.0.1:/…).
+if [[ -z "${MUSYNC_PORT:-}" ]]; then
+  export MUSYNC_PORT=8080
+fi
 export MUSYNC_WEB_DIR="${MUSYNC_WEB_DIR:-$ROOT/web/build}"
 cd "$ROOT"
 
@@ -17,6 +20,18 @@ for envfile in "$HOME/musync.env" "$ROOT/config/streaming.local.env"; do
     echo "  env:      loaded $envfile"
   fi
 done
+
+# After env files: refuse empty port / host:/path.
+if [[ -z "${MUSYNC_PORT:-}" ]]; then
+  echo "  warn:     MUSYNC_PORT empty after env load — forcing 8080"
+  export MUSYNC_PORT=8080
+fi
+_redir="${MUSYNC_SPOTIFY_REDIRECT_URI:-}"
+if [[ -n "$_redir" ]] && { [[ "$_redir" =~ ://[^/]+:/ ]] || [[ "$_redir" =~ ://[^/]+:$ ]]; }; then
+  echo "  warn:     refusing empty-port Spotify redirect — using 127.0.0.1:${MUSYNC_PORT}"
+  export MUSYNC_SPOTIFY_REDIRECT_URI="http://127.0.0.1:${MUSYNC_PORT}/api/streaming/spotify/callback"
+fi
+unset _redir
 
 if [[ ! -f "$MUSYNC_WEB_DIR/index.html" ]]; then
   echo "UI not built — running ./scripts/build_web.sh"

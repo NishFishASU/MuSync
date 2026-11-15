@@ -850,6 +850,9 @@ def test_credentials_api_masks_secrets_and_persists(tmp_path, monkeypatch) -> No
     assert "MUSYNC_SPOTIFY_CLIENT_SECRET=" in disk
     assert secret in disk  # on disk only — never in API
     assert yt_key in disk
+    # First create seeds MUSYNC_PORT (caller also sent redirect → keep theirs).
+    assert "MUSYNC_PORT=8080" in disk
+    assert saved.get("created") is True
 
     # Process env applied; status reflects configured
     status = client.get("/api/streaming")
@@ -860,7 +863,7 @@ def test_credentials_api_masks_secrets_and_persists(tmp_path, monkeypatch) -> No
     assert secret not in status.text
     assert yt_key not in status.text
 
-    # Blank secret field omitted → keep existing
+    # Blank secret field omitted → keep existing; do NOT re-seed / overwrite PORT
     keep = client.put(
         "/api/streaming/credentials",
         json={"spotify_client_id": "rotated-id-9999"},
@@ -869,6 +872,128 @@ def test_credentials_api_masks_secrets_and_persists(tmp_path, monkeypatch) -> No
     assert os.environ["MUSYNC_SPOTIFY_CLIENT_SECRET"] == secret
     assert "9999" in keep.json()["spotify_client_id"]["masked"]
     assert secret not in keep.text
+    assert keep.json().get("created") is False
+    disk2 = env_file.read_text(encoding="utf-8")
+    assert disk2.count("MUSYNC_PORT=") == 1
+    assert "MUSYNC_PORT=8080" in disk2
+
+
+def test_credentials_first_create_seeds_port_and_redirect(tmp_path, monkeypatch) -> None:
+    """New musync.env gets MUSYNC_PORT=8080 + redirect; existing file untouched."""
+    from musync.app import create_app
+
+    monkeypatch.setattr("musync.streaming.credentials.Path.home", lambda: tmp_path)
+    monkeypatch.setattr(
+        "musync.streaming.credentials.local_env_path",
+        lambda: tmp_path / "missing.local.env",
+    )
+    monkeypatch.delenv("MUSYNC_SPOTIFY_CLIENT_ID", raising=False)
+    monkeypatch.delenv("MUSYNC_SPOTIFY_CLIENT_SECRET", raising=False)
+    monkeypatch.delenv("MUSYNC_SPOTIFY_REDIRECT_URI", raising=False)
+    monkeypatch.delenv("MUSYNC_PORT", raising=False)
+    reset_streaming_service()
+
+    backend = _backend(tmp_path, monkeypatch)
+    client = TestClient(create_app(audio_backend=backend))
+
+    # First save without redirect → seed both PORT and default redirect.
+    put = client.put(
+        "/api/streaming/credentials",
+        json={"spotify_client_id": "seed-id-aaaa", "spotify_client_secret": "seed-secret"},
+    )
+    assert put.status_code == 200
+    body = put.json()
+    assert body["saved"] is True
+    assert body["created"] is True
+    disk = (tmp_path / "musync.env").read_text(encoding="utf-8")
+    assert "MUSYNC_PORT=8080" in disk
+    assert (
+        "MUSYNC_SPOTIFY_REDIRECT_URI=http://127.0.0.1:8080/api/streaming/spotify/callback"
+        in disk
+    )
+
+    # Second save must not overwrite existing custom redirect / PORT.
+    env_path = tmp_path / "musync.env"
+    env_path.write_text(
+        "MUSYNC_PORT=8081\n"
+        "MUSYNC_SPOTIFY_CLIENT_ID=seed-id-aaaa\n"
+        "MUSYNC_SPOTIFY_CLIENT_SECRET=seed-secret\n"
+        "MUSYNC_SPOTIFY_REDIRECT_URI=http://192.168.1.50:8081/api/streaming/spotify/callback\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("MUSYNC_PORT", "8081")
+    monkeypatch.setenv(
+        "MUSYNC_SPOTIFY_REDIRECT_URI",
+        "http://192.168.1.50:8081/api/streaming/spotify/callback",
+    )
+    keep = client.put(
+        "/api/streaming/credentials",
+        json={"spotify_client_id": "seed-id-bbbb"},
+    )
+    assert keep.status_code == 200
+    assert keep.json().get("created") is False
+    disk2 = env_path.read_text(encoding="utf-8")
+    assert "MUSYNC_PORT=8081" in disk2
+    assert "192.168.1.50:8081" in disk2
+    assert "MUSYNC_PORT=8080" not in disk2
+
+
+def test_credentials_refuse_empty_port_redirect(tmp_path, monkeypatch) -> None:
+    """Saving host:/path normalizes to explicit listen port — never persist empty port."""
+    from musync.app import create_app
+
+    monkeypatch.setattr("musync.streaming.credentials.Path.home", lambda: tmp_path)
+    monkeypatch.setattr(
+        "musync.streaming.credentials.local_env_path",
+        lambda: tmp_path / "missing.local.env",
+    )
+    monkeypatch.delenv("MUSYNC_SPOTIFY_REDIRECT_URI", raising=False)
+    monkeypatch.delenv("MUSYNC_PORT", raising=False)
+    reset_streaming_service()
+
+    backend = _backend(tmp_path, monkeypatch)
+    client = TestClient(create_app(audio_backend=backend))
+    put = client.put(
+        "/api/streaming/credentials",
+        json={
+            "spotify_client_id": "cid",
+            "spotify_client_secret": "csec",
+            "spotify_redirect_uri": "http://127.0.0.1:/api/streaming/spotify/callback",
+        },
+    )
+    assert put.status_code == 200
+    body = put.json()
+    assert body["spotify_redirect_uri"]["value"] == (
+        "http://127.0.0.1:8080/api/streaming/spotify/callback"
+    )
+    disk = (tmp_path / "musync.env").read_text(encoding="utf-8")
+    assert "127.0.0.1:/" not in disk
+    assert "127.0.0.1:8080" in disk
+
+
+def test_spotify_login_never_emits_empty_port(tmp_path, monkeypatch) -> None:
+    """Authorize redirect_uri must not be http://127.0.0.1:/… even if env is bad."""
+    from urllib.parse import parse_qs, urlparse
+
+    from musync.app import create_app
+
+    backend = _backend(tmp_path, monkeypatch)
+    monkeypatch.setenv("MUSYNC_SPOTIFY_CLIENT_ID", "cid")
+    monkeypatch.setenv("MUSYNC_SPOTIFY_CLIENT_SECRET", "csecret")
+    monkeypatch.setenv(
+        "MUSYNC_SPOTIFY_REDIRECT_URI",
+        "http://127.0.0.1:/api/streaming/spotify/callback",
+    )
+    monkeypatch.setenv("MUSYNC_PORT", "")
+    reset_streaming_service()
+    client = TestClient(create_app(audio_backend=backend))
+    login = client.get("/api/streaming/spotify/login", follow_redirects=False)
+    assert login.status_code in {302, 307}
+    loc = login.headers.get("location") or ""
+    qs = parse_qs(urlparse(loc).query)
+    redir = qs.get("redirect_uri", [""])[0]
+    assert "127.0.0.1:/" not in redir
+    assert redir == "http://127.0.0.1:8080/api/streaming/spotify/callback"
 
 
 def test_mask_secret_never_echoes_raw() -> None:

@@ -84,7 +84,9 @@ profile_store: VolumeProfileStore = VolumeProfileStore()
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     """Advertise ``musync.local`` for UI LAN discovery (not Spotify OAuth)."""
-    port = int(os.environ.get("MUSYNC_PORT", "8080"))
+    from .streaming.spotify import api_listen_port
+
+    port = api_listen_port()
     start_hub_mdns(port=port)
     try:
         yield
@@ -525,19 +527,23 @@ def _spotify_redirect_uri(request: Request) -> str:
     request Host (Pi LAN IP or 127.0.0.1:PORT). Never use the Vite port
     (:5173) — callback must hit the FastAPI process (default :8080, or
     ``MUSYNC_PORT`` e.g. :8081 on Windows mock).
+
+    Always normalized — never returns ``http://host:/path`` (empty port).
     """
     import os
 
+    from .streaming.spotify import normalize_spotify_redirect_uri
+
     configured = (os.environ.get("MUSYNC_SPOTIFY_REDIRECT_URI") or "").strip()
     if configured:
-        return configured
+        return normalize_spotify_redirect_uri(configured)
     base = str(request.base_url).rstrip("/")
     # If a reverse-proxy / Vite forwarded Host is a frontend-only port, fall
     # back to the API default so Spotify dashboard URI stays on the API port.
     for bad in (":5173", ":4173"):
         if bad in base:
             return default_redirect_uri()
-    return f"{base}/api/streaming/spotify/callback"
+    return normalize_spotify_redirect_uri(f"{base}/api/streaming/spotify/callback")
 
 
 @app.get("/api/streaming/spotify/login")
