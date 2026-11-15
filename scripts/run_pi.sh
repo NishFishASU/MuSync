@@ -9,7 +9,10 @@ export PYTHONPATH="${ROOT}/backend${PYTHONPATH:+:$PYTHONPATH}"
 export MUSYNC_BACKEND="${MUSYNC_BACKEND:-pipewire}"
 export MUSYNC_HOST="${MUSYNC_HOST:-0.0.0.0}"
 # Pi default API port is always 8080 (laptop may override to 8081 — see run_dev).
-export MUSYNC_PORT="${MUSYNC_PORT:-8080}"
+# Refuse empty MUSYNC_PORT (would build http://127.0.0.1:/…).
+if [[ -z "${MUSYNC_PORT:-}" ]]; then
+  export MUSYNC_PORT=8080
+fi
 export MUSYNC_DEVICES_CONFIG="${MUSYNC_DEVICES_CONFIG:-$ROOT/config/devices.yaml}"
 export MUSYNC_MEDIA_DIR="${MUSYNC_MEDIA_DIR:-$ROOT/media}"
 export MUSYNC_WEB_DIR="${MUSYNC_WEB_DIR:-$ROOT/web/build}"
@@ -18,7 +21,8 @@ export MUSYNC_WEB_DIR="${MUSYNC_WEB_DIR:-$ROOT/web/build}"
 export MUSYNC_PW_FEEDER="${MUSYNC_PW_FEEDER:-musync_feeder}"
 # Spotify OAuth default: 127.0.0.1:8080 (Spotify forbids localhost / musync.local).
 # Dashboard should also list :8081 for laptop override; Pi keeps 8080.
-export MUSYNC_SPOTIFY_REDIRECT_URI="${MUSYNC_SPOTIFY_REDIRECT_URI:-http://127.0.0.1:8080/api/streaming/spotify/callback}"
+_DEFAULT_SPOTIFY_REDIRECT="http://127.0.0.1:${MUSYNC_PORT}/api/streaming/spotify/callback"
+export MUSYNC_SPOTIFY_REDIRECT_URI="${MUSYNC_SPOTIFY_REDIRECT_URI:-$_DEFAULT_SPOTIFY_REDIRECT}"
 
 cd "$ROOT"
 
@@ -42,6 +46,19 @@ for envfile in "$HOME/musync.env" "$ROOT/config/streaming.local.env"; do
     echo "  env:      loaded $envfile"
   fi
 done
+
+# After env files: refuse empty port / host:/path (musync.env can override badly).
+if [[ -z "${MUSYNC_PORT:-}" ]]; then
+  echo "  warn:     MUSYNC_PORT empty after env load — forcing 8080"
+  export MUSYNC_PORT=8080
+fi
+_redir="${MUSYNC_SPOTIFY_REDIRECT_URI:-}"
+# Empty port = scheme://host:/… (colon immediately before slash) or trailing host:
+if [[ -z "$_redir" || "$_redir" =~ ://[^/]+:/ || "$_redir" =~ ://[^/]+:$ ]]; then
+  echo "  warn:     refusing empty-port Spotify redirect — using 127.0.0.1:${MUSYNC_PORT}"
+  export MUSYNC_SPOTIFY_REDIRECT_URI="http://127.0.0.1:${MUSYNC_PORT}/api/streaming/spotify/callback"
+fi
+unset _redir _DEFAULT_SPOTIFY_REDIRECT
 
 echo "MuSync Pi launcher"
 echo "  backend:  $MUSYNC_BACKEND"

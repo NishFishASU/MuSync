@@ -114,19 +114,131 @@ def _client_secret() -> str:
     return (os.environ.get("MUSYNC_SPOTIFY_CLIENT_SECRET") or "").strip()
 
 
+DEFAULT_API_PORT = 8080
+_CALLBACK_PATH = "/api/streaming/spotify/callback"
+
+
+def api_listen_port() -> int:
+    """Resolve ``MUSYNC_PORT`` — empty/unset → **8080**; never emit blank port."""
+    raw = (os.environ.get("MUSYNC_PORT") or "").strip()
+    if not raw:
+        return DEFAULT_API_PORT
+    try:
+        port = int(raw)
+    except ValueError as exc:
+        raise ValueError(
+            f"MUSYNC_PORT must be an integer 1–65535 (got {raw!r}); "
+            f"default is {DEFAULT_API_PORT}"
+        ) from exc
+    if not (1 <= port <= 65535):
+        raise ValueError(
+            f"MUSYNC_PORT out of range (got {port}); default is {DEFAULT_API_PORT}"
+        )
+    return port
+
+
+def redirect_uri_has_empty_port(uri: str) -> bool:
+    """True for ``http://host:/path`` (colon present, port digits missing)."""
+    raw = (uri or "").strip()
+    if not raw or "://" not in raw:
+        return False
+    parsed = urllib.parse.urlparse(raw)
+    hostport = parsed.netloc.rsplit("@", 1)[-1]
+    # IPv6 in brackets: [::1]: or [::1]:8080
+    if hostport.startswith("["):
+        close = hostport.find("]")
+        if close < 0:
+            return False
+        rest = hostport[close + 1 :]
+        return rest == ":" or rest.startswith(":/")
+    if ":" not in hostport:
+        return False
+    _host, _, port_part = hostport.rpartition(":")
+    return port_part == ""
+
+
+def redirect_uri_needs_port(uri: str) -> bool:
+    """True when redirect has empty port or no explicit port (Spotify needs exact URI)."""
+    raw = (uri or "").strip()
+    if not raw or "://" not in raw:
+        return True
+    if redirect_uri_has_empty_port(raw):
+        return True
+    parsed = urllib.parse.urlparse(raw)
+    return parsed.port is None
+
+
+def normalize_spotify_redirect_uri(
+    uri: Optional[str] = None, *, port: Optional[int] = None
+) -> str:
+    """Return a callback URI with an explicit non-empty port.
+
+    - Empty / unset → ``http://127.0.0.1:<port>/api/streaming/spotify/callback``
+    - ``http://host:/path`` (empty port) → insert ``port`` (default listen/8080)
+    - Missing port → insert ``port``
+    - Never returns ``host:/path``.
+    """
+    listen = port if port is not None else api_listen_port()
+    raw = (uri or "").strip()
+    if not raw:
+        return f"http://127.0.0.1:{listen}{_CALLBACK_PATH}"
+
+    if redirect_uri_has_empty_port(raw):
+        # Refuse empty port: rewrite with listen port.
+        parsed = urllib.parse.urlparse(raw)
+        hostport = parsed.netloc.rsplit("@", 1)[-1]
+        userinfo = ""
+        if "@" in parsed.netloc:
+            userinfo = parsed.netloc.rsplit("@", 1)[0] + "@"
+        if hostport.startswith("["):
+            close = hostport.find("]")
+            host = hostport[: close + 1]
+        else:
+            host = hostport.rpartition(":")[0]
+        netloc = f"{userinfo}{host}:{listen}"
+        path = parsed.path or _CALLBACK_PATH
+        return urllib.parse.urlunparse(
+            (parsed.scheme or "http", netloc, path, "", "", "")
+        )
+
+    parsed = urllib.parse.urlparse(raw)
+    if parsed.port is None:
+        host = parsed.hostname or "127.0.0.1"
+        # Preserve IPv6 brackets when rebuilding.
+        if ":" in host and not host.startswith("["):
+            host = f"[{host}]"
+        userinfo = ""
+        if parsed.username:
+            userinfo = parsed.username
+            if parsed.password:
+                userinfo += f":{parsed.password}"
+            userinfo += "@"
+        netloc = f"{userinfo}{host}:{listen}"
+        path = parsed.path or _CALLBACK_PATH
+        return urllib.parse.urlunparse(
+            (parsed.scheme or "http", netloc, path, "", "", "")
+        )
+
+    # Already has a real port — keep scheme/host/port/path; drop query/fragment.
+    path = parsed.path or _CALLBACK_PATH
+    return urllib.parse.urlunparse(
+        (parsed.scheme or "http", parsed.netloc, path, "", "", "")
+    )
+
+
 def default_redirect_uri() -> str:
     """Default OAuth callback: ``http://127.0.0.1:<MUSYNC_PORT>/…``.
 
     Pi + laptop default port is **8080**. Override ``MUSYNC_PORT=8081`` on a
     laptop when 8080 is taken (e.g. EDB Postgres). Always ``127.0.0.1`` —
-    Spotify forbids ``localhost`` and ``musync.local``.
+    Spotify forbids ``localhost`` and ``musync.local``. Never emits empty port.
     """
-    port = (os.environ.get("MUSYNC_PORT") or "8080").strip() or "8080"
-    return f"http://127.0.0.1:{port}/api/streaming/spotify/callback"
+    return normalize_spotify_redirect_uri(None)
 
 
 def _redirect_uri() -> str:
-    return (os.environ.get("MUSYNC_SPOTIFY_REDIRECT_URI") or default_redirect_uri()).strip()
+    configured = (os.environ.get("MUSYNC_SPOTIFY_REDIRECT_URI") or "").strip()
+    return normalize_spotify_redirect_uri(configured or None)
 
 
 def _token_path() -> Path:
@@ -280,7 +392,8 @@ class SpotifyClient:
                 "MUSYNC_SPOTIFY_CLIENT_SECRET (see docs/spotify-apple.md)"
             )
         state = uuid.uuid4().hex
-        redir = (redirect_uri or _redirect_uri()).strip()
+        # Guard: never send host:/path to Spotify (empty port → listen/8080).
+        redir = normalize_spotify_redirect_uri(redirect_uri or _redirect_uri())
         with self._lock:
             self._oauth_state = state
             self._oauth_redirect = redir
@@ -302,7 +415,7 @@ class SpotifyClient:
             expected = self._oauth_state
             # Prefer the URI we sent to /authorize (must match token exchange).
             # Fall back to the callback request URL, then env/default.
-            redir = (
+            redir = normalize_spotify_redirect_uri(
                 getattr(self, "_oauth_redirect", None)
                 or (redirect_uri or "").strip()
                 or _redirect_uri()

@@ -17,8 +17,11 @@ def main() -> None:
     _ensure_path()
     import uvicorn
 
+    from musync.streaming.spotify import api_listen_port
+
     host = os.environ.get("MUSYNC_HOST", "0.0.0.0")
-    port = int(os.environ.get("MUSYNC_PORT", "8080"))
+    # Empty MUSYNC_PORT → 8080 (never bind with a blank port).
+    port = api_listen_port()
     reload = os.environ.get("MUSYNC_RELOAD", "").lower() in {"1", "true", "yes"}
 
     uvicorn.run(

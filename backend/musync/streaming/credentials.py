@@ -152,19 +152,27 @@ def _field_status(key: str, *, plaintext: bool = False) -> dict[str, Any]:
 
 def credentials_status() -> dict[str, Any]:
     """Masked credential snapshot for the Streaming UI (no raw secrets)."""
-    from .spotify import default_redirect_uri
+    from .spotify import default_redirect_uri, normalize_spotify_redirect_uri
 
     path = musync_env_path()
     spotify_id = _env_get("MUSYNC_SPOTIFY_CLIENT_ID")
     spotify_secret = _env_get("MUSYNC_SPOTIFY_CLIENT_SECRET")
     yt_key = _env_get("MUSYNC_YOUTUBE_API_KEY")
     redirect = _field_status("MUSYNC_SPOTIFY_REDIRECT_URI", plaintext=True)
-    # Prefill Pi/laptop default (127.0.0.1:8080 via MUSYNC_PORT) when unset.
-    if not redirect.get("value"):
+    # Prefill / repair: never hand the UI ``http://host:/path`` (empty port).
+    raw_redirect = (redirect.get("value") or "").strip()
+    if not raw_redirect:
         redirect = {
             "set": False,
             "masked": "",
             "value": default_redirect_uri(),
+        }
+    else:
+        fixed = normalize_spotify_redirect_uri(raw_redirect)
+        redirect = {
+            "set": True,
+            "masked": "",
+            "value": fixed,
         }
     return {
         "env_path": str(path),
@@ -254,6 +262,12 @@ def save_streaming_credentials(
 
     Never logs secret values — only which keys changed and the target path.
     """
+    from .spotify import (
+        DEFAULT_API_PORT,
+        normalize_spotify_redirect_uri,
+        redirect_uri_has_empty_port,
+    )
+
     mapping: dict[str, Optional[str]] = {
         "MUSYNC_SPOTIFY_CLIENT_ID": spotify_client_id,
         "MUSYNC_SPOTIFY_CLIENT_SECRET": spotify_client_secret,
@@ -266,17 +280,46 @@ def save_streaming_credentials(
             continue
         updates[key] = raw.strip()
 
+    # Refuse empty-port redirect (host:/path); persist the normalized form.
+    # Only touches the redirect key when the caller is saving it — never
+    # rewrites an existing file's redirect as a side effect of other keys.
+    redir_key = "MUSYNC_SPOTIFY_REDIRECT_URI"
+    if redir_key in updates and updates[redir_key]:
+        candidate = updates[redir_key] or ""
+        if redirect_uri_has_empty_port(candidate):
+            log.warning(
+                "Refusing empty-port Spotify redirect %r — normalizing to port %s",
+                candidate,
+                DEFAULT_API_PORT,
+            )
+        updates[redir_key] = normalize_spotify_redirect_uri(candidate)
+
     if not updates:
         # Soft-fail empty POST — no file write, return current masked status.
         status = credentials_status()
         status["updated_keys"] = []
         status["saved"] = False
+        status["created"] = False
         return status
 
     path = musync_env_path()
+    creating = not path.is_file()
+    # First create only: seed MUSYNC_PORT=8080 + default redirect. Never
+    # inject these into an existing musync.env (preserve Pi-IP / :8081 / etc.).
+    if creating:
+        if not (updates.get("MUSYNC_PORT") or "").strip():
+            updates["MUSYNC_PORT"] = str(DEFAULT_API_PORT)
+        if not (updates.get(redir_key) or "").strip():
+            updates[redir_key] = normalize_spotify_redirect_uri(None)
+        log.info(
+            "Creating %s — seeding MUSYNC_PORT=%s and Spotify redirect",
+            path,
+            updates.get("MUSYNC_PORT"),
+        )
+
     try:
         existing = ""
-        if path.is_file():
+        if not creating:
             existing = path.read_text(encoding="utf-8-sig")
         new_text = _upsert_env_lines(existing, updates)
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -304,4 +347,5 @@ def save_streaming_credentials(
     status = credentials_status()
     status["updated_keys"] = changed
     status["saved"] = True
+    status["created"] = creating
     return status

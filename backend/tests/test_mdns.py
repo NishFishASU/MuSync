@@ -85,3 +85,26 @@ def test_default_redirect_uri_is_127_001_8080(monkeypatch) -> None:
     assert default_redirect_uri() == (
         "http://127.0.0.1:8081/api/streaming/spotify/callback"
     )
+
+
+def test_normalize_refuses_empty_port(monkeypatch) -> None:
+    """Never emit http://host:/path — empty port → listen/8080."""
+    from musync.streaming.spotify import (
+        normalize_spotify_redirect_uri,
+        redirect_uri_has_empty_port,
+    )
+
+    monkeypatch.delenv("MUSYNC_PORT", raising=False)
+    bad = "http://127.0.0.1:/api/streaming/spotify/callback"
+    assert redirect_uri_has_empty_port(bad) is True
+    assert normalize_spotify_redirect_uri(bad) == (
+        "http://127.0.0.1:8080/api/streaming/spotify/callback"
+    )
+    monkeypatch.setenv("MUSYNC_PORT", "")
+    assert normalize_spotify_redirect_uri(None) == (
+        "http://127.0.0.1:8080/api/streaming/spotify/callback"
+    )
+    # Missing port also gets an explicit listen port.
+    assert normalize_spotify_redirect_uri(
+        "http://192.168.1.5/api/streaming/spotify/callback"
+    ) == ("http://192.168.1.5:8080/api/streaming/spotify/callback")
