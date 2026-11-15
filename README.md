@@ -59,6 +59,7 @@ backend/musync/audio/
 web/                # SvelteKit SPA (adapter-static)
   src/              # UI source
   build/            # Production assets FastAPI serves
+platforms/agent/    # Agent SDK Grokbot → hub queue search/play (NL)
 config/
   devices.pi-2sink.example.yaml   # start here on Pi
   devices.example.yaml            # full 6-sink template
@@ -70,6 +71,7 @@ docs/phone-bt-source-vs-spp-sink.md   # phone as BT A2DP *source* vs SPP sink
 docs/wifi-join.md                     # phone hotspot join (nmcli)
 docs/mdns.md                          # musync.local UI advertise (not Spotify OAuth)
 docs/volume-profiles.md               # silent-disco preferred × gain + S_u × G_d learning
+docs/grokbot.md                       # NL queue Grokbot (platforms/agent)
 backend/musync/wifi/       # nmcli on Pi; mock on laptop
 scripts/build_web.sh  run_dev.sh  run_pi.sh  pair_hci.sh  (pair_bt600.sh → alias)
 ```
