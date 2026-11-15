@@ -42,11 +42,14 @@ def test_demo_hosts_and_max_four(tmp_path, monkeypatch) -> None:
         CapturePath.USB,
         CapturePath.NETWORK,
     }
-    # Mock seeds S21 FE as live BT A2DP.
+    # Mock seeds S21 FE + USB Audio as live capture hosts.
     s21 = next(h for h in hosts if "S21" in h.name)
     assert s21.capture_path == CapturePath.BT_A2DP
     assert s21.connected is True
     assert s21.endpoint
+    usb = next(h for h in hosts if h.capture_path == CapturePath.USB)
+    assert usb.connected is True
+    assert usb.endpoint and "alsa_input" in usb.endpoint
 
     while len(backend.list_inputs()) < 4:
         n = len(backend.list_inputs()) + 1
@@ -125,6 +128,13 @@ def test_api_inputs_discover_and_upload(tmp_path, monkeypatch) -> None:
     assert discovered.status_code == 200
     body = discovered.json()
     assert any("S21" in s["name"] or "bluez_input" in s.get("pw_name", "") for s in body["sources"])
+    assert any(
+        s.get("capture_path") == "usb" or "alsa_input" in s.get("pw_name", "")
+        for s in body["sources"]
+    )
+    # USB fixture is auto-bound onto a host (configured_id set).
+    usb_row = next(s for s in body["sources"] if s.get("capture_path") == "usb")
+    assert usb_row.get("configured_id")
 
     created = client.post(
         "/api/inputs",
@@ -187,3 +197,32 @@ Audio
     assert sources[0].id == "61"
     assert "bluez_input" in sources[0].name
     assert sources[0].mac == "AA:BB:CC:DD:EE:21"
+
+
+def test_mock_usb_live_playable(tmp_path, monkeypatch) -> None:
+    backend = _backend(tmp_path, monkeypatch)
+    usb = next(h for h in backend.list_inputs() if h.capture_path == CapturePath.USB)
+    item = backend.add_queue_item(
+        QueueItemCreate(source_type=SourceType.INPUT, input_id=usb.id, title="PC USB live")
+    )
+    assert item.available is True
+    transport = backend.set_active_queue_item(item.id)
+    assert transport.input_id == usb.id
+    playing = backend.set_transport(TransportPut(state=TransportState.PLAYING))
+    assert playing.state == TransportState.PLAYING
+
+
+def test_usb_auto_bind_on_discover_when_waiting(tmp_path, monkeypatch) -> None:
+    backend = _backend(tmp_path, monkeypatch)
+    # Force USB host back to waiting, then discover should re-bind the fixture.
+    usb = next(h for h in backend.list_inputs() if h.capture_path == CapturePath.USB)
+    backend.patch_input(
+        usb.id,
+        InputHostPatch(connected=False, endpoint=None, armed=False, name="Laptop (USB)"),
+    )
+    disc = backend.discover_capture_sources()
+    assert "auto-bound" in disc.detail
+    host = next(h for h in backend.list_inputs() if h.id == usb.id)
+    assert host.connected is True
+    assert host.endpoint and "alsa_input" in host.endpoint
+    assert host.kind == HostKind.PC

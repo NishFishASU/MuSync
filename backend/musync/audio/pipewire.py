@@ -73,6 +73,7 @@ from ..config import (
     validate_devices,
 )
 from ..models import (
+    MAX_INPUT_HOSTS,
     CaptureDiscoverResponse,
     CapturePath,
     Device,
@@ -83,6 +84,7 @@ from ..models import (
     DiscoveredBluetoothSink,
     DiscoveredCaptureSource,
     Health,
+    HostKind,
     InputHost,
     InputHostCreate,
     InputHostPatch,
@@ -104,6 +106,7 @@ from .pw_tools import (
     build_capture_loopback_commands,
     build_sink_commands,
     classify_capture_source,
+    discover_alsa_usb_cards,
     discover_bluetooth_remotes,
     discover_nodes,
     discover_sources,
@@ -114,6 +117,7 @@ from .pw_tools import (
     friendly_bluez_label,
     is_capture_candidate,
     match_capture_source,
+    merge_alsa_usb_into_sources,
     match_device_node,
     normalize_mac,
     run_cmd,
@@ -1101,13 +1105,106 @@ class PipeWireBackend(AudioBackend):
             return
         self._start_mpv_into_feeder(path, position_ms=transport.position_ms)
 
-    def _refresh_input_host_links(self) -> None:
-        """Match registered hosts to live PipeWire sources; update connected/endpoint."""
+    def _discover_capture_candidates(self) -> tuple[list[PwNode], str]:
+        """PipeWire Audio/Source + ALSA USB cards (auto-detect sound cards)."""
         nodes, detail = discover_sources(
             wpctl=self._tools["wpctl"],
             pw_cli=self._tools["pw-cli"],
         )
-        candidates = [n for n in nodes if is_capture_candidate(n)]
+        alsa_cards, alsa_detail = discover_alsa_usb_cards(
+            arecord=which("arecord"),
+        )
+        merged = merge_alsa_usb_into_sources(nodes, alsa_cards)
+        candidates = [n for n in merged if is_capture_candidate(n)]
+        # Synthesized ALSA-only nodes are always capture candidates.
+        for n in merged:
+            if n.id.startswith("alsa:") and n not in candidates:
+                candidates.append(n)
+        detail_full = f"{detail}; {alsa_detail}"
+        return candidates, detail_full
+
+    def _auto_bind_usb_hosts(self, candidates: list[PwNode]) -> list[str]:
+        """Bind unbound USB PipeWire/ALSA sources onto PC hosts (prefer auto-detect).
+
+        Returns host ids that were newly bound or created.
+        """
+        usb_nodes = [
+            n
+            for n in candidates
+            if classify_capture_source(n) == CapturePath.USB.value
+            or n.id.startswith("alsa:")
+        ]
+        if not usb_nodes:
+            return []
+
+        bound: list[str] = []
+        hosts = self._inputs.list_hosts()
+        used_endpoints = {
+            (h.endpoint or "").strip()
+            for h in hosts
+            if h.capture_path == CapturePath.USB and h.endpoint
+        }
+
+        def _claim(node: PwNode, host_id: str, *, name: str | None = None) -> None:
+            source_ref = node.name or node.id
+            patch_kwargs: dict = {
+                "capture_path": CapturePath.USB,
+                "connected": True,
+                "endpoint": source_ref,
+                "armed": True,
+                "kind": HostKind.PC,
+                "note": CAPTURE_NOTES[CapturePath.USB],
+            }
+            if name:
+                patch_kwargs["name"] = name
+            self._inputs.patch_host(host_id, InputHostPatch(**patch_kwargs))
+            used_endpoints.add(source_ref)
+            bound.append(host_id)
+
+        for node in usb_nodes:
+            source_ref = node.name or node.id
+            if source_ref in used_endpoints:
+                continue
+            # Prefer an existing USB host that is not live yet.
+            waiting = next(
+                (
+                    h
+                    for h in self._inputs.list_hosts()
+                    if h.capture_path == CapturePath.USB
+                    and not (h.connected and h.endpoint)
+                ),
+                None,
+            )
+            label = (node.description or "").strip() or node.name
+            if waiting:
+                _claim(node, waiting.id, name=label if label else waiting.name)
+                continue
+            # Already have a live USB host with this endpoint? skip.
+            if any(
+                (h.endpoint or "") == source_ref
+                for h in self._inputs.list_hosts()
+            ):
+                continue
+            if len(self._inputs.list_hosts()) >= MAX_INPUT_HOSTS:
+                break
+            created = self._inputs.add_host(
+                InputHostCreate(
+                    name=label or "USB Audio",
+                    kind=HostKind.PC,
+                    capture_path=CapturePath.USB,
+                    armed=True,
+                    connected=True,
+                    endpoint=source_ref,
+                    note=CAPTURE_NOTES[CapturePath.USB],
+                )
+            )
+            used_endpoints.add(source_ref)
+            bound.append(created.id)
+        return bound
+
+    def _refresh_input_host_links(self) -> None:
+        """Match registered hosts to live PipeWire/ALSA sources; update connected/endpoint."""
+        candidates, detail = self._discover_capture_candidates()
         self._discovered_sources = candidates
         log.debug("Capture discovery: %s (%d candidates)", detail, len(candidates))
 
@@ -1167,6 +1264,12 @@ class PipeWireBackend(AudioBackend):
                             note=STUB_CAPTURE_NOTES[host.capture_path],
                         ),
                     )
+
+        # Prefer auto-detect: claim USB sound cards onto PC hosts without manual bind.
+        try:
+            self._auto_bind_usb_hosts(candidates)
+        except Exception as exc:  # noqa: BLE001
+            log.debug("USB auto-bind skipped: %s", exc)
 
         self._session.refresh_live_availability()
 
@@ -1349,16 +1452,19 @@ class PipeWireBackend(AudioBackend):
 
     def discover_capture_sources(self) -> CaptureDiscoverResponse:
         with self._lock:
-            nodes, detail = discover_sources(
-                wpctl=self._tools["wpctl"],
-                pw_cli=self._tools["pw-cli"],
-            )
-            candidates = [n for n in nodes if is_capture_candidate(n)]
+            candidates, detail = self._discover_capture_candidates()
             self._discovered_sources = candidates
             remotes, bt_detail = discover_bluetooth_remotes(
                 bluetoothctl=self._tools["bluetoothctl"],
             )
             remotes_by_mac = {normalize_mac(r.mac): r for r in remotes if r.mac}
+
+            # Auto-bind USB sound cards before building the response rows.
+            try:
+                auto_ids = self._auto_bind_usb_hosts(candidates)
+            except Exception as exc:  # noqa: BLE001
+                log.debug("USB auto-bind on discover failed: %s", exc)
+                auto_ids = []
 
             configured_by_name = {
                 h.name.strip().lower(): h.id for h in self._inputs.list_hosts()
@@ -1371,7 +1477,10 @@ class PipeWireBackend(AudioBackend):
 
             rows: list[DiscoveredCaptureSource] = []
             for node in candidates:
-                path = CapturePath(classify_capture_source(node))
+                path_val = classify_capture_source(node)
+                if node.id.startswith("alsa:") and path_val == "network":
+                    path_val = CapturePath.USB.value
+                path = CapturePath(path_val)
                 label = node.description.strip() if node.description else ""
                 label = re.sub(r"\[vol:[^\]]*\]", "", label).strip() if label else ""
                 if not label or label.lower().startswith("bluez"):
@@ -1396,15 +1505,36 @@ class PipeWireBackend(AudioBackend):
                     )
                 )
 
-            # Auto-link hosts after discovery so UI list_inputs shows live.
+            # Refresh BT / network host links after USB auto-bind.
             try:
                 self._refresh_input_host_links()
             except Exception as exc:  # noqa: BLE001
                 log.debug("Capture auto-link failed: %s", exc)
 
+            # Rebuild configured_id after refresh (hosts may have new endpoints).
+            configured_by_ep = {
+                (h.endpoint or "").strip(): h.id
+                for h in self._inputs.list_hosts()
+                if h.endpoint
+            }
+            configured_by_name = {
+                h.name.strip().lower(): h.id for h in self._inputs.list_hosts()
+            }
+            refreshed: list[DiscoveredCaptureSource] = []
+            for row in rows:
+                cfg = (
+                    configured_by_name.get(row.name.lower())
+                    or configured_by_ep.get(row.pw_name)
+                    or row.configured_id
+                )
+                refreshed.append(row.model_copy(update={"configured_id": cfg}))
+
+            auto_note = (
+                f"; auto-bound USB hosts={','.join(auto_ids)}" if auto_ids else ""
+            )
             return CaptureDiscoverResponse(
-                sources=rows,
-                detail=f"{detail}; {bt_detail}",
+                sources=refreshed,
+                detail=f"{detail}; {bt_detail}{auto_note}",
             )
 
     def health(self) -> Health:

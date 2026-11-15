@@ -68,6 +68,7 @@ scripts/build_web.sh  run_dev.sh  run_pi.sh  pair_bt600.sh
 ```
 
 Phone **input** (S21 FE → `bluez_input` → feeder): [docs/phone-bt-source-vs-spp-sink.md](docs/phone-bt-source-vs-spp-sink.md).  
+USB / PC capture (ALSA auto-detect → feeder): [docs/usb-pc-capture.md](docs/usb-pc-capture.md).  
 SPP phone **sink**: enable Phone SPP in Device setup, connect Simple Protocol Player to Pi IP:port — [docs/spp-network-sink.md](docs/spp-network-sink.md).  
 **Spotify** (librespot → `musync_feeder`) + **Apple Music** (best-effort): [docs/spotify-apple.md](docs/spotify-apple.md) · env template `config/streaming.env.example`.
 

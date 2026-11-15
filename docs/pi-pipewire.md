@@ -17,7 +17,8 @@ mpv local file  OR  bluez_input / USB capture (module-loopback)
                            … up to 6 (+ optional SPP TCP)
 ```
 
-Phone as **A2DP source** (S21 FE → `bluez_input`) vs phone as **SPP sink**: see [phone-bt-source-vs-spp-sink.md](./phone-bt-source-vs-spp-sink.md).
+Phone as **A2DP source** (S21 FE → `bluez_input`) vs phone as **SPP sink**: see [phone-bt-source-vs-spp-sink.md](./phone-bt-source-vs-spp-sink.md).  
+USB / PC capture (ALSA auto-detect → feeder): [usb-pc-capture.md](./usb-pc-capture.md).
 
 | Control | Mechanism |
 |---------|-----------|

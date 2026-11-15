@@ -374,12 +374,16 @@ def classify_capture_source(node: PwNode) -> str:
         node.mac and "bluez" in hay
     ):
         return "bt_a2dp"
+    # Prefer real USB sound cards / UAC — not bare onboard "analog" mics.
     if (
-        "alsa_input" in hay
-        or "usb" in hay
-        or "analog" in hay
+        "alsa_input.usb" in hay
+        or "usb-audio" in hay
+        or "usb audio" in hay
+        or ("usb" in hay and ("alsa_input" in hay or "input" in hay))
         or hay.startswith("hw:")
     ):
+        return "usb"
+    if "alsa_input" in hay and "usb" in hay:
         return "usb"
     return "network"
 
@@ -391,12 +395,165 @@ def is_capture_candidate(node: PwNode) -> bool:
         return False
     if "bluez_input" in hay or "bluez_source" in hay:
         return True
-    if "alsa_input" in hay or ("usb" in hay and "input" in hay):
+    if "alsa_input.usb" in hay or ("usb" in hay and "alsa_input" in hay):
+        return True
+    if "usb" in hay and "input" in hay and "monitor" not in hay:
         return True
     # Named phone remotes sometimes show without bluez_ prefix in description.
     if node.mac and "bluez" in hay:
         return True
     return False
+
+
+@dataclass
+class AlsaUsbCard:
+    """A USB sound card seen by ALSA (capture-capable preferred)."""
+
+    index: str
+    id: str
+    name: str
+    raw: str = ""
+
+
+_PROC_ASOUND_CARD_RE = re.compile(
+    r"^\s*(\d+)\s+\[([^\]]+)\]\s*:\s*(.+)$",
+    re.MULTILINE,
+)
+_ARECORD_CARD_RE = re.compile(
+    r"^card\s+(\d+):\s*(\S+)\s*\[([^\]]+)\].*$",
+    re.IGNORECASE | re.MULTILINE,
+)
+
+
+def parse_proc_asound_cards(text: str) -> list[AlsaUsbCard]:
+    """Parse ``/proc/asound/cards``; return USB-Audio / usb entries only."""
+    cards: list[AlsaUsbCard] = []
+    lines = text.splitlines()
+    i = 0
+    while i < len(lines):
+        line = lines[i].rstrip()
+        m = re.match(r"^\s*(\d+)\s+\[([^\]]+)\]\s*:\s*(.+)$", line)
+        if not m:
+            i += 1
+            continue
+        index, card_id, rest = m.group(1), m.group(2).strip(), m.group(3).strip()
+        detail = ""
+        if i + 1 < len(lines) and lines[i + 1].strip() and not re.match(
+            r"^\s*\d+\s+\[", lines[i + 1]
+        ):
+            detail = lines[i + 1].strip()
+            i += 1
+        hay = f"{rest} {detail} {card_id}".lower()
+        if "usb" in hay or "usb-audio" in hay:
+            name = detail or rest.split(" - ", 1)[-1].strip() or card_id
+            cards.append(
+                AlsaUsbCard(
+                    index=index,
+                    id=card_id,
+                    name=name,
+                    raw=f"{line} | {detail}".strip(" |"),
+                )
+            )
+        i += 1
+    return cards
+
+
+def parse_arecord_l(text: str) -> list[AlsaUsbCard]:
+    """Parse ``arecord -l`` capture devices; keep USB-looking cards."""
+    cards: list[AlsaUsbCard] = []
+    seen: set[str] = set()
+    for m in _ARECORD_CARD_RE.finditer(text):
+        index, card_id, name = m.group(1), m.group(2), m.group(3).strip()
+        hay = f"{card_id} {name} {m.group(0)}".lower()
+        if "usb" not in hay and "codec" not in hay:
+            # Still accept generic UAC labels that omit the word usb.
+            if "audio" not in hay:
+                continue
+        if index in seen:
+            continue
+        seen.add(index)
+        cards.append(AlsaUsbCard(index=index, id=card_id, name=name, raw=m.group(0)))
+    return cards
+
+
+def discover_alsa_usb_cards(
+    *,
+    arecord: Optional[str] = None,
+    proc_asound_path: str = "/proc/asound/cards",
+) -> tuple[list[AlsaUsbCard], str]:
+    """Prefer ``/proc/asound/cards``; fall back to ``arecord -l``."""
+    cards: list[AlsaUsbCard] = []
+    detail_parts: list[str] = []
+    try:
+        from pathlib import Path
+
+        path = Path(proc_asound_path)
+        if path.is_file():
+            text = path.read_text(encoding="utf-8", errors="replace")
+            cards = parse_proc_asound_cards(text)
+            detail_parts.append(f"asound cards → {len(cards)} USB")
+    except OSError as exc:
+        detail_parts.append(f"asound cards unread: {exc}")
+
+    if cards:
+        return cards, "; ".join(detail_parts)
+
+    bin_arecord = arecord if arecord is not None else which("arecord")
+    if not bin_arecord:
+        detail_parts.append("arecord missing")
+        return [], "; ".join(detail_parts) or "no ALSA USB cards"
+    try:
+        proc = run_cmd([bin_arecord, "-l"], timeout=4.0)
+        if proc.returncode == 0 and proc.stdout.strip():
+            cards = parse_arecord_l(proc.stdout)
+            detail_parts.append(f"arecord -l → {len(cards)} USB")
+            return cards, "; ".join(detail_parts)
+        detail_parts.append(
+            (proc.stderr or proc.stdout or "arecord -l failed").strip()
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        detail_parts.append(f"arecord error: {exc}")
+    return cards, "; ".join(detail_parts) or "no ALSA USB cards"
+
+
+def alsa_usb_to_pw_node(card: AlsaUsbCard) -> PwNode:
+    """Synthesize a PipeWire-ish source name from an ALSA USB card."""
+    # PipeWire pulse/ALSA typically: alsa_input.usb-<vendor>_<product>-00...
+    safe_id = re.sub(r"[^A-Za-z0-9]+", "_", card.id).strip("_") or "USB"
+    safe_name = re.sub(r"[^A-Za-z0-9]+", "_", card.name).strip("_") or safe_id
+    pw_name = f"alsa_input.usb-{safe_name}-00"
+    return PwNode(
+        id=f"alsa:{card.index}",
+        name=pw_name,
+        description=card.name,
+        mac="",
+        media_class="Audio/Source",
+    )
+
+
+def merge_alsa_usb_into_sources(
+    nodes: list[PwNode],
+    cards: list[AlsaUsbCard],
+) -> list[PwNode]:
+    """Append ALSA-only USB cards not already represented as PipeWire sources."""
+    if not cards:
+        return nodes
+    existing = " ".join(f"{n.name} {n.description}".lower() for n in nodes)
+    out = list(nodes)
+    for card in cards:
+        needles = [
+            card.name.lower(),
+            card.id.lower(),
+            f"usb-{card.id}".lower(),
+            f"card {card.index}",
+        ]
+        if any(n and n in existing for n in needles):
+            continue
+        # Also skip if any alsa_input.usb already covers a single-card case later.
+        synth = alsa_usb_to_pw_node(card)
+        out.append(synth)
+        existing += f" {synth.name} {synth.description}".lower()
+    return out
 
 
 def match_capture_source(

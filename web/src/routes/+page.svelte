@@ -542,8 +542,8 @@
 			sources = await listSources();
 			queue = await listQueue();
 			captureMessage = discoveredCapture.length
-				? `${discoveredCapture.length} live source${discoveredCapture.length === 1 ? '' : 's'}`
-				: 'No bluez_input / USB sources yet — pair phone as A2DP source';
+				? `${discoveredCapture.length} live source${discoveredCapture.length === 1 ? '' : 's'} (USB auto-bound when found)`
+				: 'No bluez_input / USB sources yet — plug a USB sound card or pair phone as A2DP source';
 		} catch (err) {
 			captureMessage = err instanceof Error ? err.message : String(err);
 		} finally {
@@ -562,12 +562,16 @@
 			const path = /** @type {import('$lib/api.js').CapturePath} */ (
 				src.capture_path || 'bt_a2dp'
 			);
+			const kind = /** @type {import('$lib/api.js').HostKind} */ (
+				path === 'usb' ? 'pc' : 'phone'
+			);
 			let host = inputs.find((h) => h.id === src.configured_id) ||
 				inputs.find((h) => h.name === src.name) ||
 				inputs.find((h) => h.capture_path === path && !h.connected);
 			if (host) {
 				host = await patchInput(host.id, {
 					name: src.name,
+					kind,
 					capture_path: path,
 					endpoint,
 					connected: true,
@@ -577,7 +581,7 @@
 			} else if (inputs.length < 4) {
 				host = await addInput({
 					name: src.name,
-					kind: 'phone',
+					kind,
 					capture_path: path,
 					endpoint,
 					connected: true,
