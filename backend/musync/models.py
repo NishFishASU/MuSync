@@ -15,18 +15,20 @@ class TransportState(str, Enum):
 
 
 class DeviceKind(str, Enum):
-    """Output sink kinds. Bluetooth A2DP (≤6) or SPP TCP network listen."""
+    """Output sink kinds: BT A2DP, SPP TCP, or Cast/Chromecast (Nest Mini)."""
 
     BLUETOOTH = "bluetooth"
     NETWORK_SPP = "network_spp"
+    CAST = "cast"
 
 
 MAX_BT_SINKS = 6
 MAX_SPP_SINKS = 4
+MAX_CAST_SINKS = 4
 
 
 class Device(BaseModel):
-    """One output sink: BT A2DP speaker or SPP TCP network listen."""
+    """One output sink: BT A2DP, SPP TCP, or Cast (Nest Mini / Chromecast)."""
 
     id: str
     name: str
@@ -43,11 +45,16 @@ class Device(BaseModel):
     enabled: bool = True
     # Optional WirePlumber/PipeWire node id or node.name override after connect.
     pw_node: str = ""
-    # Simple Protocol Player TCP listen (kind=network_spp).
+    # Simple Protocol Player TCP listen (kind=network_spp) or Cast HTTP stream
+    # bind (kind=cast) — Nest Mini pulls http://<Pi-IP>:<listen_port>/stream.mp3.
     listen_host: str = "0.0.0.0"
     listen_port: int = Field(default=1234, ge=1, le=65535)
     sample_rate: int = Field(default=48000, ge=8000, le=192000)
     channels: int = Field(default=1, ge=1, le=2)
+    # Google Cast / Nest Mini (kind=cast) — filled by Wi‑Fi mDNS discovery.
+    cast_uuid: str = ""
+    cast_host: str = ""
+    cast_port: int = Field(default=8009, ge=1, le=65535)
 
     @field_validator("volume")
     @classmethod
@@ -77,6 +84,9 @@ class DevicePatch(BaseModel):
     listen_port: Optional[int] = Field(default=None, ge=1, le=65535)
     sample_rate: Optional[int] = Field(default=None, ge=8000, le=192000)
     channels: Optional[int] = Field(default=None, ge=1, le=2)
+    cast_uuid: Optional[str] = None
+    cast_host: Optional[str] = None
+    cast_port: Optional[int] = Field(default=None, ge=1, le=65535)
 
     @field_validator("volume")
     @classmethod
@@ -106,6 +116,18 @@ class DiscoveredBluetoothSink(BaseModel):
     configured_id: Optional[str] = None
 
 
+class DiscoveredCastSink(BaseModel):
+    """A Google Cast receiver on Wi‑Fi (Nest Mini, Chromecast, …)."""
+
+    name: str
+    uuid: str = ""
+    host: str = ""
+    port: int = 8009
+    model: str = ""
+    connected: bool = False
+    configured_id: Optional[str] = None
+
+
 class BluetoothAdapter(BaseModel):
     """One BlueZ HCI controller — onboard Pi Bluetooth or a USB dongle."""
 
@@ -126,6 +148,7 @@ class DeviceDiscoverResponse(BaseModel):
     """Discovery payload for the device-setup UI (no manual MAC entry)."""
 
     bluetooth: list[DiscoveredBluetoothSink] = Field(default_factory=list)
+    cast: list[DiscoveredCastSink] = Field(default_factory=list)
     spp_default: Device
     adapters: list[BluetoothAdapter] = Field(default_factory=list)
     adapter_capacity: int = 0
@@ -195,10 +218,13 @@ class DeviceConfigEntry(BaseModel):
     listen_port: Optional[int] = Field(default=None, ge=1, le=65535)
     sample_rate: Optional[int] = Field(default=None, ge=8000, le=192000)
     channels: Optional[int] = Field(default=None, ge=1, le=2)
+    cast_uuid: Optional[str] = None
+    cast_host: Optional[str] = None
+    cast_port: Optional[int] = Field(default=None, ge=1, le=65535)
 
 
 class DevicesConfigPut(BaseModel):
-    """Replace configured sinks from the web UI (discovered BT + SPP)."""
+    """Replace configured sinks from the web UI (discovered BT + SPP + Cast)."""
 
     devices: list[DeviceConfigEntry]
 

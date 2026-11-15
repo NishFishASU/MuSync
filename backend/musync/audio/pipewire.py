@@ -10,7 +10,7 @@ r"""PipeWireBackend — Pi demo control plane via wpctl / pactl / pw-link / mpv.
         │  module-loopback latency_msec=<delay_ms>   (per enabled sink)
         ├──────────────► bluez_output.<MAC>   (hci0 / speaker 1)
         ├──────────────► bluez_output.<MAC>   (hci1 / speaker 2)
-        └──────────────► … up to 6 BlueZ HCI A2DP sinks (+ optional SPP TCP)
+        └──────────────► … up to 6 BlueZ HCI A2DP sinks (+ optional SPP TCP / Cast)
 ```
 
 Live phone input (priority): phone pairs as A2DP **source** → ``bluez_input.*``
@@ -95,6 +95,7 @@ from ..models import (
     DeviceKind,
     DevicePatch,
     DiscoveredBluetoothSink,
+    DiscoveredCastSink,
     DiscoveredCaptureSource,
     Health,
     HostKind,
@@ -149,6 +150,19 @@ from .pw_tools import (
     pick_free_adapter,
     run_cmd,
     which,
+)
+from .cast import (
+    DEFAULT_CAST_DELAY_MS,
+    apply_cast_volume,
+    build_cast_ffmpeg,
+    cast_anullsrc,
+    cast_controls_key,
+    cast_http_url,
+    cast_plan_notes,
+    discover_cast_devices,
+    free_cast_listen_port,
+    guess_lan_ipv4,
+    kick_cast_playback,
 )
 from .source_session import SourceSession
 from .spp import (
@@ -208,6 +222,10 @@ class PipeWireBackend(AudioBackend):
         # Track SPP input mode so we can switch silence → file on Play without
         # bouncing a healthy listener that already matches the desired source.
         self._spp_source_keys: dict[str, str] = {}
+        # Cast / Nest Mini HTTP streams (ffmpeg listen) + last kick soft-warn.
+        self._cast_procs: dict[str, subprocess.Popen[str]] = {}
+        self._cast_source_keys: dict[str, str] = {}
+        self._cast_soft_warn: str = ""
         # Soft BT reconnect throttle (demo reboot: paired but A2DP not up yet).
         self._last_bt_reconnect_at: float = 0.0
         self._bt_reconnect_min_interval_s: float = 8.0
@@ -630,6 +648,29 @@ class PipeWireBackend(AudioBackend):
                         volume=device.volume,
                         mute=device.mute,
                         commands=[],  # started via _sync_spp_listeners (not one-shot)
+                    )
+                )
+                continue
+
+            # Cast / Nest Mini — HTTP mp3 from feeder; kick play_media soft-fail.
+            if device.kind == DeviceKind.CAST:
+                lan = guess_lan_ipv4()
+                plan.notes.extend(
+                    cast_plan_notes(device, feeder=self._feeder, lan_ip=lan)
+                )
+                if not self._tools.get("ffmpeg"):
+                    plan.notes.append(
+                        f"{device.id}: ffmpeg missing — install ffmpeg for Cast HTTP stream"
+                    )
+                plan.links.append(
+                    GraphLink(
+                        device_id=device.id,
+                        source=f"{self._feeder}.monitor",
+                        target=cast_http_url(device, host_override=lan or None),
+                        delay_ms=device.delay_ms,
+                        volume=device.volume,
+                        mute=device.mute,
+                        commands=[],  # started via _sync_cast_streams
                     )
                 )
                 continue
@@ -1073,11 +1114,12 @@ class PipeWireBackend(AudioBackend):
         return attempted
 
     def _refresh_live_sink_state(self, *, reconnect: bool = True) -> None:
-        """Refresh BT map + SPP listeners; optionally soft-reconnect MISSING BT."""
+        """Refresh BT map + SPP/Cast streams; optionally soft-reconnect MISSING BT."""
         if reconnect:
             self._reconnect_bt_sinks()
         self.refresh_sink_map()
         self._sync_spp_listeners()
+        self._sync_cast_streams()
 
     def _sink_readiness_summary(self) -> tuple[list[str], list[str]]:
         """Return ``(ready_ids, missing_ids)`` for enabled sinks (demo UI / health)."""
@@ -1089,6 +1131,10 @@ class PipeWireBackend(AudioBackend):
             if device.kind == DeviceKind.NETWORK_SPP:
                 ok = bool(device.connected) and (
                     self._env_dry_run() or self._spp_listener_alive(device.id)
+                )
+            elif device.kind == DeviceKind.CAST:
+                ok = bool(device.connected) and (
+                    self._env_dry_run() or self._cast_stream_alive(device.id)
                 )
             else:
                 ok = bool(device.connected)
@@ -1239,6 +1285,174 @@ class PipeWireBackend(AudioBackend):
                 continue
             self._ensure_spp_listener(device)
 
+    def _stop_cast_stream(self, device_id: str) -> None:
+        proc = self._cast_procs.pop(device_id, None)
+        self._cast_source_keys.pop(device_id, None)
+        if proc is None:
+            return
+        try:
+            if proc.poll() is None:
+                proc.terminate()
+                try:
+                    proc.wait(timeout=2.0)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+        except OSError as exc:
+            log.debug("Cast stop %s: %s", device_id, exc)
+
+    def _cast_stream_alive(self, device_id: str) -> bool:
+        proc = self._cast_procs.get(device_id)
+        return bool(proc is not None and proc.poll() is None)
+
+    def _cast_desired_source(self, device: Device) -> tuple[str, str, str]:
+        """Return ``(input_kind, input_spec, source_key)`` for Cast HTTP stream."""
+        controls = cast_controls_key(device)
+        path = ""
+        try:
+            path = self._session.active_file_path() or ""
+        except Exception:  # noqa: BLE001
+            path = ""
+        transport = self._session.get_transport()
+        if path and transport.state == TransportState.PLAYING:
+            return "file", path, f"file:{path}|{controls}"
+        # Prefer pulse feeder when available so live capture/streaming fans out.
+        if self._tools.get("pactl") and not self._env_dry_run():
+            spec = f"{self._feeder}.monitor"
+            return "pulse", spec, f"pulse:{spec}|{controls}"
+        spec = cast_anullsrc(device)
+        return "lavfi", spec, f"lavfi:{spec}|{controls}"
+
+    def _restart_cast_stream(self, device: Device) -> None:
+        """(Re)start HTTP mp3 listen for an enabled Cast sink; kick soft-fail."""
+        self._stop_cast_stream(device.id)
+        if device.kind != DeviceKind.CAST or not device.enabled:
+            device.connected = False
+            return
+
+        kind, spec, source_key = self._cast_desired_source(device)
+        if self._env_dry_run():
+            dry_cmd = build_cast_ffmpeg(
+                device, input_kind=kind, input_spec=spec, ffmpeg_bin="ffmpeg"
+            )
+            log.info("Dry-run Cast (%s): %s", source_key, " ".join(dry_cmd))
+            device.connected = True
+            self._cast_source_keys[device.id] = source_key
+            return
+
+        free_detail = free_cast_listen_port(int(device.listen_port))
+        log.info("Cast free :%s — %s", device.listen_port, free_detail)
+
+        ff = self._tools.get("ffmpeg")
+        if not ff:
+            log.warning("ffmpeg missing — cannot start Cast stream for %s", device.id)
+            device.connected = False
+            self._cast_soft_warn = "ffmpeg missing — Cast stream soft-fail"
+            return
+
+        self._ensure_feeder()
+        cmd = build_cast_ffmpeg(
+            device, input_kind=kind, input_spec=spec, ffmpeg_bin=ff
+        )
+        try:
+            log_path = repo_root() / "config" / f"cast-{device.id}.ffmpeg.log"
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            log_fh = log_path.open("w", encoding="utf-8")
+            self._cast_procs[device.id] = subprocess.Popen(
+                cmd,
+                stdout=subprocess.DEVNULL,
+                stderr=log_fh,
+                text=True,
+            )
+            try:
+                log_fh.close()
+            except OSError:
+                pass
+            time.sleep(0.25)
+            proc = self._cast_procs.get(device.id)
+            if proc is None or proc.poll() is not None:
+                err = ""
+                try:
+                    err = log_path.read_text(encoding="utf-8")[-2000:]
+                except OSError:
+                    err = ""
+                self._cast_procs.pop(device.id, None)
+                self._cast_source_keys.pop(device.id, None)
+                device.connected = False
+                self._cast_soft_warn = (
+                    f"Cast stream {device.id} exited — delay/volume soft-fail"
+                )
+                log.warning(
+                    "Cast stream %s exited (code %s): %s",
+                    device.id,
+                    getattr(proc, "returncode", "?"),
+                    (err or "").strip() or "(no stderr)",
+                )
+                return
+            device.connected = True
+            self._cast_source_keys[device.id] = source_key
+            log.info(
+                "Cast HTTP %s → %s (pid %s, source=%s, delay=%sms)",
+                device.id,
+                cast_http_url(device),
+                proc.pid,
+                source_key,
+                device.delay_ms,
+            )
+        except OSError as exc:
+            log.warning("Failed to start Cast stream %s: %s", device.id, exc)
+            device.connected = False
+            self._cast_soft_warn = f"Cast stream soft-fail: {exc}"
+            return
+
+        # Kick Nest Mini to pull the stream — soft-fail keeps BT/SPP up.
+        try:
+            ok, detail = kick_cast_playback(device)
+            if not ok:
+                self._cast_soft_warn = detail
+                log.info("Cast kick soft-fail %s: %s", device.id, detail)
+            else:
+                log.info("Cast kick ok %s: %s", device.id, detail)
+        except Exception as exc:  # noqa: BLE001
+            self._cast_soft_warn = f"Cast kick soft-fail: {exc}"
+            log.warning("Cast kick soft-fail %s: %s", device.id, exc)
+
+        # Optional receiver volume — ffmpeg -af already applied; soft-fail OK.
+        try:
+            vok, vdetail = apply_cast_volume(device)
+            if not vok:
+                log.debug("Cast volume soft-fail %s: %s", device.id, vdetail)
+        except Exception as exc:  # noqa: BLE001
+            log.debug("Cast volume soft-fail %s: %s", device.id, exc)
+
+    def _ensure_cast_stream(self, device: Device) -> None:
+        if device.kind != DeviceKind.CAST:
+            return
+        if not device.enabled:
+            self._stop_cast_stream(device.id)
+            device.connected = False
+            return
+        _kind, _spec, source_key = self._cast_desired_source(device)
+        if (
+            self._cast_stream_alive(device.id)
+            and self._cast_source_keys.get(device.id) == source_key
+        ):
+            device.connected = True
+            return
+        self._restart_cast_stream(device)
+
+    def _sync_cast_streams(self, only_device: str | None = None) -> None:
+        """Keep enabled Cast sinks streaming without bouncing matching processes."""
+        for device in self._devices.values():
+            if device.kind != DeviceKind.CAST:
+                continue
+            if only_device and device.id != only_device:
+                continue
+            try:
+                self._ensure_cast_stream(device)
+            except Exception as exc:  # noqa: BLE001 — never take down the hub
+                self._cast_soft_warn = f"Cast sync soft-fail: {exc}"
+                log.warning("Cast sync soft-fail %s: %s", device.id, exc)
+
     def _ensure_graph(self, only_device: str | None = None) -> GraphPlan:
         """Ensure feeder → delay/volume → enabled sinks.
 
@@ -1260,8 +1474,9 @@ class PipeWireBackend(AudioBackend):
                 len(plan.links),
                 len(plan.skipped),
             )
-            # Still "arm" SPP in dry-run so UI shows connected when enabled.
+            # Still "arm" SPP/Cast in dry-run so UI shows connected when enabled.
             self._sync_spp_listeners(only_device=only_device)
+            self._sync_cast_streams(only_device=only_device)
             return plan
 
         # Live path — one feeder null-sink (idempotent; no duplicate soft-loads).
@@ -1271,8 +1486,8 @@ class PipeWireBackend(AudioBackend):
             if only_device and link.device_id != only_device:
                 continue
             device = self._devices.get(link.device_id)
-            if device and device.kind == DeviceKind.NETWORK_SPP:
-                continue  # SPP ffmpeg is long-lived; see _sync_spp_listeners
+            if device and device.kind in {DeviceKind.NETWORK_SPP, DeviceKind.CAST}:
+                continue  # SPP/Cast ffmpeg is long-lived; see _sync_* helpers
             self._unload_loopback(link.device_id)
             for cmd in link.commands:
                 proc = self._exec_soft(cmd)
@@ -1292,13 +1507,14 @@ class PipeWireBackend(AudioBackend):
         for device in self._devices.values():
             if only_device and device.id != only_device:
                 continue
-            if device.kind == DeviceKind.NETWORK_SPP:
+            if device.kind in {DeviceKind.NETWORK_SPP, DeviceKind.CAST}:
                 continue
             if not device.enabled:
                 self._unload_loopback(device.id)
 
-        # SPP TCP listeners share the feeder; independent of bluez loopbacks.
+        # SPP / Cast share the feeder; independent of bluez loopbacks.
         self._sync_spp_listeners(only_device=only_device)
+        self._sync_cast_streams(only_device=only_device)
         return plan
 
     def _unload_capture(self, host_id: Optional[str] = None) -> None:
@@ -2036,7 +2252,7 @@ class PipeWireBackend(AudioBackend):
             self._persist()
 
             # Per-sink controls only — never treat delay/volume as global transport.
-            spp_restart_fields = {
+            control_restart_fields = {
                 "listen_host",
                 "listen_port",
                 "sample_rate",
@@ -2045,13 +2261,25 @@ class PipeWireBackend(AudioBackend):
                 "delay_ms",
                 "volume",
                 "mute",
+                "cast_uuid",
+                "cast_host",
+                "cast_port",
             }
-            if updated.kind == DeviceKind.NETWORK_SPP and spp_restart_fields & set(
+            if updated.kind == DeviceKind.NETWORK_SPP and control_restart_fields & set(
                 updates
             ):
                 # Rebuild ffmpeg listen with this sink's -af adelay/volume.
                 self._restart_spp_listener(updated)
-            elif updated.kind != DeviceKind.NETWORK_SPP:
+            elif updated.kind == DeviceKind.CAST and control_restart_fields & set(
+                updates
+            ):
+                # Cast delay/volume → ffmpeg -af restart; receiver volume soft-fail.
+                try:
+                    self._restart_cast_stream(updated)
+                except Exception as exc:  # noqa: BLE001
+                    self._cast_soft_warn = f"Cast delay/volume soft-fail: {exc}"
+                    log.warning("Cast control soft-fail %s: %s", device_id, exc)
+            elif updated.kind == DeviceKind.BLUETOOTH:
                 # BT / PipeWire: loopback latency_msec + wpctl on this node only.
                 if "delay_ms" in updates or "enabled" in updates or "pw_node" in updates:
                     self._ensure_graph(only_device=device_id)
@@ -2068,6 +2296,27 @@ class PipeWireBackend(AudioBackend):
 
             return updated.model_copy(deep=True)
 
+    def _annotate_cast_rows(
+        self, rows: list[DiscoveredCastSink]
+    ) -> list[DiscoveredCastSink]:
+        configured = {
+            d.name.strip().lower(): d.id
+            for d in self._devices.values()
+            if d.kind == DeviceKind.CAST and d.name.strip()
+        }
+        also_uuid = {
+            d.cast_uuid.strip().lower(): d.id
+            for d in self._devices.values()
+            if d.kind == DeviceKind.CAST and d.cast_uuid.strip()
+        }
+        out: list[DiscoveredCastSink] = []
+        for item in rows:
+            cfg = configured.get(item.name.lower()) or also_uuid.get(
+                (item.uuid or "").lower()
+            )
+            out.append(item.model_copy(update={"configured_id": cfg}))
+        return out
+
     def discover_device_setup(self) -> DeviceDiscoverResponse:
         with self._lock:
             # Refresh discovery forces a BT reconnect pass (UI "Refresh").
@@ -2077,9 +2326,24 @@ class PipeWireBackend(AudioBackend):
                 log.debug("BT reconnect on discover: %s", exc)
             adapters, capacity, soft_warn = self._adapter_snapshot()
             _by_name, _by_mac, rows, detail = self._discovery_maps()
+            cast_result = discover_cast_devices()
+            cast_rows = self._annotate_cast_rows(cast_result.devices)
+            if cast_result.soft_warn:
+                soft_warn = (
+                    f"{soft_warn}; {cast_result.soft_warn}"
+                    if soft_warn
+                    else cast_result.soft_warn
+                )
+            if self._cast_soft_warn:
+                soft_warn = (
+                    f"{soft_warn}; {self._cast_soft_warn}"
+                    if soft_warn
+                    else self._cast_soft_warn
+                )
             try:
                 self.refresh_sink_map()
                 self._sync_spp_listeners()
+                self._sync_cast_streams()
             except Exception as exc:  # noqa: BLE001
                 log.debug("post-discover sync: %s", exc)
             spp = next(
@@ -2095,8 +2359,10 @@ class PipeWireBackend(AudioBackend):
                 )
             path = devices_config_path()
             adapter_note = f"; {self._bt_adapters_detail}" if self._bt_adapters_detail else ""
+            cast_note = f"; {cast_result.detail}" if cast_result.detail else ""
             return DeviceDiscoverResponse(
                 bluetooth=rows,
+                cast=cast_rows,
                 spp_default=spp.model_copy(deep=True),
                 adapters=adapters,
                 adapter_capacity=capacity,
@@ -2104,25 +2370,57 @@ class PipeWireBackend(AudioBackend):
                 config_path=str(path),
                 config_ok=self._config_ok,
                 config_detail=self._config_detail,
-                detail=f"{detail}{adapter_note}{readiness}",
+                detail=f"{detail}{adapter_note}{cast_note}{readiness}",
             )
 
     def apply_devices_config(self, entries: list[DeviceConfigEntry]) -> list[Device]:
         with self._lock:
             by_name, by_mac, _rows, _detail = self._discovery_maps()
-            # Stop SPP listeners that may be removed.
+            cast_result = discover_cast_devices(timeout_s=1.5)
+            cast_by_name = {
+                d.name.lower(): {
+                    "uuid": d.uuid,
+                    "host": d.host,
+                    "port": d.port,
+                    "model": d.model,
+                    "connected": d.connected,
+                }
+                for d in cast_result.devices
+                if d.name
+            }
+            cast_by_uuid = {
+                d.uuid.lower(): cast_by_name[d.name.lower()]
+                for d in cast_result.devices
+                if d.uuid and d.name.lower() in cast_by_name
+            }
+            # Stop SPP/Cast listeners that may be removed.
             old_spp = {
                 d.id for d in self._devices.values() if d.kind == DeviceKind.NETWORK_SPP
+            }
+            old_cast = {
+                d.id for d in self._devices.values() if d.kind == DeviceKind.CAST
             }
             resolved = resolve_devices_from_config(
                 entries,
                 existing=list(self._devices.values()),
                 discovery_by_name=by_name,
                 discovery_by_mac=by_mac,
+                cast_by_name=cast_by_name,
+                cast_by_uuid=cast_by_uuid,
             )
+            for d in resolved:
+                if (
+                    d.kind == DeviceKind.CAST
+                    and d.enabled
+                    and d.delay_ms == 0
+                    and d.id not in self._devices
+                ):
+                    d.delay_ms = DEFAULT_CAST_DELAY_MS
             new_ids = {d.id for d in resolved}
             for spp_id in old_spp - new_ids:
                 self._stop_spp_listener(spp_id)
+            for cast_id in old_cast - new_ids:
+                self._stop_cast_stream(cast_id)
             self._devices = {d.id: d.model_copy(deep=True) for d in resolved}
             self._pw_node_ids = {
                 d.id: d.pw_node
@@ -2393,21 +2691,23 @@ class PipeWireBackend(AudioBackend):
         return self._session.get_transport()
 
     def set_transport(self, body: TransportPut) -> Transport:
-        # Ensure BT sink graph before Play; swap feeder; then align SPP source
-        # (anullsrc ↔ ffmpeg -re -i file) without bouncing a matching listener.
+        # Ensure BT sink graph before Play; swap feeder; then align SPP/Cast
+        # (anullsrc ↔ file/pulse) without bouncing a matching listener.
         if body.state is TransportState.PLAYING:
             self._ensure_graph()
         transport = self._session.set_transport(body)
         self._sync_spp_listeners()
+        self._sync_cast_streams()
         return transport
 
     def list_sources(self) -> list[Source]:
         return self._session.list_sources()
 
     def set_active_source(self, source_id: str) -> Transport:
-        # Feeder swap only — sink loopbacks remain. Revive dead SPP listens.
+        # Feeder swap only — sink loopbacks remain. Revive dead SPP/Cast streams.
         transport = self._session.set_active_source(source_id)
         self._sync_spp_listeners()
+        self._sync_cast_streams()
         return transport
 
     def list_queue(self) -> list[QueueItem]:
@@ -2425,6 +2725,7 @@ class PipeWireBackend(AudioBackend):
     def set_active_queue_item(self, item_id: str) -> Transport:
         transport = self._session.set_active_queue_item(item_id)
         self._sync_spp_listeners()
+        self._sync_cast_streams()
         return transport
 
     def list_inputs(self) -> list[InputHost]:

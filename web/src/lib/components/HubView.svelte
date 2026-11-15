@@ -109,6 +109,8 @@
 
 	/** @type {import('$lib/api.js').DiscoveredBluetoothSink[]} */
 	let discoveredBt = $state([]);
+	/** @type {import('$lib/api.js').DiscoveredCastSink[]} */
+	let discoveredCast = $state([]);
 	/** @type {import('$lib/api.js').BluetoothAdapter[]} */
 	let btAdapters = $state([]);
 	let btAdapterCapacity = $state(0);
@@ -117,6 +119,8 @@
 	let sppDefault = $state(null);
 	/** @type {Set<string>} */
 	let setupBtNames = $state(new Set());
+	/** @type {Set<string>} */
+	let setupCastNames = $state(new Set());
 	let setupSppEnabled = $state(true);
 	let setupSppHost = $state('0.0.0.0');
 	let setupSppPort = $state(1234);
@@ -308,7 +312,9 @@
 	/** @param {import('$lib/api.js').Device} d */
 	function sinkStatusLabel(d) {
 		if (!d.enabled) return 'off';
-		if (d.kind === 'network_spp') return d.connected ? 'READY' : 'MISSING';
+		if (d.kind === 'network_spp' || d.kind === 'cast') {
+			return d.connected ? 'READY' : 'MISSING';
+		}
 		return d.connected ? 'READY' : 'MISSING';
 	}
 
@@ -401,18 +407,41 @@
 		for (const bt of discoveredBt) {
 			if (
 				bt.configured_id ||
-				devices.some((d) => d.kind !== 'network_spp' && d.name === bt.name && d.enabled)
+				devices.some((d) => d.kind === 'bluetooth' && d.name === bt.name && d.enabled)
 			) {
 				names.add(bt.name);
 			}
 		}
 		for (const d of devices) {
-			if (d.kind === 'network_spp') continue;
+			if (d.kind !== 'bluetooth') continue;
 			if (discoveredBt.some((bt) => bt.name === d.name) && d.enabled) {
 				names.add(d.name);
 			}
 		}
 		setupBtNames = names;
+	}
+
+	/**
+	 * @param {import('$lib/api.js').DiscoveredCastSink[]} rows
+	 */
+	function applyCastRows(rows) {
+		discoveredCast = rows || [];
+		const names = new Set();
+		for (const c of discoveredCast) {
+			if (
+				c.configured_id ||
+				devices.some((d) => d.kind === 'cast' && d.name === c.name && d.enabled)
+			) {
+				names.add(c.name);
+			}
+		}
+		for (const d of devices) {
+			if (d.kind !== 'cast') continue;
+			if (discoveredCast.some((c) => c.name === d.name) && d.enabled) {
+				names.add(d.name);
+			}
+		}
+		setupCastNames = names;
 	}
 
 	/**
@@ -434,6 +463,7 @@
 	async function refreshDiscovery() {
 		const disc = await discoverDevices();
 		applyBtRows(disc.bluetooth || []);
+		applyCastRows(disc.cast || []);
 		applyAdapterStatus(disc);
 		sppDefault = disc.spp_default || null;
 		setupDetail = disc.detail || '';
@@ -778,6 +808,14 @@
 		setupBtNames = next;
 	}
 
+	/** @param {string} name */
+	function toggleSetupCast(name) {
+		const next = new Set(setupCastNames);
+		if (next.has(name)) next.delete(name);
+		else next.add(name);
+		setupCastNames = next;
+	}
+
 	async function saveDeviceSetup() {
 		if (setupBusy) return;
 		setupBusy = true;
@@ -793,6 +831,23 @@
 					kind: 'bluetooth',
 					enabled: true,
 					pw_node: bt.pw_node || undefined
+				});
+			}
+			for (const c of discoveredCast) {
+				if (!setupCastNames.has(c.name)) continue;
+				entries.push({
+					id: c.configured_id || undefined,
+					name: c.name,
+					kind: 'cast',
+					enabled: true,
+					cast_uuid: c.uuid || undefined,
+					cast_host: c.host || undefined,
+					cast_port: c.port || 8009,
+					listen_host: '0.0.0.0',
+					listen_port: 8090,
+					sample_rate: 48000,
+					channels: 2,
+					delay_ms: 300
 				});
 			}
 			entries.push({
@@ -1827,6 +1882,40 @@
 				</ul>
 			{/if}
 
+			<div class="setup-col cast-output-col">
+				<h3 class="setup-sub">Cast / Nest Mini</h3>
+				<p class="hint">
+					Wi‑Fi discovery (mDNS). Cast latency is higher than BT — default delay 300&nbsp;ms.
+					Stream URL uses <code>{wifiIpLabel}:8090</code>.
+				</p>
+				{#if discoveredCast.length === 0}
+					<p class="hint">No Cast devices yet — Refresh on the same Wi‑Fi as Nest Mini.</p>
+				{:else}
+					<ul class="setup-list">
+						{#each discoveredCast as c (c.uuid || c.host || c.name)}
+							<li>
+								<label class="check setup-check">
+									<input
+										type="checkbox"
+										checked={setupCastNames.has(c.name)}
+										onchange={() => toggleSetupCast(c.name)}
+									/>
+									<span>
+										<strong>{c.name}</strong>
+										<span class="device-sub">
+											{c.model || 'Cast'}
+											{#if c.host}
+												· {c.host}
+											{/if}
+										</span>
+									</span>
+								</label>
+							</li>
+						{/each}
+					</ul>
+				{/if}
+			</div>
+
 			<div class="setup-col spp-output-col">
 				<h3 class="setup-sub">Phone SPP output</h3>
 				<p class="hint spp-phone-hint">
@@ -1906,6 +1995,8 @@
 									{d.name}
 									{#if d.kind === 'network_spp'}
 										<span class="type-chip">SPP</span>
+									{:else if d.kind === 'cast'}
+										<span class="type-chip">Cast</span>
 									{:else}
 										<span class="type-chip">BT</span>
 									{/if}
@@ -1913,6 +2004,8 @@
 								<span class="device-sub">
 									{#if d.kind === 'network_spp'}
 										:{d.listen_port || 1234} · {d.sample_rate || 48000}/{d.channels || 1}
+									{:else if d.kind === 'cast'}
+										{d.cast_host || 'Wi‑Fi'} · HTTP :{d.listen_port || 8090} · delay≥BT
 									{:else if d.mac}
 										{d.mac}{#if d.hci} · {d.hci}{/if}
 									{:else if d.hci}
@@ -1961,7 +2054,7 @@
 								<input
 									type="range"
 									min="0"
-									max="500"
+									max={d.kind === 'cast' ? 2000 : 500}
 									step="5"
 									value={d.delay_ms}
 									disabled={!d.enabled}

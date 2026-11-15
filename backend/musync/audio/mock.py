@@ -30,6 +30,7 @@ from ..models import (
     DeviceKind,
     DevicePatch,
     DiscoveredBluetoothSink,
+    DiscoveredCastSink,
     DiscoveredCaptureSource,
     Health,
     HostKind,
@@ -46,6 +47,7 @@ from ..models import (
 )
 from ..nowplaying import DEMO_SOURCE_ID
 from .avrcp import AvrcpAction, AvrcpBridge, parse_action, relay_action_to_session
+from .cast import DEFAULT_CAST_DELAY_MS, mock_nest_mini
 from .host_player import HostSpeakerPlayer
 
 # Laptop/dev discovery fixtures — friendly names, no real bluez.
@@ -85,6 +87,9 @@ _MOCK_SCAN_ONLY = [
         connected=False,
     ),
 ]
+
+# Wi‑Fi Cast fixture — Nest Mini (higher latency than BT A2DP).
+_MOCK_CAST = [mock_nest_mini()]
 
 # Six healthy HCIs for ≤6 A2DP sinks; plus one dead USB stick that must not block.
 _MOCK_ADAPTERS = [
@@ -339,8 +344,11 @@ class MockAudioBackend(AudioBackend):
                 updates["gain"] = clamp_gain(updates["gain"])
             data.update(updates)
             updated = Device.model_validate(data)
-            # SPP mock: "connected" means armed/listening when enabled.
-            if updated.kind == DeviceKind.NETWORK_SPP and "connected" not in updates:
+            # SPP / Cast mock: "connected" means armed when enabled.
+            if (
+                updated.kind in {DeviceKind.NETWORK_SPP, DeviceKind.CAST}
+                and "connected" not in updates
+            ):
                 updated.connected = bool(updated.enabled)
             trial = [updated if d.id == device_id else d for d in self._devices.values()]
             validate_devices(trial)
@@ -394,9 +402,29 @@ class MockAudioBackend(AudioBackend):
                     self._bt_scan_cache[mac] = item.model_copy(deep=True)
         return self._annotate_bt_rows(list(by_mac.values()))
 
+    def _cast_discovery_rows(self) -> list[DiscoveredCastSink]:
+        configured = {
+            d.name.strip().lower(): d.id
+            for d in self._devices.values()
+            if d.kind == DeviceKind.CAST and d.name.strip()
+        }
+        also_uuid = {
+            d.cast_uuid.strip().lower(): d.id
+            for d in self._devices.values()
+            if d.kind == DeviceKind.CAST and d.cast_uuid.strip()
+        }
+        out: list[DiscoveredCastSink] = []
+        for item in _MOCK_CAST:
+            cfg = configured.get(item.name.lower()) or also_uuid.get(
+                (item.uuid or "").lower()
+            )
+            out.append(item.model_copy(update={"configured_id": cfg}))
+        return out
+
     def discover_device_setup(self) -> DeviceDiscoverResponse:
         with self._lock:
             bluetooth = self._bt_discovery_rows()
+            cast = self._cast_discovery_rows()
             spp = next(
                 (d for d in self._devices.values() if d.kind == DeviceKind.NETWORK_SPP),
                 default_spp_device(),
@@ -406,6 +434,7 @@ class MockAudioBackend(AudioBackend):
             scan_note = " · scanning" if self._bt_scanning else ""
             return DeviceDiscoverResponse(
                 bluetooth=bluetooth,
+                cast=cast,
                 spp_default=spp.model_copy(deep=True),
                 adapters=adapters,
                 adapter_capacity=capacity,
@@ -414,7 +443,7 @@ class MockAudioBackend(AudioBackend):
                 config_ok=self._config_ok,
                 config_detail=self._config_detail,
                 detail=(
-                    "mock discovery — Qudelix-5K + Kitchen Speaker fixtures"
+                    "mock discovery — Qudelix-5K + Kitchen Speaker + Nest Mini Cast"
                     f"{scan_note}"
                 ),
             )
@@ -630,12 +659,41 @@ class MockAudioBackend(AudioBackend):
                 for d in _MOCK_DISCOVERED
                 if d.mac
             }
+            cast_by_name = {
+                d.name.lower(): {
+                    "uuid": d.uuid,
+                    "host": d.host,
+                    "port": d.port,
+                    "model": d.model,
+                    "connected": d.connected,
+                }
+                for d in _MOCK_CAST
+            }
+            cast_by_uuid = {
+                d.uuid.lower(): cast_by_name[d.name.lower()]
+                for d in _MOCK_CAST
+                if d.uuid
+            }
             resolved = resolve_devices_from_config(
                 entries,
                 existing=list(self._devices.values()),
                 discovery_by_name=by_name,
                 discovery_by_mac=by_mac,
+                cast_by_name=cast_by_name,
+                cast_by_uuid=cast_by_uuid,
             )
+            # Cast sinks keep the higher default delay when newly enabled.
+            for d in resolved:
+                if (
+                    d.kind == DeviceKind.CAST
+                    and d.enabled
+                    and d.delay_ms == 0
+                    and not any(
+                        x.id == d.id and x.kind == DeviceKind.CAST
+                        for x in self._devices.values()
+                    )
+                ):
+                    d.delay_ms = DEFAULT_CAST_DELAY_MS
             self._devices = {d.id: d.model_copy(deep=True) for d in resolved}
             self._persist()
             return [d.model_copy(deep=True) for d in self._devices.values()]

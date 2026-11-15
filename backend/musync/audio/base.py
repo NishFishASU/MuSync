@@ -49,12 +49,12 @@ class AudioBackend(ABC):
 
     @abstractmethod
     def discover_device_setup(self) -> DeviceDiscoverResponse:
-        """List bluez sinks by name + always-available SPP defaults (no MAC typing)."""
+        """List bluez + Cast (Nest Mini) + always-available SPP defaults."""
         ...
 
     @abstractmethod
     def apply_devices_config(self, entries: list[DeviceConfigEntry]) -> list[Device]:
-        """Persist UI sink selection (type + SPP details; MAC filled from discovery)."""
+        """Persist UI sink selection (BT/SPP/Cast; MAC/UUID filled from discovery)."""
         ...
 
     @abstractmethod
