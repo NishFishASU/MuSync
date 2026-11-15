@@ -34,8 +34,9 @@ export MUSYNC_BACKEND=pipewire
 3. If Play switched SPP from silence → file, reconnect the phone once.
 4. **Qudelix AVRCP:** with **any hub now-playing** (hub-local file, Spotify Connect, YouTube, or phone media captured as A2DP **input**) playing to Qudelix, press headset play/pause/skip — Now playing should follow. **Play** also promotes that headset to the front of turn-taking (solo unmute) and resumes if paused. Volume buttons still sync Absolute Volume → Outputs slider.
 5. **Live pass-through:** phone A2DP → Refresh inputs → expect a `Live · …` queue/now-playing row (not raw PipeWire bypass). Qudelix pause/play then mutes/resumes hub capture. Queue tab shows eligible sinks (`Ready: …`) or why none.
-6. **Local Play timing:** click Play — UI should flip immediately (optimistic); Qudelix audio within ~300–800 ms when the graph is already up. Phone Spotify pause / turn-taking / SPP file-switch run after the Play response. Hidden browser tab pauses SPA `/api` pollers (Page Visibility).
-7. **OS limit:** phone Files / Spotify / YouTube playing **only on the phone** (not routed into MuSync as a hub source) cannot be controlled from Qudelix — Android/iOS do not expose that to the Pi.
+6. **Local Play timing:** click Play — UI should flip immediately (optimistic); Qudelix audio within ~300–800 ms when the graph is already up. Phone Spotify pause / turn-taking / SPP file-switch run after the Play response. Hidden browser tab pauses SPA `/api` pollers + SSE (Page Visibility).
+7. **Now-playing push:** Play / pause / skip should update Now playing via SSE (`GET /api/events`) without waiting on the old now-playing poll. DevTools → Network → `events` EventStream.
+8. **OS limit:** phone Files / Spotify / YouTube playing **only on the phone** (not routed into MuSync as a hub source) cannot be controlled from Qudelix — Android/iOS do not expose that to the Pi.
 
 ```bash
 # AVRCP truth (venv must import apt dbus/gi — run_pi.sh enables system-site-packages)

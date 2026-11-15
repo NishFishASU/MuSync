@@ -5,35 +5,52 @@
  */
 
 /**
- * SPA poll cadence (ms) — cuts idle/hidden API chatter vs prior fixed 1 Hz × 2.
- * Playing: transport 400ms, now-playing 1.5s (snappier Play→UI; client still ticks scrub).
- * Idle: transport 4s, now-playing 8s → ~0.375 req/s (MDAS-70 light trim).
+ * SPA poll cadence (ms) — fallback when SSE `/api/events` is down (MDAS-71).
+ * With SSE connected: no now-playing poll; rare transport poll only if needed.
+ * Playing fallback: transport 2s (position drift); idle 8s.
  * Hidden tab: pause until visible (0 req/s) via Page Visibility API.
  */
-export const SPA_POLL_TRANSPORT_PLAYING_MS = 400;
-export const SPA_POLL_TRANSPORT_IDLE_MS = 4000;
-export const SPA_POLL_NOW_PLAYING_PLAYING_MS = 1500;
-export const SPA_POLL_NOW_PLAYING_IDLE_MS = 8000;
+export const SPA_POLL_TRANSPORT_PLAYING_MS = 2000;
+export const SPA_POLL_TRANSPORT_IDLE_MS = 8000;
+export const SPA_POLL_NOW_PLAYING_PLAYING_MS = 4000;
+export const SPA_POLL_NOW_PLAYING_IDLE_MS = 12000;
+/** When SSE is live, skip now-playing GET and slow transport further. */
+export const SPA_POLL_TRANSPORT_SSE_MS = 15000;
 
 /**
- * @param {{ playing?: boolean, hidden?: boolean }} opts
- * @returns {{ transportMs: number, nowPlayingMs: number, paused: boolean }}
+ * @param {{ playing?: boolean, hidden?: boolean, sseConnected?: boolean }} opts
+ * @returns {{ transportMs: number, nowPlayingMs: number, paused: boolean, push: boolean }}
  */
-export function spaPollCadence({ playing = false, hidden = false } = {}) {
+export function spaPollCadence({
+	playing = false,
+	hidden = false,
+	sseConnected = false
+} = {}) {
 	if (hidden) {
-		return { transportMs: 0, nowPlayingMs: 0, paused: true };
+		return { transportMs: 0, nowPlayingMs: 0, paused: true, push: false };
+	}
+	if (sseConnected) {
+		// Hub pushes song start / state change; client ticks scrub locally.
+		return {
+			transportMs: SPA_POLL_TRANSPORT_SSE_MS,
+			nowPlayingMs: 0,
+			paused: false,
+			push: true
+		};
 	}
 	if (playing) {
 		return {
 			transportMs: SPA_POLL_TRANSPORT_PLAYING_MS,
 			nowPlayingMs: SPA_POLL_NOW_PLAYING_PLAYING_MS,
-			paused: false
+			paused: false,
+			push: false
 		};
 	}
 	return {
 		transportMs: SPA_POLL_TRANSPORT_IDLE_MS,
 		nowPlayingMs: SPA_POLL_NOW_PLAYING_IDLE_MS,
-		paused: false
+		paused: false,
+		push: false
 	};
 }
 
@@ -43,6 +60,35 @@ export function spaPollRequestsPerSecond(cadence) {
 	const t = cadence.transportMs > 0 ? 1000 / cadence.transportMs : 0;
 	const n = cadence.nowPlayingMs > 0 ? 1000 / cadence.nowPlayingMs : 0;
 	return t + n;
+}
+
+/**
+ * Subscribe to hub SSE playback push (`GET /api/events`).
+ * @param {{
+ *   onPlayback?: (payload: { reason?: string, transport?: object, now_playing?: object }) => void,
+ *   onError?: (err: Event) => void,
+ *   onOpen?: () => void
+ * }} handlers
+ * @returns {{ close: () => void }}
+ */
+export function subscribePlaybackEvents(handlers = {}) {
+	const { onPlayback, onError, onOpen } = handlers;
+	const es = new EventSource('/api/events');
+	es.addEventListener('playback', (ev) => {
+		try {
+			const data = JSON.parse(ev.data);
+			onPlayback?.(data);
+		} catch (err) {
+			console.error('SSE playback parse', err);
+		}
+	});
+	es.onopen = () => onOpen?.();
+	es.onerror = (err) => onError?.(err);
+	return {
+		close() {
+			es.close();
+		}
+	};
 }
 
 /** @typedef {'stopped' | 'playing' | 'paused'} TransportState */
@@ -951,6 +997,11 @@ export function addStreamingTrack(body) {
 /** @returns {Promise<NowPlaying>} */
 export function getNowPlaying() {
 	return api('/api/now-playing');
+}
+
+/** @returns {string} SSE path for hub playback push */
+export function playbackEventsPath() {
+	return '/api/events';
 }
 
 /** @returns {Promise<WifiStatus>} */

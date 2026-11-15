@@ -164,6 +164,7 @@ class SourceSession:
         on_feeder_stop: Optional[Callable[[], None]] = None,
         on_feeder_start: Optional[Callable[[], None]] = None,
         on_auto_advance: Optional[Callable[[], None]] = None,
+        on_playback_change: Optional[Callable[[str], None]] = None,
         lock: Optional[threading.RLock] = None,
     ) -> None:
         self._lock = lock or threading.RLock()
@@ -173,6 +174,8 @@ class SourceSession:
         # Fired after binding the next cue on track end (before feeder start)
         # so backends can rotate the solo turn device.
         self._on_auto_advance = on_auto_advance
+        # Hub SSE push (MDAS-71) — reason: play|pause|stop|skip|queue|advance|…
+        self._on_playback_change = on_playback_change
         self._id_seq = itertools.count(1)
         self._sources = self._build_sources()
         self._queue: list[QueueItem] = []
@@ -197,6 +200,22 @@ class SourceSession:
         self._play_started_wall: Optional[float] = None
         self._play_started_pos: int = 0
         self._advancing_track: bool = False
+
+    def set_playback_change_hook(
+        self, hook: Optional[Callable[[str], None]]
+    ) -> None:
+        """Attach/replace SSE publish hook after backend construction."""
+        self._on_playback_change = hook
+
+    def _emit_playback(self, reason: str) -> None:
+        """Notify SPA subscribers. Safe under ``_lock`` (hook should defer work)."""
+        hook = self._on_playback_change
+        if not hook:
+            return
+        try:
+            hook(reason)
+        except Exception:  # noqa: BLE001 — never break transport on push fail
+            pass
 
     @property
     def inputs(self) -> InputRegistry:
@@ -451,6 +470,7 @@ class SourceSession:
             self._play_started_pos = 0
             if self._on_feeder_stop:
                 self._on_feeder_stop()
+            self._emit_playback("advance")
             return
 
         self._advancing_track = True
@@ -468,12 +488,14 @@ class SourceSession:
                 self._transport.state = TransportState.STOPPED
                 self._play_started_wall = None
                 self._play_started_pos = 0
+                self._emit_playback("advance")
                 return
             self._transport.state = TransportState.PLAYING
             self._play_started_wall = time.monotonic()
             self._play_started_pos = 0
             if self._on_feeder_start:
                 self._on_feeder_start()
+            self._emit_playback("advance")
         finally:
             self._advancing_track = False
 
@@ -487,7 +509,7 @@ class SourceSession:
             duration = self._transport.duration_ms or 0
             if duration:
                 self._transport.position_ms = duration
-            self._handle_track_end()
+            self._handle_track_end()  # emits "advance"
             return self._transport.model_copy(deep=True)
 
     def get_loop(self) -> bool:
@@ -1102,7 +1124,9 @@ class SourceSession:
                 self._transport.state = TransportState.STOPPED
                 self._play_started_wall = None
                 self._play_started_pos = 0
-            return self._transport.model_copy(deep=True)
+            out = self._transport.model_copy(deep=True)
+        self._emit_playback("queue")
+        return out
 
     def skip_relative(self, delta: int) -> Transport:
         """AVRCP Next/Previous → adjacent queue item (wrap). Sinks stay linked.
@@ -1121,16 +1145,19 @@ class SourceSession:
                     self._play_started_pos = 0
                     if self._on_feeder_start:
                         self._on_feeder_start()
-                return self._transport.model_copy(deep=True)
-
-            ids = [q.id for q in self._queue]
-            qid = self._transport.queue_item_id
-            if qid in ids:
-                idx = ids.index(qid)
+                out = self._transport.model_copy(deep=True)
             else:
-                idx = 0 if delta >= 0 else len(ids) - 1
-            nxt = (idx + int(delta)) % len(ids)
-            return self.set_active_queue_item(ids[nxt])
+                ids = [q.id for q in self._queue]
+                qid = self._transport.queue_item_id
+                if qid in ids:
+                    idx = ids.index(qid)
+                else:
+                    idx = 0 if delta >= 0 else len(ids) - 1
+                nxt = (idx + int(delta)) % len(ids)
+                # Nested activate also emits "queue"; skip reason follows.
+                out = self.set_active_queue_item(ids[nxt])
+        self._emit_playback("skip")
+        return out
 
     def set_active_source(self, source_id: str) -> Transport:
         """Catalog picker: ensure a queue item for this source, then activate it.
@@ -1160,6 +1187,7 @@ class SourceSession:
             return self._transport.model_copy(deep=True)
 
     def set_transport(self, body: TransportPut) -> Transport:
+        reason = "change"
         with self._lock:
             self._tick_position()
             if body.queue_item_id is not None:
@@ -1169,6 +1197,7 @@ class SourceSession:
                 if self._on_feeder_stop:
                     self._on_feeder_stop()
                 self._bind_transport_to_item(item, reset_position=False)
+                reason = "queue"
                 if was_playing and item.available:
                     self._transport.state = TransportState.PLAYING
                     self._play_started_wall = time.monotonic()
@@ -1192,6 +1221,7 @@ class SourceSession:
                 if self._on_feeder_stop:
                     self._on_feeder_stop()
                 self._bind_transport_to_item(item, reset_position=False)
+                reason = "queue"
                 if was_playing and item.available:
                     self._transport.state = TransportState.PLAYING
                     self._play_started_wall = time.monotonic()
@@ -1213,11 +1243,21 @@ class SourceSession:
                     self._play_started_pos = pos
                     if self._on_feeder_start:
                         self._on_feeder_start()
+                if reason == "change":
+                    reason = "seek"
 
             if body.state is not None:
+                if body.state == TransportState.PLAYING:
+                    reason = "play"
+                elif body.state == TransportState.PAUSED:
+                    reason = "pause"
+                elif body.state == TransportState.STOPPED:
+                    reason = "stop"
                 self._apply_state(body.state)
 
-            return self._transport.model_copy(deep=True)
+            out = self._transport.model_copy(deep=True)
+        self._emit_playback(reason)
+        return out
 
     def active_file_path(self) -> Optional[str]:
         with self._lock:
