@@ -51,7 +51,7 @@ def _backend(tmp_path, monkeypatch) -> MockAudioBackend:
     )
 
 
-def test_catalog_has_typed_stubs(tmp_path, monkeypatch) -> None:
+def test_catalog_has_typed_sources(tmp_path, monkeypatch) -> None:
     backend = _backend(tmp_path, monkeypatch)
     sources = backend.list_sources()
     types = {s.type for s in sources}
@@ -62,7 +62,8 @@ def test_catalog_has_typed_stubs(tmp_path, monkeypatch) -> None:
     non_local = [s for s in sources if s.type != SourceType.LOCAL]
     assert non_local
     assert all(s.type.value in {"spotify", "apple", "input"} for s in non_local)
-    # Spotify/Apple remain stubs; live BT input may be available on mock.
+    # Hub Spotify/Apple placeholders stay unavailable until OAuth/track URI;
+    # live BT input is available on mock.
     assert all(not s.available for s in non_local if s.type != SourceType.INPUT)
     assert any(s.available for s in non_local if s.type == SourceType.INPUT)
 
@@ -74,13 +75,15 @@ def test_queue_seeded_and_source_type_switch(tmp_path, monkeypatch) -> None:
     local = next(q for q in queue if q.source_type == SourceType.LOCAL)
     assert local.available
 
-    # Switch song to Spotify stub — sinks untouched (mock has no graph teardown).
+    # Switch song to Spotify (unavailable without track) — sinks untouched.
     patched = backend.patch_queue_item(
         local.id, QueueItemPatch(source_type=SourceType.SPOTIFY)
     )
     assert patched.source_type == SourceType.SPOTIFY
     assert patched.available is False
-    assert patched.note and "stub" in patched.note.lower()
+    assert patched.note and (
+        "unavailable" in patched.note.lower() or "connect" in patched.note.lower()
+    )
 
     # Switch back to local.
     restored = backend.patch_queue_item(
@@ -95,7 +98,7 @@ def test_active_queue_switch_keeps_devices(tmp_path, monkeypatch) -> None:
     before = backend.list_devices()
     q = backend.list_queue()
     spotify = backend.add_queue_item(
-        QueueItemCreate(source_type=SourceType.SPOTIFY, title="Stub song")
+        QueueItemCreate(source_type=SourceType.SPOTIFY, title="Spotify cue")
     )
     transport = backend.set_active_queue_item(spotify.id)
     assert transport.queue_item_id == spotify.id
@@ -106,7 +109,7 @@ def test_active_queue_switch_keeps_devices(tmp_path, monkeypatch) -> None:
     assert [d.model_dump() for d in before] == [d.model_dump() for d in after]
 
 
-def test_cannot_play_stub(tmp_path, monkeypatch) -> None:
+def test_cannot_play_unavailable(tmp_path, monkeypatch) -> None:
     backend = _backend(tmp_path, monkeypatch)
     item = backend.add_queue_item(QueueItemCreate(source_type=SourceType.APPLE))
     backend.set_active_queue_item(item.id)
@@ -115,7 +118,8 @@ def test_cannot_play_stub(tmp_path, monkeypatch) -> None:
         raised = False
     except ValueError as exc:
         raised = True
-        assert "stub" in str(exc).lower() or "apple" in str(exc).lower()
+        low = str(exc).lower()
+        assert "unavailable" in low or "apple" in low or "stub" in low
     assert raised
 
 

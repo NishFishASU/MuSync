@@ -35,7 +35,7 @@ cd web && npm install && npm run dev   # terminal 2 — Vite on :5173
 
 Open the UI on a phone or PC on the same network (bind `MUSYNC_HOST=0.0.0.0` if needed).
 
-Portable hotspot join (pre-save SSID, join, show IP for SPP): [docs/wifi-join.md](docs/wifi-join.md).
+Wi-Fi join — home network or phone hotspot (pre-save SSID, join, show IP for SPP): [docs/wifi-join.md](docs/wifi-join.md).
 
 ### Tests
 

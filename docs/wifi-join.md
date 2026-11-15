@@ -1,8 +1,8 @@
-# Portable Wi-Fi join (phone hotspots)
+# Wi-Fi join (home network or phone hotspot)
 
-Join a phone hotspot from the MuSync web UI so you can reach the Pi for
-**SPP / LAN control** without SSH — useful outdoors or when the Pi is not
-on home Wi-Fi.
+Join **home Wi-Fi or a phone personal hotspot** from the MuSync web UI so
+you can reach the Pi for **SPP / LAN control** without SSH. The panel is
+**not hotspot-only** — any SSID NetworkManager can associate with works.
 
 ## Preferred: NetworkManager (`nmcli`)
 
@@ -48,7 +48,7 @@ automate wifi-connect; treat it as an optional OS-level bootstrap:
 
 1. Install/run wifi-connect once to get the Pi onto a network.
 2. Prefer switching to NetworkManager + MuSync `/api/wifi` for day-to-day
-   hotspot joins from the same UI used for sinks/SPP.
+   joins (home or hotspot) from the same UI used for sinks/SPP.
 
 ## Pi test steps
 
@@ -57,9 +57,9 @@ automate wifi-connect; treat it as an optional OS-level bootstrap:
    (or systemd). First bring-up can use Ethernet or a pre-saved home SSID.
 3. On a phone/laptop already on the Pi’s current network, open
    `http://<pi-ip>:8080` → **Wi-Fi** panel.
-4. Enable the phone’s personal hotspot; note its SSID + password.
-5. In the UI: enter SSID + password → **Save only** (optional) → **Join**.
-6. Confirm **IP** updates (often a `192.168.43.x` / `172.20.x` hotspot range).
+4. Enter **SSID / network name** (home router **or** phone hotspot) + password.
+5. **Save only** (optional) → **Join**.
+6. Confirm **Pi IP** updates (home LAN, or often `192.168.43.x` / `172.20.x` on hotspots).
 7. Point Simple Protocol Player (or the SPP sink) at that IP and MuSync port
    (see SPP docs when present). Re-open the UI at `http://<new-ip>:8080` if
    your browser was on the old network.

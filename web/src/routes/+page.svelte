@@ -19,6 +19,7 @@
 		forgetWifiNetwork,
 		getHealth,
 		SPOTIFY_LOGIN_HREF,
+		fetchSpotifyAuthorizeUrl,
 		getNowPlaying,
 		getStreamingStatus,
 		getTransport,
@@ -129,9 +130,20 @@
 	const wifiIpLabel = $derived(wifi?.ips?.length ? wifi.ips.join(', ') : '—');
 	const activeQueueId = $derived(transport?.queue_item_id ?? null);
 	const activeQueueItem = $derived(queue.find((q) => q.id === activeQueueId) ?? null);
-	/** Play disabled only when the active cue is not ready (stubs / unbound live). */
-	const activeIsStub = $derived(Boolean(activeQueueItem && !activeQueueItem.available));
+	/** Play disabled when the active cue is not ready (unavailable / unbound live). */
+	const activeUnavailable = $derived(Boolean(activeQueueItem && !activeQueueItem.available));
 	const liveHosts = $derived(inputs.filter((h) => h.connected && h.endpoint));
+	/** @type {string} */
+	let devicePickId = $state('');
+	$effect(() => {
+		if (!liveHosts.length) {
+			devicePickId = '';
+			return;
+		}
+		if (!liveHosts.some((h) => h.id === devicePickId)) {
+			devicePickId = liveHosts[0].id;
+		}
+	});
 	const activeIsVideo = $derived(
 		Boolean(
 			transport?.media_kind === 'video' ||
@@ -471,13 +483,30 @@
 		nowPlaying = await getNowPlaying();
 	}
 
-	/** Availability pill: only say stub when truly unavailable / mock. */
+	/** Availability pill — never label as “stub”. */
 	/** @param {{ available?: boolean, note?: string | null, source_type?: string, type?: string }} row */
 	function availabilityLabel(row) {
 		if (row.available) return 'ready';
 		const note = (row.note || '').toLowerCase();
 		if (note.includes('on-device') || note.includes('session')) return 'on-device';
-		return 'stub';
+		if (note.includes('drm') || note.includes('airplay')) return 'unavailable';
+		return 'unavailable';
+	}
+
+	async function onConnectSpotify() {
+		streamMessage = '';
+		try {
+			const res = await fetchSpotifyAuthorizeUrl();
+			if (!res.ok) {
+				streamMessage = res.error || 'Spotify credentials missing — see docs/spotify-apple.md';
+				return;
+			}
+			window.location.assign(res.url || SPOTIFY_LOGIN_HREF);
+		} catch (err) {
+			// Fall back to same-origin redirect if JSON helper fails.
+			streamMessage = err instanceof Error ? err.message : String(err);
+			window.location.assign(SPOTIFY_LOGIN_HREF);
+		}
 	}
 
 	async function onStreamSearch() {
@@ -652,7 +681,7 @@
 			if (active && !active.available) {
 				sourceError =
 					active.note ||
-					`${sourceTypeLabel(active.source_type)} stub selected — switch a queue row to Local to play`;
+					`${sourceTypeLabel(active.source_type)} unavailable — switch a queue row to Local or +Device to play`;
 			}
 		} catch (err) {
 			sourceError = err instanceof Error ? err.message : String(err);
@@ -688,7 +717,8 @@
 			applyTransport(await getTransport());
 			nowPlaying = await getNowPlaying().catch(() => nowPlaying);
 			if (!updated.available) {
-				sourceError = updated.note || `${sourceTypeLabel(sourceType)} is a stub — sinks stay linked`;
+				sourceError =
+					updated.note || `${sourceTypeLabel(sourceType)} unavailable — sinks stay linked`;
 			}
 		} catch (err) {
 			sourceError = err instanceof Error ? err.message : String(err);
@@ -708,39 +738,84 @@
 			applyTransport(await getTransport());
 			nowPlaying = await getNowPlaying().catch(() => nowPlaying);
 			if (!updated.available) {
-				sourceError = updated.note || 'Host-bound source is a stub — sinks stay linked';
+				sourceError = updated.note || 'Host-bound source unavailable — sinks stay linked';
 			}
 		} catch (err) {
 			sourceError = err instanceof Error ? err.message : String(err);
 		}
 	}
 
-	/** @param {import('$lib/api.js').SourceType} sourceType */
-	async function addStubSong(sourceType) {
+	/** Add a playable live input cue from a currently live BT A2DP / USB host. */
+	async function addDeviceFromLive(hostId) {
+		const id = (hostId || devicePickId || liveHosts[0]?.id || '').trim();
+		if (!id) {
+			sourceError =
+				'No live inputs — Refresh inputs (BT A2DP / USB-A / HDMI), then +Device';
+			return;
+		}
+		const host = inputs.find((h) => h.id === id);
+		if (!host || !host.connected || !host.endpoint) {
+			sourceError = 'Pick a live BT A2DP / USB / HDMI host from the +Device list';
+			return;
+		}
 		try {
 			sourceError = '';
-			const hostId =
-				sourceType === 'local'
-					? undefined
-					: liveHosts[0]?.id || inputs.find((h) => h.armed)?.id || inputs[0]?.id;
 			const item = await addQueueItem({
-				source_type: sourceType,
-				input_id: hostId,
-				title:
-					sourceType === 'spotify'
-						? 'Spotify from phone/PC (stub)'
-						: sourceType === 'apple'
-							? 'Apple Music from phone/PC (stub)'
-							: liveHosts.length
-								? `Live · ${hostName(hostId || '')}`
-								: 'Live input cue'
+				source_type: 'input',
+				input_id: id,
+				title: `Live · ${host.name}`
 			});
 			queue = [...queue, item];
 			if (!item.available) {
-				sourceError = item.note || `${sourceTypeLabel(sourceType)} stub — bind a live host`;
-			} else {
-				sourceError = '';
+				sourceError = item.note || 'Input not live yet — Refresh inputs';
 			}
+			devicePickId = id;
+		} catch (err) {
+			sourceError = err instanceof Error ? err.message : String(err);
+		}
+	}
+
+	/** @param {'spotify' | 'apple' | 'input'} sourceType */
+	async function addQueueShortcut(sourceType) {
+		try {
+			sourceError = '';
+			if (sourceType === 'spotify') {
+				if (!streaming?.spotify?.configured) {
+					sourceError =
+						'Spotify unavailable — set CLIENT_ID/SECRET in ~/musync.env, then Connect Spotify';
+					return;
+				}
+				if (!streaming?.spotify?.authenticated) {
+					sourceError = 'Connect Spotify first, then search & Queue & play a track';
+					return;
+				}
+				sourceError = '';
+				streamMessage = 'Search Spotify above, then Queue & play — that adds a real track';
+				streamProvider = 'spotify';
+				document.getElementById('streaming-heading')?.scrollIntoView({ behavior: 'smooth' });
+				return;
+			}
+			if (sourceType === 'apple') {
+				if (
+					streaming?.apple?.configured &&
+					streaming?.apple?.playback_mode === 'airplay_capture'
+				) {
+					streamProvider = 'apple';
+					streamMessage = 'Search Apple above, then Queue & play (AirPlay capture)';
+					document.getElementById('streaming-heading')?.scrollIntoView({ behavior: 'smooth' });
+					return;
+				}
+				sourceError =
+					'Apple hub play unavailable (DRM) — use MusicKit search + AirPlay, Spotify, or +Device';
+				return;
+			}
+			// + Live — quick-add first live host
+			const hostId = liveHosts[0]?.id;
+			if (!hostId) {
+				sourceError = 'No live input — use Refresh inputs, then +Device';
+				return;
+			}
+			await addDeviceFromLive(hostId);
 		} catch (err) {
 			sourceError = err instanceof Error ? err.message : String(err);
 		}
@@ -1014,15 +1089,15 @@
 		{#if nowPlaying?.note}
 			<p class="hint muted" role="status">{nowPlaying.note}</p>
 		{/if}
-		{#if activeIsStub}
+		{#if activeUnavailable}
 			<p class="stub-banner" role="status">
-				Not playable yet
+				Unavailable
 				{#if transport?.source_type === 'input'}
-					— arm a live input host, then Play.
+					— Refresh inputs / pair BT A2DP, USB-A, or HDMI capture, then +Device and Play.
 				{:else if transport?.source_type === 'spotify' || transport?.source_type === 'apple'}
-					— connect/search in Streaming, or switch to Local.
+					— Connect Spotify &amp; search, or use +Device / Local (Apple DRM limits hub PCM).
 				{:else}
-					— switch to Local or a live input; sinks stay linked.
+					— switch to Local or +Device from a live input; sinks stay linked.
 				{/if}
 			</p>
 		{/if}
@@ -1047,7 +1122,7 @@
 				type="button"
 				class="btn"
 				aria-label="Play"
-				disabled={playing || activeIsStub}
+				disabled={playing || activeUnavailable}
 				onclick={() => setTransport({ state: 'playing' })}
 			>
 				Play
@@ -1074,7 +1149,7 @@
 				step="100"
 				value={scrubValue}
 				aria-label="Playback position"
-				disabled={activeIsStub}
+				disabled={activeUnavailable}
 				onpointerdown={() => {
 					scrubbing = true;
 				}}
@@ -1104,7 +1179,7 @@
 		<section class="panel wifi-panel" aria-labelledby="wifi-heading">
 			<div class="panel-head">
 				<h2 id="wifi-heading">Wi-Fi</h2>
-				<p class="hint">Hotspot join · Pi IP for phone SPP</p>
+				<p class="hint">Home Wi-Fi or phone hotspot · Pi IP for SPP</p>
 			</div>
 
 			<div class="wifi-status" data-ok={wifi ? String(Boolean(wifi.connected)) : undefined}>
@@ -1136,13 +1211,13 @@
 			>
 				<div class="wifi-fields">
 					<label class="field">
-						<span>SSID</span>
+						<span>SSID / network name</span>
 						<input
 							type="text"
 							name="ssid"
 							autocomplete="off"
 							maxlength="32"
-							placeholder="Phone hotspot name"
+							placeholder="Home Wi-Fi or phone hotspot"
 							bind:value={wifiSsid}
 							disabled={wifiBusy}
 						/>
@@ -1160,6 +1235,9 @@
 						/>
 					</label>
 				</div>
+				<p class="hint muted wifi-join-note">
+					Joins any saved or entered network — home router or phone personal hotspot.
+				</p>
 				<div class="wifi-actions">
 					<button type="submit" class="btn" disabled={wifiBusy || !wifiSsid.trim()}>Join</button>
 					<button
@@ -1674,10 +1752,18 @@
 							Disconnect
 						</button>
 					{:else}
-						<a class="btn btn-small" href={SPOTIFY_LOGIN_HREF}>Connect Spotify</a>
+						<button
+							type="button"
+							class="btn btn-small"
+							disabled={streamBusy}
+							onclick={() => onConnectSpotify()}
+						>
+							Connect Spotify
+						</button>
 						<p class="hint muted">
-							Opens Spotify authorize → returns here with tokens. App Client ID/Secret stay in
-							<code>~/musync.env</code> (not typed here).
+							Opens Spotify login → returns here with tokens. App Client ID/Secret stay in
+							<code>~/musync.env</code> (Windows: <code>%USERPROFILE%\musync.env</code>) — not
+							typed here.
 						</p>
 					{/if}
 					{#if streaming?.spotify?.librespot_available === false}
@@ -1771,17 +1857,60 @@
 				<h2 id="queue-heading">Song queue</h2>
 				<p class="hint">Per-song type · sinks stay linked</p>
 			</div>
-			<div class="stub-actions">
-				<button type="button" class="btn btn-ghost btn-small" onclick={() => addStubSong('spotify')}>
+			<div class="stub-actions queue-add-actions">
+				<div class="device-add">
+					<label class="sr-only" for="device-pick">Live input for +Device</label>
+					<select
+						id="device-pick"
+						class="type-select device-pick"
+						bind:value={devicePickId}
+						disabled={!liveHosts.length}
+						aria-label="Live input host"
+					>
+						{#if liveHosts.length}
+							{#each liveHosts as h (h.id)}
+								<option value={h.id}>{h.name} · {h.capture_path}</option>
+							{/each}
+						{:else}
+							<option value="">No live inputs</option>
+						{/if}
+					</select>
+					<button
+						type="button"
+						class="btn btn-small"
+						disabled={!liveHosts.length}
+						onclick={() => addDeviceFromLive(devicePickId)}
+					>
+						+ Device
+					</button>
+				</div>
+				<button
+					type="button"
+					class="btn btn-ghost btn-small"
+					onclick={() => addQueueShortcut('spotify')}
+				>
 					+ Spotify
 				</button>
-				<button type="button" class="btn btn-ghost btn-small" onclick={() => addStubSong('apple')}>
-					+ Apple
-				</button>
-				<button type="button" class="btn btn-ghost btn-small" onclick={() => addStubSong('input')}>
+				<button
+					type="button"
+					class="btn btn-ghost btn-small"
+					onclick={() => addQueueShortcut('input')}
+				>
 					+ Live{liveHosts.length ? ` · ${liveHosts[0].name}` : ''}
 				</button>
+				<button
+					type="button"
+					class="btn btn-ghost btn-small"
+					onclick={() => addQueueShortcut('apple')}
+				>
+					+ Apple
+				</button>
 			</div>
+			{#if !liveHosts.length}
+				<p class="hint muted">
+					+ Device needs a live BT A2DP / USB / HDMI host — use Refresh inputs first.
+				</p>
+			{/if}
 			<ul class="queue-list">
 				{#each queue as item (item.id)}
 					<li class="queue-row queue-row-host" class:active={item.id === activeQueueId}>
@@ -1822,7 +1951,7 @@
 											streaming?.apple?.configured &&
 											streaming?.apple?.playback_mode === 'airplay_capture')
 											? ''
-											: ' (stub)'}</option
+											: ' (unavailable)'}</option
 									>
 								{/each}
 							</select>
@@ -1862,7 +1991,7 @@
 		<section class="panel sources-panel" aria-labelledby="sources-heading">
 			<div class="panel-head">
 				<h2 id="sources-heading">Catalog</h2>
-				<p class="hint">Local audio/video under media/ · live · stubs</p>
+				<p class="hint">Local audio/video under media/ · live inputs</p>
 			</div>
 			<div class="catalog-grid">
 				{#each SOURCE_TYPES as type}
@@ -1876,7 +2005,7 @@
 										class="source-row"
 										class:active-source={s.id === transport?.source_id}
 										class:stub-source={!s.available}
-										title={s.available ? 'Playable' : s.note || 'Stub — sinks stay up'}
+										title={s.available ? 'Playable' : s.note || 'Unavailable — sinks stay up'}
 										onclick={() => chooseSource(s.id)}
 									>
 										<span>

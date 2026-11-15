@@ -14,7 +14,7 @@ Secrets stay in environment variables / local files. Never commit client secrets
 | Search | Web API — real | Catalog API — real when keys set |
 | Hub PCM | **librespot** Connect device with `PULSE_SINK=musync_feeder` | **Limited** — no official Linux player |
 | Play path | Web API transfers track to librespot → feeder → sinks | Optional: AirPlay → shairport-sync → PipeWire source → feeder |
-| Without credentials | Stubs remain; **mock/local still work** | Same |
+| Without credentials | Rows show **unavailable**; **mock/local still work** | Same |
 
 ## Spotify setup (Pi)
 
@@ -82,12 +82,12 @@ fill `~/musync.env`, restart `run_pi.sh`, then use **Connect Spotify** again.
 
 ### Pi test checklist
 
-1. Without Spotify env: local Play still works; Spotify rows stay stub.
+1. Without Spotify env: local Play still works; Spotify rows show **unavailable**.
 2. With env + OAuth: `GET /api/streaming` shows `spotify.authenticated: true`.
 3. Search returns hits; queue item `source_type=spotify`, `available=true`.
 4. Play: `pactl list sinks short` shows one `musync_feeder`; librespot running; sinks hear audio.
 5. Stop/Pause: Spotify pauses; feeder swap does not tear down BT/SPP graph.
-6. Logout: tokens cleared; Spotify becomes stub again; local still plays.
+6. Logout: tokens cleared; Spotify becomes unavailable again; local still plays.
 
 ## Apple Music (best-effort)
 
@@ -139,12 +139,37 @@ Optional software-clock Spotify/Apple after OAuth on laptop:
 export MUSYNC_STREAMING_MOCK=1
 ```
 
+## Windows laptop mock + OAuth redirect
+
+1. Copy `config/streaming.env.example` → `%USERPROFILE%\musync.env` **or**
+   `config\streaming.local.env`. Use `KEY=value` lines (no bash `export` required;
+   `export KEY=` is also accepted).
+2. Set Client ID/Secret. Redirect URI must match the **API** port (default **8080**):
+
+   `http://127.0.0.1:8080/api/streaming/spotify/callback`
+
+   If you set `MUSYNC_PORT=8081`, use `:8081` in **both** the Spotify Developer
+   Dashboard and `MUSYNC_SPOTIFY_REDIRECT_URI`. Do **not** register Vite’s
+   `:5173` — OAuth callback hits FastAPI, not the Vite dev server.
+3. Build UI (`cd web; npm ci; npm run build`), then:
+
+   ```powershell
+   .\scripts\run_dev.ps1
+   # or: $env:PYTHONPATH="backend"; $env:MUSYNC_BACKEND="mock"; python -m musync
+   ```
+
+4. Open `http://127.0.0.1:8080` → **Connect Spotify** → approve → tokens return
+   to `/api/streaming/spotify/callback` → SPA `/?spotify=connected`.
+5. Optional: `MUSYNC_STREAMING_MOCK=1` so authenticated tracks play on the
+   software clock without librespot.
+
 ## API
 
 | Method | Path | Purpose |
 |--------|------|---------|
 | `GET` | `/api/streaming` | Provider status (no secrets) |
 | `GET` | `/api/streaming/spotify/login` | Start OAuth redirect |
+| `GET` | `/api/streaming/spotify/authorize-url` | JSON preflight (url or error) |
 | `GET` | `/api/streaming/spotify/callback` | OAuth return |
 | `POST` | `/api/streaming/spotify/logout` | Clear tokens |
 | `GET` | `/api/streaming/search?provider=spotify&q=` | Track search |
@@ -154,5 +179,6 @@ export MUSYNC_STREAMING_MOCK=1
 
 - **403 on play** — Spotify Free accounts cannot control Connect; need Premium.
 - **No Connect device** — install librespot; check `MUSYNC_LIBRESPOT_NAME` matches; ensure PipeWire/Pulse is up and `musync_feeder` exists (`./scripts/run_pi.sh` + Play once).
-- **OAuth redirect mismatch** — redirect URI in the Spotify dashboard must equal `MUSYNC_SPOTIFY_REDIRECT_URI`.
+- **OAuth redirect mismatch** — redirect URI in the Spotify dashboard must equal `MUSYNC_SPOTIFY_REDIRECT_URI` (API port `:8080` / `:8081`, never Vite `:5173`).
+- **Connect does nothing / credentials missing** — fill `%USERPROFILE%\musync.env` or `config/streaming.local.env`, restart the API; Connect shows a clear error when Client ID/Secret are unset.
 - **Duplicate feeders** — fixed by idempotent feeder purge on startup (see `docs/pi-pipewire.md`).

@@ -45,11 +45,14 @@ def _client_secret() -> str:
     return (os.environ.get("MUSYNC_SPOTIFY_CLIENT_SECRET") or "").strip()
 
 
+def default_redirect_uri() -> str:
+    """Default callback URL using MUSYNC_PORT (8080, or 8081 if you override the port)."""
+    port = (os.environ.get("MUSYNC_PORT") or "8080").strip() or "8080"
+    return f"http://127.0.0.1:{port}/api/streaming/spotify/callback"
+
+
 def _redirect_uri() -> str:
-    return (
-        os.environ.get("MUSYNC_SPOTIFY_REDIRECT_URI")
-        or "http://127.0.0.1:8080/api/streaming/spotify/callback"
-    ).strip()
+    return (os.environ.get("MUSYNC_SPOTIFY_REDIRECT_URI") or default_redirect_uri()).strip()
 
 
 def _token_path() -> Path:
@@ -145,8 +148,8 @@ class SpotifyClient:
                         "(Play needs Connect device)"
                     )
                     if configured
-                    else "Credentials missing — set MUSYNC_SPOTIFY_CLIENT_ID/SECRET; "
-                    "mock/local still work"
+                    else "Credentials missing — set MUSYNC_SPOTIFY_CLIENT_ID/SECRET "
+                    "in ~/musync.env (Windows: %USERPROFILE%\\musync.env), then Connect Spotify"
                 ),
             }
 

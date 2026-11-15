@@ -511,6 +511,14 @@ export function getStreamingStatus() {
 /** Spotify OAuth start — same-origin link redirect (not a password form). */
 export const SPOTIFY_LOGIN_HREF = '/api/streaming/spotify/login';
 
+/**
+ * Preflight Connect Spotify — returns authorize URL or a clear missing-env error.
+ * @returns {Promise<{ ok: boolean, url?: string, error?: string, redirect_uri?: string }>}
+ */
+export function fetchSpotifyAuthorizeUrl() {
+	return api('/api/streaming/spotify/authorize-url');
+}
+
 /** @returns {Promise<StreamingStatus>} */
 export function logoutSpotify() {
 	return api('/api/streaming/spotify/logout', { method: 'POST', body: '{}' });
