@@ -41,9 +41,10 @@ def test_demo_hosts_and_max_four(tmp_path, monkeypatch) -> None:
         CapturePath.BT_A2DP,
         CapturePath.USB,
         CapturePath.HDMI,
+        CapturePath.AIRPLAY,
         CapturePath.NETWORK,
     }
-    # Mock seeds S21 FE + USB Audio + HDMI Capture as live capture hosts.
+    # Mock seeds S21 FE + USB + HDMI + AirPlay as live capture hosts (at max 4).
     s21 = next(h for h in hosts if "S21" in h.name)
     assert s21.capture_path == CapturePath.BT_A2DP
     assert s21.connected is True
@@ -54,12 +55,10 @@ def test_demo_hosts_and_max_four(tmp_path, monkeypatch) -> None:
     hdmi = next(h for h in hosts if h.capture_path == CapturePath.HDMI)
     assert hdmi.connected is True
     assert hdmi.endpoint and ("hdmi" in hdmi.endpoint.lower() or "alsa_input" in hdmi.endpoint)
+    airplay = next(h for h in hosts if h.capture_path == CapturePath.AIRPLAY)
+    assert airplay.connected is True
+    assert airplay.endpoint and "shairport" in airplay.endpoint.lower()
 
-    while len(backend.list_inputs()) < 4:
-        n = len(backend.list_inputs()) + 1
-        backend.add_input(
-            InputHostCreate(name=f"Host {n}", kind=HostKind.PHONE, capture_path=CapturePath.BT_A2DP)
-        )
     assert len(backend.list_inputs()) == 4
     try:
         backend.add_input(InputHostCreate(name="Overflow"))
@@ -80,6 +79,11 @@ def test_queue_binds_active_live_input(tmp_path, monkeypatch) -> None:
     assert item.available is True
     assert host.capture_path.value in (item.locator or "")
 
+    # Mock seeds 4 live hosts (at max) — free a slot before adding a waiting host.
+    spare = next(
+        h for h in backend.list_inputs() if h.capture_path == CapturePath.HDMI
+    )
+    backend.remove_input(spare.id)
     other = backend.add_input(
         InputHostCreate(
             name="Android waiting",

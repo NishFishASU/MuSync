@@ -129,11 +129,11 @@ PLACEHOLDER_SOURCES: list[Source] = [
     ),
     Source(
         id="apple:hub",
-        title="Apple Music (hub — limited on Linux)",
+        title="AirPlay receive (hub)",
         type=SourceType.APPLE,
-        locator="apple:hub",
+        locator="airplay:receive",
         available=False,
-        note="MusicKit search + optional AirPlay/shairport → feeder; see docs/spotify-apple.md",
+        note="AirPlay → shairport-sync → musync_feeder — docs/airplay-receive.md",
     ),
     Source(
         id="youtube:hub",

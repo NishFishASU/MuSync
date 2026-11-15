@@ -63,9 +63,15 @@ def test_catalog_has_typed_sources(tmp_path, monkeypatch) -> None:
     non_local = [s for s in sources if s.type != SourceType.LOCAL]
     assert non_local
     assert all(s.type.value in {"spotify", "apple", "youtube", "input"} for s in non_local)
-    # Hub stream placeholders stay unavailable until credentials/track URI;
-    # live BT input is available on mock.
-    assert all(not s.available for s in non_local if s.type != SourceType.INPUT)
+    # Hub Spotify/YouTube stay unavailable until OAuth/track URI.
+    # AirPlay hub row is available when mock AirPlay host is live.
+    assert all(
+        not s.available
+        for s in non_local
+        if s.type in {SourceType.SPOTIFY, SourceType.YOUTUBE}
+    )
+    apple = next(s for s in non_local if s.type == SourceType.APPLE)
+    assert apple.available is True
     assert any(s.available for s in non_local if s.type == SourceType.INPUT)
 
 
@@ -112,7 +118,8 @@ def test_active_queue_switch_keeps_devices(tmp_path, monkeypatch) -> None:
 
 def test_cannot_play_unavailable(tmp_path, monkeypatch) -> None:
     backend = _backend(tmp_path, monkeypatch)
-    item = backend.add_queue_item(QueueItemCreate(source_type=SourceType.APPLE))
+    # Spotify hub stub (no track URI / OAuth) stays unplayable.
+    item = backend.add_queue_item(QueueItemCreate(source_type=SourceType.SPOTIFY))
     backend.set_active_queue_item(item.id)
     try:
         backend.set_transport(TransportPut(state=TransportState.PLAYING))
@@ -120,7 +127,7 @@ def test_cannot_play_unavailable(tmp_path, monkeypatch) -> None:
     except ValueError as exc:
         raised = True
         low = str(exc).lower()
-        assert "unavailable" in low or "apple" in low or "stub" in low
+        assert "unavailable" in low or "spotify" in low or "stub" in low
     assert raised
 
 

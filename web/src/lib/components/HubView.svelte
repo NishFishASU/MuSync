@@ -149,7 +149,7 @@
 	let streaming = $state(null);
 	/** @type {import('$lib/api.js').NowPlaying | null} */
 	let nowPlaying = $state(null);
-	/** @type {'spotify' | 'apple'} */
+	/** @type {'spotify' | 'youtube'} */
 	let streamProvider = $state('spotify');
 	let streamQuery = $state('');
 	/** @type {import('$lib/api.js').StreamingSearchHit[]} */
@@ -602,7 +602,8 @@
 		if (row.available) return 'ready';
 		const note = (row.note || '').toLowerCase();
 		if (note.includes('on-device') || note.includes('session')) return 'on-device';
-		if (note.includes('drm') || note.includes('airplay')) return 'unavailable';
+		if (note.includes('drm') || note.includes('airplay') || note.includes('shairport'))
+			return 'unavailable';
 		return 'unavailable';
 	}
 
@@ -628,11 +629,6 @@
 		if (streamProvider === 'spotify' && !streaming?.spotify?.configured) {
 			streamMessage =
 				'Spotify not configured — set MUSYNC_SPOTIFY_CLIENT_ID/SECRET in ~/musync.env, restart, then Connect on Streaming';
-			return;
-		}
-		if (streamProvider === 'apple' && !streaming?.apple?.configured) {
-			streamMessage =
-				'Apple MusicKit keys not set — add Team/Key/.p8 to ~/musync.env (search only; no DRM hub player)';
 			return;
 		}
 		if (streamProvider === 'youtube' && !streaming?.youtube?.configured) {
@@ -1043,7 +1039,7 @@
 		}
 	}
 
-	/** @param {'spotify' | 'apple' | 'youtube' | 'input'} sourceType */
+	/** @param {'spotify' | 'youtube' | 'input'} sourceType */
 	async function addQueueShortcut(sourceType) {
 		try {
 			sourceError = '';
@@ -1063,19 +1059,6 @@
 				goto('/queue/');
 				return;
 			}
-			if (sourceType === 'apple') {
-				if (!streaming?.apple?.configured) {
-					sourceError =
-						'Apple MusicKit keys not set — add Team/Key/.p8 on Streaming / ~/musync.env';
-					return;
-				}
-				streamProvider = 'apple';
-				streamMessage = streaming?.apple?.playback_mode === 'airplay_capture'
-					? 'Search Apple below, then Queue & play (AirPlay capture)'
-					: 'Search Apple below (catalog only — hub PCM needs AirPlay)';
-				goto('/queue/');
-				return;
-			}
 			if (sourceType === 'youtube') {
 				if (!streaming?.youtube?.configured) {
 					sourceError =
@@ -1084,13 +1067,15 @@
 				}
 				streamProvider = 'youtube';
 				streamMessage = 'Search YouTube above, then Queue & play — yt-dlp → ffmpeg → feeder';
-				goto('/streaming/');
+				goto('/queue/');
 				return;
 			}
-			// + Live — quick-add first live host
-			const hostId = liveHosts[0]?.id;
+			// + Live — prefer AirPlay host when receiving, else first live host
+			const airplayLive = liveHosts.find((h) => h.capture_path === 'airplay');
+			const hostId = airplayLive?.id || liveHosts[0]?.id;
 			if (!hostId) {
-				sourceError = 'No live input — use Refresh inputs, then +Device';
+				sourceError =
+					'No live input — Refresh inputs (AirPlay / BT / USB / HDMI), then + Device';
 				return;
 			}
 			await addDeviceFromLive(hostId);
@@ -1110,8 +1095,8 @@
 			sources = await listSources();
 			queue = await listQueue();
 			captureMessage = discoveredCapture.length
-				? `${discoveredCapture.length} live source${discoveredCapture.length === 1 ? '' : 's'} (USB/HDMI auto-bound when found)`
-				: 'No bluez_input / USB-A / HDMI sources yet — plug a USB sound card or HDMI capture dongle, or pair phone as A2DP source';
+				? `${discoveredCapture.length} live source${discoveredCapture.length === 1 ? '' : 's'} (USB/HDMI/AirPlay auto-bound when found)`
+				: 'No bluez_input / USB-A / HDMI / AirPlay sources yet — plug a USB sound card or HDMI capture, start shairport-sync, or pair phone as A2DP source';
 		} catch (err) {
 			captureMessage = err instanceof Error ? err.message : String(err);
 		} finally {
@@ -2162,7 +2147,8 @@
 			</div>
 			<p class="hint muted">
 				Pi 5 USB-C PD is power-only — PC audio needs a USB-A sound card/interface (not the PD port).
-				HDMI: plug a capture dongle, then Refresh. Phone: pair as A2DP <em>source</em>, then Refresh.
+				HDMI: plug a capture dongle, then Refresh. AirPlay: run shairport-sync, then Refresh
+				(docs/airplay-receive.md). Phone: pair as A2DP <em>source</em>, then Refresh.
 			</p>
 			<div class="stub-actions">
 				<button
@@ -2389,22 +2375,45 @@
 					{/if}
 				</div>
 				<div class="stream-card">
-					<strong>Apple Music</strong>
-					<span class="status-pill {streaming?.apple?.configured ? 'linked' : 'missing'}">
-						{streaming?.apple?.configured
-							? streaming.apple.playback_mode === 'airplay_capture'
-								? 'keys + AirPlay'
-								: 'keys set'
-							: 'not configured'}
+					<strong>AirPlay</strong>
+					<span
+						class="status-pill {streaming?.airplay?.receiving
+							? 'linked'
+							: streaming?.airplay?.configured
+								? 'linked'
+								: 'missing'}"
+					>
+						{streaming?.airplay?.receiving
+							? 'receiving'
+							: streaming?.airplay?.configured
+								? 'ready'
+								: 'setup needed'}
 					</span>
 					<p class="hint muted">
-						No Spotify-style user OAuth for hub PCM on Linux (DRM). MusicKit keys in
-						<code>~/musync.env</code> enable catalog search on Queue; full play needs AirPlay →
-						shairport → feeder — see docs/spotify-apple.md.
+						Receive from iPhone/Mac via <code>shairport-sync</code> → PipeWire →
+						<code>musync_feeder</code>. No MusicKit / Apple Music search on the hub.
 					</p>
-					{#if streaming?.apple?.note}
-						<p class="hint muted">{streaming.apple.note}</p>
+					{#if streaming?.airplay?.source}
+						<p class="hint muted">
+							Source: <code>{streaming.airplay.source}</code>
+							{#if streaming.airplay.receiver_name}
+								· receiver {streaming.airplay.receiver_name}{/if}
+						</p>
 					{/if}
+					{#if !streaming?.airplay?.configured}
+						<ol class="hint muted airplay-setup">
+							<li>Install <code>shairport-sync</code> (PipeWire/Pulse output)</li>
+							<li>Optional: <code>MUSYNC_AIRPLAY_SOURCE</code> in <code>~/musync.env</code></li>
+							<li>Inputs → Refresh inputs → Play live AirPlay host</li>
+							<li>AirPlay audio to the Pi from iPhone/Mac</li>
+						</ol>
+					{/if}
+					{#if streaming?.airplay?.note}
+						<p class="hint muted">{streaming.airplay.note}</p>
+					{/if}
+					<p class="hint muted">
+						Setup details: <code>docs/airplay-receive.md</code>
+					</p>
 				</div>
 				<div class="stream-card">
 					<strong>YouTube</strong>
@@ -2449,7 +2458,7 @@
 		<section class="panel queue-panel" aria-labelledby="queue-heading">
 			<div class="panel-head">
 				<h2 id="queue-heading">Song queue</h2>
-				<p class="hint">Search Spotify/Apple · per-song type · sinks stay linked</p>
+				<p class="hint">Search Spotify/YouTube · AirPlay via Inputs · sinks stay linked</p>
 			</div>
 			<form
 				class="stream-search"
@@ -2462,13 +2471,12 @@
 					<span class="sr-only">Provider</span>
 					<select bind:value={streamProvider} aria-label="Streaming provider">
 						<option value="spotify">Spotify</option>
-						<option value="apple">Apple Music</option>
 						<option value="youtube">YouTube</option>
 					</select>
 				</label>
 				<input
 					type="search"
-					placeholder="Search tracks (e.g. Shape Of You)"
+					placeholder="Search Spotify or YouTube"
 					bind:value={streamQuery}
 					aria-label="Search tracks"
 				/>
@@ -2511,10 +2519,10 @@
 					</li>
 				{:else}
 					<li class="empty-group">
-						{#if streaming?.spotify?.authenticated || streaming?.apple?.configured}
-							Search Spotify or Apple Music to pick a track
+						{#if streaming?.spotify?.authenticated || streaming?.youtube?.configured}
+							Search Spotify or YouTube — AirPlay uses Inputs → live host
 						{:else}
-							Connect Spotify on Streaming (or set Apple MusicKit keys), then search here
+							Connect Spotify / set YouTube key on Streaming · AirPlay: Inputs → Refresh
 						{/if}
 					</li>
 				{/each}
@@ -2563,13 +2571,6 @@
 				<button
 					type="button"
 					class="btn btn-ghost btn-small"
-					onclick={() => addQueueShortcut('apple')}
-				>
-					+ Apple
-				</button>
-				<button
-					type="button"
-					class="btn btn-ghost btn-small"
 					onclick={() => addQueueShortcut('youtube')}
 				>
 					+ YouTube
@@ -2577,7 +2578,7 @@
 			</div>
 			{#if !liveHosts.length}
 				<p class="hint muted">
-					+ Device needs a live BT A2DP / USB / HDMI host — use Refresh inputs first.
+					+ Device needs a live BT A2DP / USB / HDMI / AirPlay host — use Refresh inputs first.
 				</p>
 			{/if}
 			<ul class="queue-list">
@@ -2617,8 +2618,9 @@
 										(t === 'input' && liveHosts.length) ||
 										(t === 'spotify' && streaming?.spotify?.authenticated) ||
 										(t === 'apple' &&
-											streaming?.apple?.configured &&
-											streaming?.apple?.playback_mode === 'airplay_capture') ||
+											(streaming?.airplay?.receiving ||
+												streaming?.airplay?.configured ||
+												liveHosts.some((h) => h.capture_path === 'airplay'))) ||
 										(t === 'youtube' &&
 											streaming?.youtube?.configured &&
 											streaming?.youtube?.playback_mode === 'ytdlp_ffmpeg')

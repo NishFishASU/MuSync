@@ -1,67 +1,21 @@
-"""Best-effort Apple Music on Linux.
+"""Legacy SourceType.APPLE helpers — MusicKit search removed.
 
-Real hub PCM for Apple Music is limited on Linux (no official server player).
-This module supports:
-  - Developer token (MusicKit) for catalog search when keys are set
-  - Optional AirPlay/shairport PipeWire source → musync_feeder capture
-  - Clear documented limits when playback cannot be real
-
-Env (never commit secrets / .p8 keys):
-  MUSYNC_APPLE_TEAM_ID
-  MUSYNC_APPLE_KEY_ID
-  MUSYNC_APPLE_PRIVATE_KEY_PATH   (.p8 path)
-  MUSYNC_APPLE_MUSIC_USER_TOKEN   (optional; needed for personalized library)
-  MUSYNC_APPLE_AIRPLAY_SOURCE     (PipeWire source name from shairport-sync)
+Hub PCM for Apple devices is **AirPlay receive** only (shairport-sync →
+PipeWire → musync_feeder). See ``airplay.py`` and docs/airplay-receive.md.
 """
 
 from __future__ import annotations
 
-import logging
-import os
-import time
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any, Optional
 
-import httpx
-
-log = logging.getLogger(__name__)
-
-APPLE_CATALOG = "https://api.music.apple.com/v1"
-
-
-def _team_id() -> str:
-    return (os.environ.get("MUSYNC_APPLE_TEAM_ID") or "").strip()
-
-
-def _key_id() -> str:
-    return (os.environ.get("MUSYNC_APPLE_KEY_ID") or "").strip()
-
-
-def _private_key_path() -> Optional[Path]:
-    raw = (os.environ.get("MUSYNC_APPLE_PRIVATE_KEY_PATH") or "").strip()
-    return Path(raw).expanduser().resolve() if raw else None
-
-
-def _user_token() -> str:
-    return (os.environ.get("MUSYNC_APPLE_MUSIC_USER_TOKEN") or "").strip()
-
-
-def _airplay_source() -> str:
-    return (os.environ.get("MUSYNC_APPLE_AIRPLAY_SOURCE") or "").strip()
-
-
-def _storefront() -> str:
-    return (os.environ.get("MUSYNC_APPLE_STOREFRONT") or "us").strip() or "us"
-
-
-def credentials_configured() -> bool:
-    path = _private_key_path()
-    return bool(_team_id() and _key_id() and path and path.is_file())
+from .airplay import AirplayReceiver
 
 
 @dataclass
 class AppleTrack:
+    """Unused catalog row shape kept for older call sites / tests."""
+
     id: str
     uri: str
     title: str
@@ -72,199 +26,46 @@ class AppleTrack:
 
 
 class AppleMusicClient:
-    """MusicKit developer-token catalog + AirPlay capture hook."""
+    """AirPlay-backed stand-in; no MusicKit developer token or catalog search."""
 
     def __init__(self) -> None:
-        self._dev_token: Optional[str] = None
-        self._dev_exp: float = 0.0
+        self._airplay = AirplayReceiver()
 
     def status(self) -> dict[str, Any]:
-        configured = credentials_configured()
-        airplay = _airplay_source()
-        limits = [
-            "Linux has no official Apple Music server player",
-            "Catalog search needs MusicKit keys (team/key/.p8)",
-            "Full playback: AirPlay to shairport-sync → PipeWire source → feeder, "
-            "or MusicKit JS in a browser (not hub PCM)",
-        ]
-        if not configured:
-            limits.insert(0, "Apple MusicKit keys not set — catalog search unavailable")
-        if not airplay:
-            limits.append(
-                "Set MUSYNC_APPLE_AIRPLAY_SOURCE to a shairport PipeWire source "
-                "for best-effort hub capture"
-            )
+        """Map AirPlay status into the old apple provider shape (tests / health)."""
+        raw = self._airplay.status()
         return {
             "provider": "apple",
-            "configured": configured,
-            "authenticated": configured,  # developer token only; user token optional
-            "user_token_set": bool(_user_token()),
-            "airplay_source": airplay or None,
-            "playback_mode": "airplay_capture" if airplay else "unavailable",
-            "limits": limits,
-            "note": (
-                "Search OK; play uses AirPlay capture into musync_feeder"
-                if configured and airplay
-                else (
-                    "Search OK; hub play unavailable without AirPlay "
-                    "(Apple DRM — no native Linux player)"
-                    if configured
-                    else "MusicKit keys missing — Apple hub play unavailable (DRM); "
-                    "use Spotify or live BT/USB input"
-                )
-            ),
+            "configured": bool(raw.get("configured")),
+            "authenticated": bool(raw.get("configured")),
+            "user_token_set": False,
+            "airplay_source": raw.get("source"),
+            "playback_mode": "airplay_capture" if raw.get("source") else "unavailable",
+            "limits": list(raw.get("setup") or []),
+            "note": raw.get("note") or "",
         }
 
     def configured(self) -> bool:
-        return credentials_configured()
+        return bool(self._airplay.configured_source()) or self._airplay.status()[
+            "shairport_available"
+        ]
 
     def authenticated(self) -> bool:
-        return credentials_configured()
+        # No MusicKit auth — "ready" means AirPlay capture can be attempted.
+        return self.configured()
 
     def airplay_source(self) -> Optional[str]:
-        src = _airplay_source()
-        return src or None
-
-    def developer_token(self) -> str:
-        if not credentials_configured():
-            raise ValueError(
-                "Apple Music not configured — set MUSYNC_APPLE_TEAM_ID, "
-                "MUSYNC_APPLE_KEY_ID, MUSYNC_APPLE_PRIVATE_KEY_PATH (see docs/spotify-apple.md)"
-            )
-        now = time.time()
-        if self._dev_token and now < self._dev_exp - 60:
-            return self._dev_token
-        try:
-            import jwt  # PyJWT
-        except ImportError as exc:
-            raise ValueError(
-                "PyJWT required for Apple MusicKit tokens — pip install PyJWT cryptography"
-            ) from exc
-
-        path = _private_key_path()
-        assert path is not None
-        private_key = path.read_text(encoding="utf-8")
-        headers = {"alg": "ES256", "kid": _key_id()}
-        payload = {
-            "iss": _team_id(),
-            "iat": int(now),
-            "exp": int(now) + 12 * 3600,
-        }
-        token = jwt.encode(payload, private_key, algorithm="ES256", headers=headers)
-        self._dev_token = token if isinstance(token, str) else token.decode("utf-8")
-        self._dev_exp = now + 12 * 3600
-        return self._dev_token
+        return self._airplay.configured_source()
 
     def search_tracks(self, query: str, *, limit: int = 15) -> list[AppleTrack]:
-        q = (query or "").strip()
-        if not q:
-            return []
-        if not self.authenticated():
-            raise ValueError("Configure Apple MusicKit keys first")
-        store = _storefront()
-        headers = {
-            "Authorization": f"Bearer {self.developer_token()}",
-            "Music-User-Token": _user_token(),
-        }
-        # User token optional for catalog search.
-        if not _user_token():
-            headers.pop("Music-User-Token", None)
-        with httpx.Client(timeout=20.0) as client:
-            resp = client.get(
-                f"{APPLE_CATALOG}/catalog/{store}/search",
-                headers=headers,
-                params={
-                    "term": q,
-                    "types": "songs",
-                    "limit": max(1, min(limit, 25)),
-                },
-            )
-            if resp.status_code >= 400:
-                raise ValueError(f"Apple Music search failed: {resp.status_code} {resp.text[:200]}")
-            data = resp.json()
-        songs = (((data.get("results") or {}).get("songs") or {}).get("data")) or []
-        out: list[AppleTrack] = []
-        for raw in songs:
-            attrs = raw.get("attributes") or {}
-            sid = str(raw.get("id") or "")
-            artwork = attrs.get("artwork") or {}
-            cover = None
-            url_tmpl = artwork.get("url")
-            if isinstance(url_tmpl, str) and "{w}" in url_tmpl:
-                cover = url_tmpl.replace("{w}", "300").replace("{h}", "300")
-            elif isinstance(url_tmpl, str) and url_tmpl.strip():
-                cover = url_tmpl
-            out.append(
-                AppleTrack(
-                    id=sid,
-                    uri=f"apple:song:{sid}",
-                    title=attrs.get("name") or "Song",
-                    artist=attrs.get("artistName") or "Unknown",
-                    duration_ms=attrs.get("durationInMillis"),
-                    album=attrs.get("albumName"),
-                    cover_url=cover,
-                )
-            )
-        return out
+        raise ValueError(
+            "Apple Music search removed — use AirPlay receive "
+            "(Inputs → Refresh → live AirPlay host) or Spotify. "
+            "See docs/airplay-receive.md"
+        )
 
     def track_metadata(self, uri: str) -> Optional[AppleTrack]:
-        """Fetch catalog song metadata (now-playing / cover)."""
-        sid = ""
-        raw_uri = (uri or "").strip()
-        if raw_uri.startswith("apple:song:") or raw_uri.startswith("apple:track:"):
-            sid = raw_uri.split(":")[-1]
-        elif raw_uri.isdigit():
-            sid = raw_uri
-        if not sid or not self.authenticated():
-            return None
-        store = _storefront()
-        headers = {"Authorization": f"Bearer {self.developer_token()}"}
-        if _user_token():
-            headers["Music-User-Token"] = _user_token()
-        try:
-            with httpx.Client(timeout=15.0) as client:
-                resp = client.get(
-                    f"{APPLE_CATALOG}/catalog/{store}/songs/{sid}",
-                    headers=headers,
-                )
-                if resp.status_code >= 400:
-                    return None
-                data = resp.json()
-        except Exception as exc:  # noqa: BLE001
-            log.debug("apple track metadata: %s", exc)
-            return None
-        rows = data.get("data") or []
-        if not rows:
-            return None
-        raw = rows[0]
-        attrs = raw.get("attributes") or {}
-        artwork = attrs.get("artwork") or {}
-        cover = None
-        url_tmpl = artwork.get("url")
-        if isinstance(url_tmpl, str) and "{w}" in url_tmpl:
-            cover = url_tmpl.replace("{w}", "300").replace("{h}", "300")
-        elif isinstance(url_tmpl, str) and url_tmpl.strip():
-            cover = url_tmpl
-        return AppleTrack(
-            id=str(raw.get("id") or sid),
-            uri=f"apple:song:{sid}",
-            title=attrs.get("name") or "Song",
-            artist=attrs.get("artistName") or "Unknown",
-            duration_ms=attrs.get("durationInMillis"),
-            album=attrs.get("albumName"),
-            cover_url=cover,
-        )
+        return None
 
     def play_limits_message(self) -> str:
-        if self.airplay_source():
-            return (
-                "Apple play: capturing AirPlay/shairport source "
-                f"{self.airplay_source()!r} into musync_feeder. "
-                "Start playback on an Apple device targeting this receiver."
-            )
-        return (
-            "Apple Music cannot fully play on Linux hub PCM yet. "
-            "Options: (1) AirPlay to shairport-sync and set MUSYNC_APPLE_AIRPLAY_SOURCE, "
-            "(2) use Spotify for real hub playback, (3) keep Local files. "
-            "See docs/spotify-apple.md."
-        )
+        return self._airplay.play_note(self.airplay_source())

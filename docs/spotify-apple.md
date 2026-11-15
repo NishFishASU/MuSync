@@ -1,20 +1,20 @@
-# Spotify + Apple Music on the Pi
+# Spotify + AirPlay on the Pi
 
 Hub streaming into the existing PipeWire fan-out: **source → `musync_feeder` → Qudelix / SPP sinks**.
 
-**Spotify is fully supported** (Premium + librespot Connect). **Apple Music is best-effort on Linux** (catalog search + optional AirPlay capture). **YouTube** (Data API + yt-dlp/ffmpeg) is documented in [docs/youtube.md](youtube.md).
+**Spotify is fully supported** (Premium + librespot Connect). **Apple devices use AirPlay receive** (shairport-sync → PipeWire → feeder) — there is no MusicKit catalog search on the hub. See [airplay-receive.md](./airplay-receive.md). **YouTube** is supported via Data API search + yt-dlp → ffmpeg → feeder — see [youtube.md](./youtube.md).
 
-Secrets stay in environment variables / local files. Never commit client secrets, tokens, or `.p8` keys (see `.gitignore`).
+Secrets stay in environment variables / local files. Never commit client secrets or tokens (see `.gitignore`).
 
 ## What is real vs limited
 
-| | Spotify | Apple Music |
-|--|---------|-------------|
-| Auth | OAuth (Authorization Code) via UI **Connect Spotify** | MusicKit developer token from Team ID + Key ID + `.p8` |
-| Search | Web API — real | Catalog API — real when keys set |
-| Hub PCM | **librespot** Connect device with `PULSE_SINK=musync_feeder` | **Limited** — no official Linux player |
-| Play path | Web API transfers track to librespot → feeder → sinks | Optional: AirPlay → shairport-sync → PipeWire source → feeder |
-| Without credentials | Rows show **unavailable**; **mock/local still work** | Same |
+| | Spotify | AirPlay receive |
+|--|---------|-----------------|
+| Auth | OAuth (Authorization Code) via UI **Connect Spotify** | None (receiver on the Pi) |
+| Search | Web API — real | N/A — play on the Apple device |
+| Hub PCM | **librespot** Connect device with `PULSE_SINK=musync_feeder` | **shairport-sync** Source → loopback → feeder |
+| Play path | Web API transfers track to librespot → feeder → sinks | AirPlay to Pi → capture into feeder |
+| Without credentials | Rows show **unavailable**; **mock/local still work** | Install shairport / Refresh inputs |
 
 ## Spotify setup (Pi)
 
@@ -71,10 +71,10 @@ export MUSYNC_BACKEND=pipewire
 
 1. Open `http://<Pi-IP>:8080`
 2. Device setup → enable Qudelix + Phone SPP → Save
-3. **Streaming** → **Connect Spotify** (OAuth only — same-origin link → Spotify
-   authorize → `/api/streaming/spotify/callback` → tokens). MuSync never asks
-   for your Spotify password; Client ID/Secret stay in `~/musync.env`.
-4. **Queue** → search a track → **Queue & play** (search UI lives on Queue, not Streaming)
+3. **Streaming** → **Connect Spotify** (same-origin link → Spotify authorize →
+   `/api/streaming/spotify/callback` → tokens). MuSync never asks for your
+   Spotify password; Client ID/Secret stay in `~/musync.env`.
+4. **Queue** → search a track → **Queue & play**
 5. Confirm audio on Qudelix / SPP (`Simple Protocol Player` → Pi IP:port)
 
 If the UI says **not configured**, credentials are missing from the process env —
@@ -89,40 +89,19 @@ fill `~/musync.env`, restart `run_pi.sh`, then use **Connect Spotify** again.
 5. Stop/Pause: Spotify pauses; feeder swap does not tear down BT/SPP graph.
 6. Logout: tokens cleared; Spotify becomes unavailable again; local still plays.
 
-## Apple Music (best-effort)
+## AirPlay receive (Apple devices)
 
-### Keys (optional)
+MusicKit / Apple Music **search is not offered** on the hub. To play from an
+iPhone or Mac into MuSync:
 
-From [Apple Developer → Keys](https://developer.apple.com/account/resources/authkeys/list) create a **MusicKit** key:
+1. Install and run [shairport-sync](https://github.com/mikebrady/shairport-sync).
+2. **Inputs** → **Refresh inputs** (auto-binds `capture_path=airplay`).
+3. Queue → **+ Live** / **+ Device** on the AirPlay host → **Play**.
+4. AirPlay audio to the Pi from the Apple device.
 
-```bash
-export MUSYNC_APPLE_TEAM_ID="…"
-export MUSYNC_APPLE_KEY_ID="…"
-export MUSYNC_APPLE_PRIVATE_KEY_PATH="$HOME/keys/AuthKey_XXXXX.p8"  # never commit
-# export MUSYNC_APPLE_STOREFRONT=us
-# export MUSYNC_APPLE_MUSIC_USER_TOKEN="…"   # optional; library/personalization
-```
+Optional: `MUSYNC_AIRPLAY_SOURCE=<PipeWire source name>` in `~/musync.env`.
 
-With keys: **search works**. Full DRM playback on the hub does **not**.
-
-There is **no Spotify-style user OAuth redirect** for Apple Music hub PCM on
-Linux. MusicKit developer tokens are mintable from Team/Key/`.p8` in env;
-personalized library needs a MusicKit JS user token (browser), and DRM still
-blocks a native Linux player. Prefer Spotify Connect + librespot for real hub
-audio, or AirPlay capture below.
-
-### Optional AirPlay capture
-
-1. Run [shairport-sync](https://github.com/mikebrady/shairport-sync) so it appears as a PipeWire **source**.
-2. Point MuSync at it:
-
-```bash
-export MUSYNC_APPLE_AIRPLAY_SOURCE="shairport-sync"   # exact PipeWire source name
-```
-
-3. On an iPhone/Mac, AirPlay to that receiver, then queue an Apple row and Play — MuSync loopbacks that source into `musync_feeder`.
-
-Without AirPlay: Apple stays limited (clear UI note); use Spotify or Local for demo audio.
+Full steps: [airplay-receive.md](./airplay-receive.md).
 
 ## Mock / laptop (no credentials)
 
@@ -131,9 +110,10 @@ export MUSYNC_BACKEND=mock
 ./scripts/run_dev.sh
 ```
 
-Local queue + Play work. Streaming panel shows “not configured”. No secrets required.
+Local queue + Play work. Streaming Spotify shows “not configured”; AirPlay card
+shows mock/setup status. No secrets required.
 
-Optional software-clock Spotify/Apple after OAuth on laptop:
+Optional software-clock Spotify after OAuth on laptop:
 
 ```bash
 export MUSYNC_STREAMING_MOCK=1
@@ -169,13 +149,13 @@ export MUSYNC_STREAMING_MOCK=1
 
 | Method | Path | Purpose |
 |--------|------|---------|
-| `GET` | `/api/streaming` | Provider status (no secrets) |
+| `GET` | `/api/streaming` | Spotify + AirPlay status (no secrets) |
 | `GET` | `/api/streaming/spotify/login` | Start OAuth redirect |
 | `GET` | `/api/streaming/spotify/authorize-url` | JSON preflight (url or error) |
 | `GET` | `/api/streaming/spotify/callback` | OAuth return |
 | `POST` | `/api/streaming/spotify/logout` | Clear tokens |
 | `GET` | `/api/streaming/search?provider=spotify&q=` | Track search |
-| `POST` | `/api/streaming/queue` | `{ provider, uri, title?, artist?, activate? }` |
+| `POST` | `/api/streaming/queue` | `{ provider: "spotify", uri, title?, … }` |
 
 ## Troubleshooting
 
@@ -186,3 +166,4 @@ export MUSYNC_STREAMING_MOCK=1
 - **OAuth redirect mismatch** — redirect URI in the Spotify dashboard must equal `MUSYNC_SPOTIFY_REDIRECT_URI` (API port `:8080` / `:8081`, never Vite `:5173`).
 - **Connect does nothing / credentials missing** — fill `%USERPROFILE%\musync.env` or `config/streaming.local.env`, restart the API; Connect shows a clear error when Client ID/Secret are unset.
 - **Duplicate feeders** — fixed by idempotent feeder purge on startup (see `docs/pi-pipewire.md`).
+- **AirPlay silent** — confirm shairport Source in `wpctl status`, Refresh inputs, Play the AirPlay live host, then AirPlay *to* the Pi (see [airplay-receive.md](./airplay-receive.md)).

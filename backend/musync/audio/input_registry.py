@@ -1,4 +1,4 @@
-"""Phone/PC/HDMI input hosts (≤4) — BT A2DP / USB / HDMI / network → feeder."""
+"""Phone/PC/HDMI/AirPlay input hosts (≤4) — BT A2DP / USB / HDMI / AirPlay / network → feeder."""
 
 from __future__ import annotations
 
@@ -24,6 +24,7 @@ CAPTURE_NOTES: dict[CapturePath, str] = {
     "(Pi 5 USB-C PD is power-only — not audio)",
     CapturePath.HDMI: "HDMI / capture card → ALSA → PipeWire → musync_feeder "
     "(audio only; picture stays on the capture display path)",
+    CapturePath.AIRPLAY: "AirPlay receive (shairport-sync) → PipeWire → musync_feeder",
     CapturePath.NETWORK: "Network / uploaded file → musync_feeder",
 }
 
@@ -33,6 +34,9 @@ WAITING_CAPTURE_NOTES: dict[CapturePath, str] = {
     "Plug an interface, then Refresh inputs",
     CapturePath.HDMI: "Unavailable — waiting for HDMI / capture card. "
     "Plug a capture dongle, then Refresh inputs",
+    CapturePath.AIRPLAY: "Unavailable — waiting for shairport-sync AirPlay source. "
+    "Install receiver, AirPlay to the Pi, then Refresh inputs "
+    "(docs/airplay-receive.md)",
     CapturePath.NETWORK: "Unavailable — upload a file or set endpoint to play into the feeder",
 }
 
@@ -57,12 +61,12 @@ def host_is_live(host: InputHost) -> bool:
     if host.capture_path == CapturePath.NETWORK:
         # Network path is live when endpoint is an existing file (upload).
         return Path(host.endpoint).is_file()
-    # BT A2DP / USB / HDMI: connected + PipeWire source endpoint.
+    # BT A2DP / USB / HDMI / AirPlay: connected + PipeWire source endpoint.
     return True
 
 
 def default_demo_hosts() -> list[InputHost]:
-    """Demo hosts — S21 FE BT + USB PC + HDMI capture; mock marks them live."""
+    """Demo hosts — S21 FE BT + USB PC + HDMI + AirPlay; mock marks them live."""
     return [
         InputHost(
             id="input-1",
@@ -93,6 +97,16 @@ def default_demo_hosts() -> list[InputHost]:
             connected=False,
             endpoint=None,
             note=WAITING_CAPTURE_NOTES[CapturePath.HDMI],
+        ),
+        InputHost(
+            id="input-4",
+            name="AirPlay Receive",
+            kind=HostKind.OTHER,
+            capture_path=CapturePath.AIRPLAY,
+            armed=False,
+            connected=False,
+            endpoint=None,
+            note=WAITING_CAPTURE_NOTES[CapturePath.AIRPLAY],
         ),
     ]
 

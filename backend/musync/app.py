@@ -380,10 +380,39 @@ def api_delete_input(host_id: str) -> Response:
     return Response(status_code=204)
 
 
+def _streaming_status_with_airplay() -> StreamingStatus:
+    """Spotify + AirPlay status; enrich AirPlay from live input hosts when possible."""
+    from .audio.input_registry import host_is_live
+    from .models import CapturePath
+
+    discovered = None
+    live = False
+    host_name = None
+    try:
+        for host in backend.list_inputs():
+            if host.capture_path != CapturePath.AIRPLAY:
+                continue
+            if host_is_live(host):
+                discovered = host.endpoint
+                live = True
+                host_name = host.name
+                break
+            if host.endpoint and not discovered:
+                discovered = host.endpoint
+                host_name = host.name
+    except Exception:  # noqa: BLE001
+        pass
+    return get_streaming_service().status(
+        airplay_discovered=discovered,
+        airplay_live=live,
+        airplay_host_name=host_name,
+    )
+
+
 @app.get("/api/streaming", response_model=StreamingStatus)
 def api_streaming_status() -> StreamingStatus:
-    """Spotify / Apple auth + capability status (secrets never returned)."""
-    return get_streaming_service().status()
+    """Spotify auth + AirPlay receive status (secrets never returned)."""
+    return _streaming_status_with_airplay()
 
 
 def _spotify_redirect_uri(request: Request) -> str:
@@ -513,16 +542,16 @@ def api_spotify_logout() -> StreamingStatus:
             backend._session.refresh_live_availability()  # type: ignore[attr-defined]
         except Exception:  # noqa: BLE001
             pass
-    return get_streaming_service().status()
+    return _streaming_status_with_airplay()
 
 
 @app.get("/api/streaming/search", response_model=StreamingSearchResponse)
 def api_streaming_search(
-    provider: str = Query(..., description="spotify, apple, or youtube"),
+    provider: str = Query(..., description="spotify or youtube"),
     q: str = Query(..., min_length=1),
     limit: int = Query(15, ge=1, le=50),
 ) -> StreamingSearchResponse:
-    """Search Spotify/Apple/YouTube. Always returns 400 with a real message — never bare 500."""
+    """Search Spotify/YouTube. Always returns 400 with a real message — never bare 500."""
     p = (provider or "").strip().lower()
     svc = get_streaming_service()
     # Spotify Web API rejects out-of-range / non-integer limit strings ("Invalid limit").
@@ -535,12 +564,6 @@ def api_streaming_search(
         )
     if p == "spotify" and not svc.spotify.authenticated():
         raise ValueError("Connect Spotify first (Streaming tab), then search from Queue")
-    if p in {"apple", "apple_music", "music"} and not svc.apple.configured():
-        raise ValueError(
-            "Apple Music not configured — set MUSYNC_APPLE_TEAM_ID, "
-            "MUSYNC_APPLE_KEY_ID, MUSYNC_APPLE_PRIVATE_KEY_PATH in ~/musync.env "
-            "(search only; hub PCM needs AirPlay — docs/spotify-apple.md)"
-        )
     if p in {"youtube", "yt", "ytb"} and not svc.youtube.configured():
         raise ValueError(
             "YouTube not configured — set MUSYNC_YOUTUBE_API_KEY in ~/musync.env "
@@ -554,8 +577,6 @@ def api_streaming_search(
     except Exception as exc:  # noqa: BLE001 — surface provider failures in the UI
         if p == "spotify":
             label = "Spotify"
-        elif p.startswith("apple") or p == "music":
-            label = "Apple Music"
         elif p in {"youtube", "yt", "ytb"}:
             label = "YouTube"
         else:
@@ -565,13 +586,16 @@ def api_streaming_search(
 
 @app.post("/api/streaming/queue", response_model=QueueItem, status_code=201)
 def api_streaming_queue_add(body: StreamingQueueAdd) -> QueueItem:
-    """Add a searched track to the hub queue and optionally activate it."""
+    """Add a searched Spotify/YouTube track to the hub queue and optionally activate it."""
     if body.provider == "spotify":
         source_type = SourceType.SPOTIFY
     elif body.provider == "youtube":
         source_type = SourceType.YOUTUBE
     else:
-        source_type = SourceType.APPLE
+        raise ValueError(
+            "Only Spotify/YouTube search queue is supported — use AirPlay live input "
+            "for Apple devices (docs/airplay-receive.md)"
+        )
     # Keep title clean; artist/album/cover live on dedicated fields for now-playing.
     title = body.title or body.uri
     item = backend.add_queue_item(

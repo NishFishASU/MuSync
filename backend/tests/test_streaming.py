@@ -30,6 +30,7 @@ def _backend(tmp_path, monkeypatch) -> MockAudioBackend:
     monkeypatch.delenv("MUSYNC_APPLE_KEY_ID", raising=False)
     monkeypatch.delenv("MUSYNC_APPLE_PRIVATE_KEY_PATH", raising=False)
     monkeypatch.delenv("MUSYNC_APPLE_AIRPLAY_SOURCE", raising=False)
+    monkeypatch.delenv("MUSYNC_AIRPLAY_SOURCE", raising=False)
     monkeypatch.delenv("MUSYNC_YOUTUBE_API_KEY", raising=False)
     monkeypatch.delenv("MUSYNC_STREAMING_MOCK", raising=False)
     reset_streaming_service()
@@ -56,7 +57,11 @@ def test_streaming_status_without_credentials(tmp_path, monkeypatch) -> None:
     body = res.json()
     assert body["spotify"]["configured"] is False
     assert body["spotify"]["authenticated"] is False
-    assert body["apple"]["configured"] is False
+    assert "airplay" in body
+    # Mock seeds a live AirPlay host — status should report receiving/configured.
+    assert body["airplay"]["configured"] is True
+    assert body["airplay"].get("receiving") is True
+    assert body["airplay"].get("source")
     assert body["youtube"]["configured"] is False
     note = body["spotify"]["note"].lower()
     assert "missing" in note or "credential" in note or "unavailable" in note or "stub" in note
@@ -763,14 +768,8 @@ def test_now_playing_sample_for_input_and_streaming(tmp_path, monkeypatch) -> No
     assert np2.get("cover_url")
 
 
-def test_apple_airplay_marks_playable(tmp_path, monkeypatch) -> None:
-    key = tmp_path / "AuthKey_TEST.p8"
-    # Minimal placeholder — configured() only checks file exists + team/key env.
-    key.write_text("-----BEGIN PRIVATE KEY-----\nMIGH\n-----END PRIVATE KEY-----\n")
-    monkeypatch.setenv("MUSYNC_APPLE_TEAM_ID", "TEAM123")
-    monkeypatch.setenv("MUSYNC_APPLE_KEY_ID", "KEY123")
-    monkeypatch.setenv("MUSYNC_APPLE_PRIVATE_KEY_PATH", str(key))
-    monkeypatch.setenv("MUSYNC_APPLE_AIRPLAY_SOURCE", "shairport-sync")
+def test_airplay_env_marks_apple_source_playable(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("MUSYNC_AIRPLAY_SOURCE", "shairport-sync")
     monkeypatch.setenv("MUSYNC_DEVICES_CONFIG", str(tmp_path / "devices.yaml"))
     monkeypatch.setenv("MUSYNC_MEDIA_DIR", str(tmp_path / "media"))
     reset_streaming_service()
@@ -789,11 +788,22 @@ def test_apple_airplay_marks_playable(tmp_path, monkeypatch) -> None:
     item = backend.add_queue_item(
         QueueItemCreate(
             source_type=SourceType.APPLE,
-            locator="apple:song:1234567890",
-            title="AirPlay song",
+            locator="airplay:receive",
+            title="AirPlay receive",
         )
     )
     assert item.available is True
+
+
+def test_apple_music_search_rejected(tmp_path, monkeypatch) -> None:
+    from musync.app import create_app
+
+    backend = _backend(tmp_path, monkeypatch)
+    client = TestClient(create_app(audio_backend=backend))
+    res = client.get("/api/streaming/search", params={"provider": "apple", "q": "hello"})
+    assert res.status_code == 400
+    detail = res.json()["detail"].lower()
+    assert "airplay" in detail or "removed" in detail or "spotify" in detail
 
 
 def test_patch_to_spotify_hub_without_uri_stays_stub(tmp_path, monkeypatch) -> None:

@@ -8,12 +8,14 @@ import threading
 from typing import Any, Optional
 
 from ..models import (
+    AirplayStatus,
     StreamingProviderStatus,
     StreamingSearchHit,
     StreamingSearchResponse,
     StreamingStatus,
     SourceType,
 )
+from .airplay import AirplayReceiver
 from .apple import AppleMusicClient
 from .spotify import SpotifyClient
 from .youtube import YouTubeClient
@@ -37,16 +39,28 @@ def streaming_mock_enabled() -> bool:
 class StreamingService:
     def __init__(self) -> None:
         self.spotify = SpotifyClient()
+        self.airplay = AirplayReceiver()
+        # SourceType.APPLE play path still uses this thin AirPlay-backed client.
         self.apple = AppleMusicClient()
         self.youtube = YouTubeClient()
 
-    def status(self) -> StreamingStatus:
+    def status(
+        self,
+        *,
+        airplay_discovered: Optional[str] = None,
+        airplay_live: bool = False,
+        airplay_host_name: Optional[str] = None,
+    ) -> StreamingStatus:
         sp = self.spotify.status()
-        ap = self.apple.status()
+        ap = self.airplay.status(
+            discovered_source=airplay_discovered,
+            live=airplay_live,
+            host_name=airplay_host_name,
+        )
         yt = self.youtube.status()
         return StreamingStatus(
             spotify=StreamingProviderStatus.model_validate(sp),
-            apple=StreamingProviderStatus.model_validate(ap),
+            airplay=AirplayStatus.model_validate(ap),
             youtube=StreamingProviderStatus.model_validate(yt),
             mock_playback=streaming_mock_enabled(),
         )
@@ -55,7 +69,8 @@ class StreamingService:
         return self.spotify.authenticated()
 
     def apple_ready(self) -> bool:
-        return self.apple.authenticated()
+        """True when AirPlay capture is configured or shairport is present."""
+        return self.apple.configured()
 
     def youtube_ready(self) -> bool:
         return self.youtube.authenticated()
@@ -65,8 +80,13 @@ class StreamingService:
         return self.spotify.authenticated()
 
     def apple_playable(self) -> bool:
-        """Playable when AirPlay capture source is configured (best-effort)."""
-        return bool(self.apple.authenticated() and self.apple.airplay_source())
+        """Playable when an AirPlay PipeWire source is configured (best-effort)."""
+        return bool(self.apple.airplay_source()) or (
+            streaming_mock_enabled() and self.apple_ready()
+        )
+
+    def airplay_playable(self) -> bool:
+        return self.apple_playable()
 
     def youtube_playable(self) -> bool:
         """Playable when API key + yt-dlp + ffmpeg are available (or streaming mock)."""
@@ -78,9 +98,7 @@ class StreamingService:
         if source_type == SourceType.SPOTIFY:
             return self.spotify_playable()
         if source_type == SourceType.APPLE:
-            return self.apple_playable() or (
-                streaming_mock_enabled() and self.apple_ready()
-            )
+            return self.apple_playable()
         if source_type == SourceType.YOUTUBE:
             return self.youtube_playable()
         return False
@@ -104,21 +122,11 @@ class StreamingService:
             ]
             return StreamingSearchResponse(provider="spotify", query=query, hits=hits)
         if p in {"apple", "apple_music", "music"}:
-            tracks = self.apple.search_tracks(query, limit=limit)
-            hits = [
-                StreamingSearchHit(
-                    provider="apple",
-                    id=t.id,
-                    uri=t.uri,
-                    title=t.title,
-                    artist=t.artist,
-                    duration_ms=t.duration_ms,
-                    album=t.album,
-                    cover_url=t.cover_url,
-                )
-                for t in tracks
-            ]
-            return StreamingSearchResponse(provider="apple", query=query, hits=hits)
+            raise ValueError(
+                "Apple Music search removed — use AirPlay receive on Inputs "
+                "(shairport-sync → musync_feeder) or Spotify / YouTube. "
+                "See docs/airplay-receive.md"
+            )
         if p in {"youtube", "yt", "ytb"}:
             tracks = self.youtube.search_tracks(query, limit=limit)
             hits = [

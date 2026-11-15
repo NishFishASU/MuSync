@@ -10,6 +10,7 @@ from typing import Callable, Optional
 from ..config import DEMO_DURATION_MS, PLACEHOLDER_SOURCES, discover_local_sources
 from ..models import (
     PLAYABLE_SOURCE_TYPES,
+    CapturePath,
     MediaKind,
     QueueItem,
     QueueItemCreate,
@@ -34,8 +35,8 @@ UNAVAILABLE_NOTES: dict[SourceType, str] = {
         "sink graph stays up"
     ),
     SourceType.APPLE: (
-        "Unavailable — Apple DRM has no native Linux hub player; "
-        "MusicKit search + optional AirPlay, or use Spotify / live input"
+        "Unavailable — AirPlay receive not ready; install shairport-sync, "
+        "Refresh inputs, or set MUSYNC_AIRPLAY_SOURCE (docs/airplay-receive.md)"
     ),
     SourceType.YOUTUBE: (
         "Unavailable — set MUSYNC_YOUTUBE_API_KEY and install yt-dlp + ffmpeg "
@@ -43,7 +44,7 @@ UNAVAILABLE_NOTES: dict[SourceType, str] = {
     ),
     SourceType.INPUT: (
         "Unavailable — waiting for live capture "
-        "(BT A2DP / USB-A / HDMI / upload)"
+        "(BT A2DP / USB-A / HDMI / AirPlay / upload)"
     ),
 }
 
@@ -88,10 +89,14 @@ def is_playable(
     if source_type == SourceType.APPLE:
         if input_id:
             return False
-        if not _hub_stream_ready(SourceType.APPLE):
-            return False
-        loc = (locator or "").strip()
-        return bool(loc.startswith("apple:song:") or loc.startswith("apple:track:"))
+        # AirPlay receive is ambient PCM — no MusicKit track URI required.
+        if _hub_stream_ready(SourceType.APPLE):
+            return True
+        if inputs is not None:
+            for host in inputs.list_hosts():
+                if host.capture_path == CapturePath.AIRPLAY and host_is_live(host):
+                    return True
+        return False
     if source_type == SourceType.YOUTUBE:
         if input_id:
             return False
@@ -120,10 +125,11 @@ def unavailable_note(source_type: SourceType) -> Optional[str]:
         return UNAVAILABLE_NOTES[SourceType.SPOTIFY]
     if source_type == SourceType.APPLE:
         svc = get_streaming_service()
-        if svc.apple_ready() and not svc.apple_playable():
-            return svc.apple_play_note()
+        if svc.apple_playable():
+            return "AirPlay → musync_feeder — start playback on the Apple device"
         if svc.apple_ready():
-            return "Pick an Apple song; AirPlay capture feeds musync_feeder"
+            return svc.apple_play_note()
+        # Live AirPlay input host also counts (mock / after Refresh inputs).
         return UNAVAILABLE_NOTES[SourceType.APPLE]
     if source_type == SourceType.YOUTUBE:
         svc = get_streaming_service()
@@ -238,11 +244,20 @@ class SourceSession:
                     )
                 )
             elif src.type == SourceType.APPLE:
+                playable = is_playable(
+                    SourceType.APPLE,
+                    locator=src.locator,
+                    inputs=self._inputs,
+                )
                 out.append(
                     src.model_copy(
                         update={
-                            "available": False,
-                            "note": stub_note(SourceType.APPLE),
+                            "available": playable,
+                            "note": (
+                                "AirPlay → musync_feeder — Play live input or hub AirPlay"
+                                if playable
+                                else stub_note(SourceType.APPLE)
+                            ),
                         }
                     )
                 )
@@ -282,7 +297,9 @@ class SourceSession:
                 locator=locator,
             )
         elif src.type in _STREAM_HUB_TYPES and not src.input_id:
-            playable = is_playable(src.type, locator=locator, path=src.path)
+            playable = is_playable(
+                src.type, locator=locator, path=src.path, inputs=self._inputs
+            )
         else:
             playable = (
                 is_playable(src.type, path=src.path, locator=locator)
@@ -697,7 +714,10 @@ class SourceSession:
                             self._transport.duration_ms = 0
                 elif item.source_type in _STREAM_HUB_TYPES and not item.input_id:
                     playable = is_playable(
-                        item.source_type, path=item.path, locator=item.locator
+                        item.source_type,
+                        path=item.path,
+                        locator=item.locator,
+                        inputs=self._inputs,
                     )
                     note = None if playable else stub_note(item.source_type)
                     self._queue[i] = item.model_copy(
