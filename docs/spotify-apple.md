@@ -59,12 +59,11 @@ MuSync starts it as:
 
 **Spotify Premium is required** for Connect playback control.
 
-### 4. Run + UI
+### 4. Run + UI (OAuth Connect link — not a password form)
 
 ```bash
 cd ~/MuSync && git pull origin main
-source .venv/bin/activate   # or ./scripts/run_pi.sh (activates venv)
-set -a && source ~/musync.env && set +a
+# ./scripts/run_pi.sh auto-loads ~/musync.env + activates .venv
 ./scripts/build_web.sh
 export MUSYNC_BACKEND=pipewire
 ./scripts/run_pi.sh
@@ -72,9 +71,14 @@ export MUSYNC_BACKEND=pipewire
 
 1. Open `http://<Pi-IP>:8080`
 2. Device setup → enable Qudelix + Phone SPP → Save
-3. **Streaming** panel → **Connect Spotify** → approve in browser
+3. **Streaming** → **Connect Spotify** (same-origin link → Spotify authorize →
+   `/api/streaming/spotify/callback` → tokens). MuSync never asks for your
+   Spotify password; Client ID/Secret stay in `~/musync.env`.
 4. Search a track → **Queue & play**
 5. Confirm audio on Qudelix / SPP (`Simple Protocol Player` → Pi IP:port)
+
+If the UI says **not configured**, credentials are missing from the process env —
+fill `~/musync.env`, restart `run_pi.sh`, then use **Connect Spotify** again.
 
 ### Pi test checklist
 
@@ -100,6 +104,12 @@ export MUSYNC_APPLE_PRIVATE_KEY_PATH="$HOME/keys/AuthKey_XXXXX.p8"  # never comm
 ```
 
 With keys: **search works**. Full DRM playback on the hub does **not**.
+
+There is **no Spotify-style user OAuth redirect** for Apple Music hub PCM on
+Linux. MusicKit developer tokens are mintable from Team/Key/`.p8` in env;
+personalized library needs a MusicKit JS user token (browser), and DRM still
+blocks a native Linux player. Prefer Spotify Connect + librespot for real hub
+audio, or AirPlay capture below.
 
 ### Optional AirPlay capture
 

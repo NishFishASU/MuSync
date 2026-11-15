@@ -92,6 +92,7 @@ class SpotifyTrack:
     duration_ms: Optional[int] = None
     album: Optional[str] = None
     preview_url: Optional[str] = None
+    cover_url: Optional[str] = None
 
 
 class SpotifyClient:
@@ -101,6 +102,7 @@ class SpotifyClient:
         self._lock = threading.RLock()
         self._tokens: dict[str, Any] = {}
         self._oauth_state: Optional[str] = None
+        self._oauth_redirect: Optional[str] = None
         self._librespot_proc: Optional[subprocess.Popen[str]] = None
         self._load_tokens()
 
@@ -136,9 +138,15 @@ class SpotifyClient:
                     ]
                 ),
                 "note": (
-                    "Spotify Premium + librespot Connect → Pulse sink musync_feeder"
+                    (
+                        "Spotify Premium + librespot Connect → Pulse sink musync_feeder"
+                        if librespot
+                        else "Connected/search OK — install librespot for hub PCM "
+                        "(Play needs Connect device)"
+                    )
                     if configured
-                    else "Credentials missing — mock/local still work; Spotify stays stub"
+                    else "Credentials missing — set MUSYNC_SPOTIFY_CLIENT_ID/SECRET; "
+                    "mock/local still work"
                 ),
             }
 
@@ -153,19 +161,21 @@ class SpotifyClient:
 
     # --- OAuth ---
 
-    def auth_url(self) -> str:
+    def auth_url(self, *, redirect_uri: Optional[str] = None) -> str:
         if not credentials_configured():
             raise ValueError(
                 "Spotify not configured — set MUSYNC_SPOTIFY_CLIENT_ID and "
                 "MUSYNC_SPOTIFY_CLIENT_SECRET (see docs/spotify-apple.md)"
             )
         state = uuid.uuid4().hex
+        redir = (redirect_uri or _redirect_uri()).strip()
         with self._lock:
             self._oauth_state = state
+            self._oauth_redirect = redir
         params = {
             "client_id": _client_id(),
             "response_type": "code",
-            "redirect_uri": _redirect_uri(),
+            "redirect_uri": redir,
             "scope": SCOPES,
             "state": state,
             "show_dialog": "false",
@@ -175,13 +185,15 @@ class SpotifyClient:
     def handle_callback(self, *, code: str, state: str) -> dict[str, Any]:
         with self._lock:
             expected = self._oauth_state
+            redir = getattr(self, "_oauth_redirect", None) or _redirect_uri()
             self._oauth_state = None
+            self._oauth_redirect = None
         if not expected or state != expected:
             raise ValueError("Invalid OAuth state — restart Connect from the MuSync UI")
         data = {
             "grant_type": "authorization_code",
             "code": code,
-            "redirect_uri": _redirect_uri(),
+            "redirect_uri": redir,
         }
         token = self._token_request(data)
         self._store_tokens(token)
@@ -216,6 +228,11 @@ class SpotifyClient:
         out: list[SpotifyTrack] = []
         for raw in items:
             artists = ", ".join(a.get("name", "") for a in (raw.get("artists") or []) if a.get("name"))
+            images = (raw.get("album") or {}).get("images") or []
+            cover = None
+            if images:
+                # Prefer mid-size art when present.
+                cover = images[min(1, len(images) - 1)].get("url") or images[0].get("url")
             out.append(
                 SpotifyTrack(
                     id=raw.get("id") or "",
@@ -225,9 +242,59 @@ class SpotifyClient:
                     duration_ms=raw.get("duration_ms"),
                     album=(raw.get("album") or {}).get("name"),
                     preview_url=raw.get("preview_url"),
+                    cover_url=cover,
                 )
             )
         return out
+
+    def track_metadata(self, uri: str) -> Optional[SpotifyTrack]:
+        """Fetch title/artist/album/cover for a Spotify URI (now-playing)."""
+        track_id = ""
+        raw_uri = (uri or "").strip()
+        if raw_uri.startswith("spotify:track:"):
+            track_id = raw_uri.split(":")[-1]
+        elif len(raw_uri) == 22 and raw_uri.isalnum():
+            track_id = raw_uri
+        if not track_id or not self.authenticated():
+            return None
+        try:
+            raw = self._get_json(f"/tracks/{track_id}")
+        except Exception as exc:  # noqa: BLE001
+            log.debug("track metadata: %s", exc)
+            return None
+        artists = ", ".join(a.get("name", "") for a in (raw.get("artists") or []) if a.get("name"))
+        images = (raw.get("album") or {}).get("images") or []
+        cover = None
+        if images:
+            cover = images[min(1, len(images) - 1)].get("url") or images[0].get("url")
+        return SpotifyTrack(
+            id=raw.get("id") or track_id,
+            uri=raw.get("uri") or f"spotify:track:{track_id}",
+            title=raw.get("name") or "Track",
+            artist=artists or "Unknown",
+            duration_ms=raw.get("duration_ms"),
+            album=(raw.get("album") or {}).get("name"),
+            preview_url=raw.get("preview_url"),
+            cover_url=cover,
+        )
+
+    def currently_playing(self) -> Optional[dict[str, Any]]:
+        """Spotify Web API currently-playing (best-effort)."""
+        if not self.authenticated():
+            return None
+        try:
+            with httpx.Client(timeout=10.0) as client:
+                resp = client.get(
+                    f"{SPOTIFY_API}/me/player/currently-playing",
+                    headers=self._headers(),
+                )
+            if resp.status_code == 204:
+                return None
+            resp.raise_for_status()
+            return resp.json()
+        except Exception as exc:  # noqa: BLE001
+            log.debug("currently-playing: %s", exc)
+            return None
 
     # --- playback ---
 
@@ -311,6 +378,13 @@ class SpotifyClient:
             raise ValueError("Connect a Spotify account first")
 
         librespot = self.ensure_librespot(feeder=feeder)
+        if not librespot and not self._find_connect_device():
+            raise ValueError(
+                "Spotify hub playback needs librespot on PATH "
+                f"(Connect name={_librespot_name()!r}) or another Connect device. "
+                "Install librespot, set MUSYNC_LIBRESPOT_BIN if needed, and use "
+                "Spotify Premium. Search/auth still work without it."
+            )
         device_id = self._find_connect_device()
         body: dict[str, Any] = {"uris": [track_uri]}
         params: dict[str, str] = {}
@@ -331,11 +405,12 @@ class SpotifyClient:
                 raise ValueError(
                     "No Spotify Connect device found. Install/start librespot "
                     f"(name={_librespot_name()!r}) on the Pi, or open Spotify on a phone "
-                    f"and transfer to {_librespot_name()!r}. {detail}"
+                    f"and transfer to {_librespot_name()!r}. Premium required. {detail}"
                 ) from exc
             if exc.response.status_code == 403:
                 raise ValueError(
-                    f"Spotify play forbidden (Premium required?). {detail}"
+                    "Spotify play forbidden — Premium is required for Connect control. "
+                    f"{detail}"
                 ) from exc
             raise ValueError(f"Spotify play failed: {detail}") from exc
 

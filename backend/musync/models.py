@@ -182,6 +182,9 @@ class Source(BaseModel):
     input_id: Optional[str] = None
     # audio | video for hub-local library rows (ignored for stream/input stubs).
     media_kind: MediaKind = MediaKind.AUDIO
+    artist: Optional[str] = None
+    album: Optional[str] = None
+    cover_url: Optional[str] = None
 
 
 class InputHost(BaseModel):
@@ -264,6 +267,9 @@ class QueueItem(BaseModel):
     note: Optional[str] = None
     duration_ms: Optional[int] = None
     media_kind: MediaKind = MediaKind.AUDIO
+    artist: Optional[str] = None
+    album: Optional[str] = None
+    cover_url: Optional[str] = None
 
 
 class QueueItemCreate(BaseModel):
@@ -277,6 +283,9 @@ class QueueItemCreate(BaseModel):
     input_id: Optional[str] = None
     duration_ms: Optional[int] = None
     media_kind: Optional[MediaKind] = None
+    artist: Optional[str] = None
+    album: Optional[str] = None
+    cover_url: Optional[str] = None
 
 
 class QueueItemPatch(BaseModel):
@@ -289,6 +298,9 @@ class QueueItemPatch(BaseModel):
     path: Optional[str] = None
     input_id: Optional[str] = None
     media_kind: Optional[MediaKind] = None
+    artist: Optional[str] = None
+    album: Optional[str] = None
+    cover_url: Optional[str] = None
 
 
 class Transport(BaseModel):
@@ -300,7 +312,28 @@ class Transport(BaseModel):
     source_type: Optional[SourceType] = None
     input_id: Optional[str] = None
     title: Optional[str] = None
+    artist: Optional[str] = None
+    album: Optional[str] = None
+    cover_url: Optional[str] = None
     media_kind: Optional[MediaKind] = None
+
+
+class NowPlaying(BaseModel):
+    """Unified now-playing metadata for local / streaming / live input."""
+
+    title: Optional[str] = None
+    artist: Optional[str] = None
+    album: Optional[str] = None
+    cover_url: Optional[str] = None
+    has_cover: bool = False
+    source_type: Optional[SourceType] = None
+    input_id: Optional[str] = None
+    queue_item_id: Optional[str] = None
+    locator: Optional[str] = None
+    state: TransportState = TransportState.STOPPED
+    position_ms: int = 0
+    duration_ms: int = 0
+    note: Optional[str] = None
 
 
 class TransportPut(BaseModel):
@@ -366,6 +399,7 @@ class StreamingSearchHit(BaseModel):
     artist: str
     duration_ms: Optional[int] = None
     album: Optional[str] = None
+    cover_url: Optional[str] = None
 
 
 class StreamingSearchResponse(BaseModel):
@@ -381,6 +415,8 @@ class StreamingQueueAdd(BaseModel):
     uri: str
     title: Optional[str] = None
     artist: Optional[str] = None
+    album: Optional[str] = None
+    cover_url: Optional[str] = None
     duration_ms: Optional[int] = None
     activate: bool = True
 

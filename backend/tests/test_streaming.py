@@ -143,6 +143,33 @@ def test_streaming_queue_api_requires_auth_for_search(tmp_path, monkeypatch) -> 
     client = TestClient(create_app(audio_backend=backend))
     res = client.get("/api/streaming/search", params={"provider": "spotify", "q": "hello"})
     assert res.status_code == 400
+    detail = res.json()["detail"].lower()
+    assert "not configured" in detail or "musync.env" in detail
+
+
+def test_spotify_login_redirects_when_not_configured(tmp_path, monkeypatch) -> None:
+    """Link-style OAuth: missing env → redirect back to SPA with error (not a form)."""
+    from musync.app import create_app
+
+    backend = _backend(tmp_path, monkeypatch)
+    client = TestClient(create_app(audio_backend=backend))
+    res = client.get("/api/streaming/spotify/login", follow_redirects=False)
+    assert res.status_code in {302, 307}
+    loc = res.headers.get("location") or ""
+    assert "spotify=error" in loc
+    assert "CLIENT" in loc.upper() or "credential" in loc.lower() or "missing" in loc.lower()
+
+
+def test_now_playing_api_for_local(tmp_path, monkeypatch) -> None:
+    from musync.app import create_app
+
+    backend = _backend(tmp_path, monkeypatch)
+    client = TestClient(create_app(audio_backend=backend))
+    res = client.get("/api/now-playing")
+    assert res.status_code == 200
+    body = res.json()
+    assert "title" in body
+    assert body.get("source_type") in {None, "local", "spotify", "apple", "input"}
 
 
 def test_apple_airplay_marks_playable(tmp_path, monkeypatch) -> None:

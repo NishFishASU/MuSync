@@ -587,6 +587,18 @@ def match_capture_source(
                 n.description and n.description.strip().lower() == want_name
             ):
                 return n
+        # Fuzzy aliases: Galaxy S21 / Laptop demo host names ↔ real devices.
+        aliases: list[str] = []
+        if "s21" in want_name or "galaxy" in want_name:
+            aliases.extend(["s21", "galaxy", "samsung"])
+        if "laptop" in want_name or "usb" in want_name or "pc" in want_name:
+            aliases.extend(["usb", "audio", "codec", "headset"])
+        for n in nodes:
+            hay = f"{n.description} {n.name}".lower()
+            if any(a in hay for a in aliases):
+                # Respect preferred capture path when classifying.
+                if classify_capture_source(n) == prefer_path or not prefer_path:
+                    return n
 
     # Prefer a single bluez_input when host asks for BT A2DP.
     path_nodes = [

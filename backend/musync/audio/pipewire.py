@@ -216,6 +216,8 @@ class PipeWireBackend(AudioBackend):
             self._reconnect_bt_sinks(force=True)
             self.refresh_sink_map()
             self._ensure_graph()
+            # Bind Galaxy S21 / Laptop demo hosts to live bluez_input / USB when present.
+            self._refresh_input_host_links()
         except Exception as exc:  # noqa: BLE001 — never block API boot
             log.warning("Startup graph plan failed: %s", exc)
 
@@ -1162,17 +1164,13 @@ class PipeWireBackend(AudioBackend):
 
         if transport.source_type == SourceType.SPOTIFY:
             locator = self._session.active_locator() or ""
-            try:
-                self._start_spotify_into_feeder(locator)
-            except ValueError as exc:
-                log.warning("Spotify feeder: %s", exc)
+            # Surface Premium / librespot / Connect failures to the API/UI.
+            self._start_spotify_into_feeder(locator)
             return
 
         if transport.source_type == SourceType.APPLE:
-            try:
-                self._start_apple_into_feeder()
-            except ValueError as exc:
-                log.warning("Apple feeder: %s", exc)
+            # Honest DRM limits — raise so UI shows AirPlay / MusicKit guidance.
+            self._start_apple_into_feeder()
             return
 
         if transport.source_type == SourceType.INPUT and transport.input_id:
@@ -1228,6 +1226,7 @@ class PipeWireBackend(AudioBackend):
         """Bind unbound USB PipeWire/ALSA sources onto PC hosts (prefer auto-detect).
 
         Returns host ids that were newly bound or created.
+        Pi 5 USB-C PD is power-only — these are USB-A sound cards / interfaces.
         """
         usb_nodes = [
             n
@@ -1248,6 +1247,9 @@ class PipeWireBackend(AudioBackend):
 
         def _claim(node: PwNode, host_id: str, *, name: str | None = None) -> None:
             source_ref = node.name or node.id
+            host = self._inputs.get_host(host_id)
+            # Keep friendly demo names (Laptop) when binding a generic codec.
+            keep_name = host.name if "laptop" in host.name.lower() else None
             patch_kwargs: dict = {
                 "capture_path": CapturePath.USB,
                 "connected": True,
@@ -1256,7 +1258,7 @@ class PipeWireBackend(AudioBackend):
                 "kind": HostKind.PC,
                 "note": CAPTURE_NOTES[CapturePath.USB],
             }
-            if name:
+            if name and not keep_name:
                 patch_kwargs["name"] = name
             self._inputs.patch_host(host_id, InputHostPatch(**patch_kwargs))
             used_endpoints.add(source_ref)
@@ -1290,13 +1292,83 @@ class PipeWireBackend(AudioBackend):
                 break
             created = self._inputs.add_host(
                 InputHostCreate(
-                    name=label or "USB Audio",
+                    name=label or "Laptop (USB)",
                     kind=HostKind.PC,
                     capture_path=CapturePath.USB,
                     armed=True,
                     connected=True,
                     endpoint=source_ref,
                     note=CAPTURE_NOTES[CapturePath.USB],
+                )
+            )
+            used_endpoints.add(source_ref)
+            bound.append(created.id)
+        return bound
+
+    def _auto_bind_bt_hosts(self, candidates: list[PwNode]) -> list[str]:
+        """Bind unbound bluez_input sources onto phone BT A2DP hosts (e.g. Galaxy S21)."""
+        bt_nodes = [
+            n
+            for n in candidates
+            if classify_capture_source(n) == CapturePath.BT_A2DP.value
+        ]
+        if not bt_nodes:
+            return []
+
+        bound: list[str] = []
+        used_endpoints = {
+            (h.endpoint or "").strip()
+            for h in self._inputs.list_hosts()
+            if h.capture_path == CapturePath.BT_A2DP and h.endpoint
+        }
+
+        for node in bt_nodes:
+            source_ref = node.name or node.id
+            if source_ref in used_endpoints:
+                continue
+            waiting = next(
+                (
+                    h
+                    for h in self._inputs.list_hosts()
+                    if h.capture_path == CapturePath.BT_A2DP
+                    and not (h.connected and h.endpoint)
+                ),
+                None,
+            )
+            label = (node.description or "").strip() or node.name
+            if waiting:
+                keep = any(
+                    k in waiting.name.lower() for k in ("s21", "galaxy", "phone")
+                )
+                patch = InputHostPatch(
+                    capture_path=CapturePath.BT_A2DP,
+                    connected=True,
+                    endpoint=source_ref,
+                    armed=True,
+                    kind=HostKind.PHONE,
+                    note=CAPTURE_NOTES[CapturePath.BT_A2DP],
+                )
+                if label and not keep:
+                    patch = patch.model_copy(update={"name": label})
+                self._inputs.patch_host(waiting.id, patch)
+                used_endpoints.add(source_ref)
+                bound.append(waiting.id)
+                continue
+            if any(
+                (h.endpoint or "") == source_ref for h in self._inputs.list_hosts()
+            ):
+                continue
+            if len(self._inputs.list_hosts()) >= MAX_INPUT_HOSTS:
+                break
+            created = self._inputs.add_host(
+                InputHostCreate(
+                    name=label or "Phone (BT A2DP)",
+                    kind=HostKind.PHONE,
+                    capture_path=CapturePath.BT_A2DP,
+                    armed=True,
+                    connected=True,
+                    endpoint=source_ref,
+                    note=CAPTURE_NOTES[CapturePath.BT_A2DP],
                 )
             )
             used_endpoints.add(source_ref)
@@ -1366,11 +1438,15 @@ class PipeWireBackend(AudioBackend):
                         ),
                     )
 
-        # Prefer auto-detect: claim USB sound cards onto PC hosts without manual bind.
+        # Prefer auto-detect: claim USB sound cards + BT A2DP phones without manual bind.
         try:
             self._auto_bind_usb_hosts(candidates)
         except Exception as exc:  # noqa: BLE001
             log.debug("USB auto-bind skipped: %s", exc)
+        try:
+            self._auto_bind_bt_hosts(candidates)
+        except Exception as exc:  # noqa: BLE001
+            log.debug("BT auto-bind skipped: %s", exc)
 
         self._session.refresh_live_availability()
 
@@ -1659,6 +1735,11 @@ class PipeWireBackend(AudioBackend):
                 sources=refreshed,
                 detail=f"{detail}; {bt_detail}{auto_note}",
             )
+
+    def get_now_playing(self):
+        from ..nowplaying import build_now_playing
+
+        return build_now_playing(self._session)
 
     def health(self) -> Health:
         with self._lock:

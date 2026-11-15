@@ -16,6 +16,8 @@
 		fmtMs,
 		forgetWifiNetwork,
 		getHealth,
+		SPOTIFY_LOGIN_HREF,
+		getNowPlaying,
 		getStreamingStatus,
 		getTransport,
 		getWifiStatus,
@@ -95,6 +97,8 @@
 
 	/** @type {import('$lib/api.js').StreamingStatus | null} */
 	let streaming = $state(null);
+	/** @type {import('$lib/api.js').NowPlaying | null} */
+	let nowPlaying = $state(null);
 	/** @type {'spotify' | 'apple'} */
 	let streamProvider = $state('spotify');
 	let streamQuery = $state('');
@@ -319,14 +323,15 @@
 	}
 
 	async function refresh() {
-		const [h, d, t, s, q, i, st] = await Promise.all([
+		const [h, d, t, s, q, i, st, np] = await Promise.all([
 			getHealth(),
 			listDevices(),
 			getTransport(),
 			listSources(),
 			listQueue(),
 			listInputs(),
-			getStreamingStatus().catch(() => null)
+			getStreamingStatus().catch(() => null),
+			getNowPlaying().catch(() => null)
 		]);
 		health = h;
 		devices = d;
@@ -334,6 +339,7 @@
 		queue = q;
 		inputs = i;
 		if (st) streaming = st;
+		if (np) nowPlaying = np;
 		apiError = '';
 		if (!selectedId && d.length) selectedId = d[0].id;
 		applyTransport(t);
@@ -348,9 +354,36 @@
 		streaming = await getStreamingStatus();
 	}
 
+	async function refreshNowPlaying() {
+		nowPlaying = await getNowPlaying();
+	}
+
+	/** Availability pill: only say stub when truly unavailable / mock. */
+	/** @param {{ available?: boolean, note?: string | null, source_type?: string, type?: string }} row */
+	function availabilityLabel(row) {
+		if (row.available) return 'ready';
+		const note = (row.note || '').toLowerCase();
+		if (note.includes('on-device') || note.includes('session')) return 'on-device';
+		return 'stub';
+	}
+
 	async function onStreamSearch() {
 		const q = streamQuery.trim();
 		if (!q || streamBusy) return;
+		if (streamProvider === 'spotify' && !streaming?.spotify?.configured) {
+			streamMessage =
+				'Spotify not configured — set MUSYNC_SPOTIFY_CLIENT_ID/SECRET in ~/musync.env, restart, then Connect Spotify';
+			return;
+		}
+		if (streamProvider === 'apple' && !streaming?.apple?.configured) {
+			streamMessage =
+				'Apple MusicKit keys not set — add Team/Key/.p8 to ~/musync.env (search only; no DRM hub player)';
+			return;
+		}
+		if (streamProvider === 'spotify' && !streaming?.spotify?.authenticated) {
+			streamMessage = 'Connect Spotify first (OAuth link above), then search';
+			return;
+		}
 		streamBusy = true;
 		streamMessage = '';
 		try {
@@ -378,12 +411,15 @@
 				uri: hit.uri,
 				title: hit.title,
 				artist: hit.artist,
+				album: hit.album ?? undefined,
+				cover_url: hit.cover_url ?? undefined,
 				duration_ms: hit.duration_ms ?? undefined,
 				activate: true
 			});
 			queue = await listQueue();
 			applyTransport(await getTransport());
 			sources = await listSources();
+			await refreshNowPlaying().catch(() => {});
 			streamMessage = item.available
 				? `Queued ${hit.title} — press Play`
 				: item.note || `Queued ${hit.title} (not playable yet)`;
@@ -603,7 +639,7 @@
 			queue = await listQueue();
 			captureMessage = discoveredCapture.length
 				? `${discoveredCapture.length} live source${discoveredCapture.length === 1 ? '' : 's'} (USB auto-bound when found)`
-				: 'No bluez_input / USB sources yet — plug a USB sound card or pair phone as A2DP source';
+				: 'No bluez_input / USB-A sources yet — plug a USB sound card (not USB-C PD) or pair phone as A2DP source';
 		} catch (err) {
 			captureMessage = err instanceof Error ? err.message : String(err);
 		} finally {
@@ -762,6 +798,7 @@
 				pollTimer = setInterval(async () => {
 					try {
 						applyTransport(await getTransport());
+						nowPlaying = await getNowPlaying().catch(() => nowPlaying);
 					} catch (err) {
 						console.error(err);
 					}
@@ -811,18 +848,37 @@
 </nav>
 
 <main class="layout">
-	<section class="panel panel-primary transport-panel" aria-labelledby="transport-heading">
+		<section class="panel panel-primary transport-panel" aria-labelledby="transport-heading">
 		<div class="panel-head">
 			<h2 id="transport-heading">Transport</h2>
-			<p class="now-playing">
-				{transport?.title || 'No track'}
-				{#if transport?.source_type}
-					<span class="type-chip">{sourceTypeLabel(transport.source_type)}</span>
+		</div>
+		<div class="now-playing-block">
+			{#if nowPlaying?.cover_url || transport?.cover_url}
+				<img
+					class="cover-art"
+					src={nowPlaying?.cover_url || transport?.cover_url || ''}
+					alt=""
+					width="72"
+					height="72"
+				/>
+			{/if}
+			<div class="now-playing-text">
+				<p class="now-playing">
+					{nowPlaying?.title || transport?.title || 'No track'}
+					{#if transport?.source_type}
+						<span class="type-chip">{sourceTypeLabel(transport.source_type)}</span>
+					{/if}
+					{#if activeIsVideo}
+						<span class="type-chip">Video</span>
+					{/if}
+				</p>
+				{#if nowPlaying?.artist || transport?.artist}
+					<p class="now-playing-meta">{nowPlaying?.artist || transport?.artist}</p>
 				{/if}
-				{#if activeIsVideo}
-					<span class="type-chip">Video</span>
+				{#if nowPlaying?.album || transport?.album}
+					<p class="now-playing-meta muted">{nowPlaying?.album || transport?.album}</p>
 				{/if}
-			</p>
+			</div>
 		</div>
 		{#if activeIsStub}
 			<p class="stub-banner" role="status">
@@ -1328,7 +1384,7 @@
 		<section class="panel streaming-panel" aria-labelledby="streaming-heading">
 			<div class="panel-head">
 				<h2 id="streaming-heading">Streaming</h2>
-				<p class="hint">Spotify → feeder · Apple limited on Linux</p>
+				<p class="hint">OAuth Connect link · no password form in MuSync</p>
 			</div>
 			<div class="stream-status">
 				<div class="stream-card">
@@ -1337,7 +1393,7 @@
 						{streaming?.spotify?.authenticated
 							? streaming.spotify.display_name || 'connected'
 							: streaming?.spotify?.configured
-								? 'not connected'
+								? 'ready to connect'
 								: 'not configured'}
 					</span>
 					{#if streaming?.spotify?.authenticated}
@@ -1349,10 +1405,23 @@
 						>
 							Disconnect
 						</button>
-					{:else if streaming?.spotify?.configured}
-						<a class="btn btn-small" href="/api/streaming/spotify/login">Connect Spotify</a>
 					{:else}
-						<span class="muted tiny">Set MUSYNC_SPOTIFY_CLIENT_ID/SECRET — docs/spotify-apple.md</span>
+						<a class="btn btn-small" href={SPOTIFY_LOGIN_HREF}>Connect Spotify</a>
+						<p class="hint muted">
+							Opens Spotify authorize → returns here with tokens. App Client ID/Secret stay in
+							<code>~/musync.env</code> (not typed here).
+						</p>
+					{/if}
+					{#if streaming?.spotify?.librespot_available === false}
+						<p class="hint muted">Install <code>librespot</code> on the Pi for hub PCM (Premium).</p>
+					{/if}
+					{#if !streaming?.spotify?.configured}
+						<p class="hint muted">
+							Setup once: copy <code>config/streaming.env.example</code> → <code>~/musync.env</code>,
+							add Client ID/Secret + redirect
+							<code>http://&lt;Pi-IP&gt;:8080/api/streaming/spotify/callback</code>, restart
+							<code>./scripts/run_pi.sh</code>, then use Connect Spotify.
+						</p>
 					{/if}
 					{#if streaming?.spotify?.note}
 						<p class="hint muted">{streaming.spotify.note}</p>
@@ -1360,13 +1429,18 @@
 				</div>
 				<div class="stream-card">
 					<strong>Apple Music</strong>
-					<span class="status-pill {streaming?.apple?.authenticated ? 'linked' : 'missing'}">
-						{streaming?.apple?.authenticated
+					<span class="status-pill {streaming?.apple?.configured ? 'linked' : 'missing'}">
+						{streaming?.apple?.configured
 							? streaming.apple.playback_mode === 'airplay_capture'
 								? 'search + AirPlay'
 								: 'search only'
 							: 'not configured'}
 					</span>
+					<p class="hint muted">
+						No Spotify-style user OAuth for hub PCM on Linux (DRM). MusicKit keys in
+						<code>~/musync.env</code> enable catalog search; full play needs AirPlay →
+						shairport → feeder — see docs/spotify-apple.md.
+					</p>
 					{#if streaming?.apple?.note}
 						<p class="hint muted">{streaming.apple.note}</p>
 					{/if}
@@ -1476,7 +1550,9 @@
 										>{sourceTypeLabel(t)}{t === 'local' ||
 										(t === 'input' && liveHosts.length) ||
 										(t === 'spotify' && streaming?.spotify?.authenticated) ||
-										(t === 'apple' && streaming?.apple?.authenticated)
+										(t === 'apple' &&
+											streaming?.apple?.configured &&
+											streaming?.apple?.playback_mode === 'airplay_capture')
 											? ''
 											: ' (stub)'}</option
 									>
@@ -1500,7 +1576,7 @@
 							</select>
 						</label>
 						<span class="status-pill {item.available ? 'linked' : 'missing'}">
-							{item.available ? 'ready' : 'stub'}
+							{availabilityLabel(item)}
 						</span>
 						<button
 							type="button"
@@ -1552,7 +1628,7 @@
 											{/if}
 										</span>
 										<span class="status-pill {s.available ? 'linked' : 'missing'}">
-											{s.available ? 'ready' : 'stub'}
+											{availabilityLabel(s)}
 										</span>
 									</button>
 								</li>
@@ -1570,8 +1646,12 @@
 		<section class="panel inputs-panel" aria-labelledby="inputs-heading">
 			<div class="panel-head">
 				<h2 id="inputs-heading">Phone / PC hosts</h2>
-				<p class="hint">Up to 4 · {liveHosts.length} live</p>
+				<p class="hint">Up to 4 · {liveHosts.length} live · BT A2DP / USB-A</p>
 			</div>
+			<p class="hint muted">
+				Pi 5 USB-C PD is power-only — PC audio needs a USB-A sound card/interface (not the PD port).
+				Phone: pair as A2DP <em>source</em>, then Refresh.
+			</p>
 			<div class="stub-actions">
 				<button
 					type="button"

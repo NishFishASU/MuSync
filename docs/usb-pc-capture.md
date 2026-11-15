@@ -1,7 +1,11 @@
 # USB / PC audio → musync_feeder
 
-Plug a USB sound card (or USB audio from a PC) into the Pi and route it into the
+Plug a **USB-A sound card / audio interface** into the Pi and route it into the
 same feeder fan-out as local files / BT A2DP input / Spotify.
+
+**Pi 5 USB-C PD is power-only.** Connecting a laptop to the Pi’s USB-C PD port
+does **not** carry audio. Use a USB-A (or hub) sound card / UAC interface — never
+claim PD audio works.
 
 ```
 PC / USB DAC ──► ALSA (hw:N) ──► PipeWire alsa_input.usb-… ──► module-loopback
@@ -27,7 +31,8 @@ Manual **Use** / **Re-bind** in the UI still works if you want a specific card.
 
 ## Pi bring-up
 
-1. Plug the USB audio interface into the Pi (USB2 port preferred on busy hubs).
+1. Plug the USB-A audio interface into the Pi (USB2 port preferred on busy hubs).
+   Do **not** use the USB-C PD power port for audio.
 2. Confirm ALSA sees it:
 
 ```bash

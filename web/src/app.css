@@ -460,9 +460,40 @@ body {
 	margin-top: 0.55rem;
 }
 
+.now-playing-block {
+	display: flex;
+	align-items: center;
+	gap: 0.85rem;
+	margin-bottom: 0.85rem;
+}
+
+.cover-art {
+	width: 72px;
+	height: 72px;
+	object-fit: cover;
+	border-radius: 10px;
+	border: 1px solid var(--line);
+	background: rgba(0, 0, 0, 0.35);
+	flex-shrink: 0;
+}
+
+.now-playing-text {
+	min-width: 0;
+}
+
 .now-playing {
 	color: var(--accent);
 	font-size: 0.92rem;
+}
+
+.now-playing-meta {
+	margin: 0.15rem 0 0;
+	font-size: 0.82rem;
+	color: var(--ink-muted);
+}
+
+.now-playing-meta.muted {
+	opacity: 0.85;
 }
 
 .transport-controls {

@@ -229,6 +229,9 @@ class SourceSession:
             note=note,
             duration_ms=src.duration_ms,
             media_kind=src.media_kind if src.type == SourceType.LOCAL else MediaKind.AUDIO,
+            artist=src.artist,
+            album=src.album,
+            cover_url=src.cover_url,
         )
 
     def _require_input(self, input_id: Optional[str]) -> None:
@@ -328,6 +331,9 @@ class SourceSession:
         self._transport.source_type = item.source_type
         self._transport.input_id = item.input_id
         self._transport.title = item.title
+        self._transport.artist = item.artist
+        self._transport.album = item.album
+        self._transport.cover_url = item.cover_url
         self._transport.duration_ms = item.duration_ms or 0
         self._transport.media_kind = (
             item.media_kind
@@ -384,6 +390,9 @@ class SourceSession:
         input_id = body.input_id
         duration_ms = body.duration_ms
         media_kind = body.media_kind
+        artist = body.artist
+        album = body.album
+        cover_url = body.cover_url
         type_explicit = "source_type" in body.model_fields_set
 
         if src is not None:
@@ -403,6 +412,12 @@ class SourceSession:
                 input_id = src.input_id
             if media_kind is None:
                 media_kind = src.media_kind
+            if artist is None:
+                artist = src.artist
+            if album is None:
+                album = src.album
+            if cover_url is None:
+                cover_url = src.cover_url
 
         # Live input / host-bound streaming must name a registered phone/PC.
         if source_type == SourceType.INPUT and not input_id:
@@ -487,6 +502,9 @@ class SourceSession:
                     )
                 )
             ),
+            artist=artist,
+            album=album,
+            cover_url=cover_url,
         )
 
     def _apply_patch(self, item: QueueItem, patch: QueueItemPatch) -> QueueItem:
@@ -510,6 +528,12 @@ class SourceSession:
                 data["duration_ms"] = src.duration_ms
             if "media_kind" not in updates:
                 data["media_kind"] = src.media_kind
+            if "artist" not in updates:
+                data["artist"] = src.artist
+            if "album" not in updates:
+                data["album"] = src.album
+            if "cover_url" not in updates:
+                data["cover_url"] = src.cover_url
 
         data.update(
             {
@@ -623,6 +647,9 @@ class SourceSession:
         title: str,
         duration_ms: Optional[int] = None,
         activate: bool = True,
+        artist: Optional[str] = None,
+        album: Optional[str] = None,
+        cover_url: Optional[str] = None,
     ) -> tuple[QueueItem, Transport]:
         """Queue a hub streaming URI (spotify:track:… / apple:song:…)."""
         with self._lock:
@@ -633,6 +660,9 @@ class SourceSession:
                     title=title,
                     duration_ms=duration_ms,
                     source_id=uri,
+                    artist=artist,
+                    album=album,
+                    cover_url=cover_url,
                 )
             )
             self._queue.append(item)
@@ -722,6 +752,9 @@ class SourceSession:
                     self._transport.source_type = None
                     self._transport.input_id = None
                     self._transport.title = None
+                    self._transport.artist = None
+                    self._transport.album = None
+                    self._transport.cover_url = None
                     self._transport.duration_ms = 0
                     self._transport.media_kind = None
             del item  # noqa: F841 — clarify we looked it up

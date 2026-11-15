@@ -71,7 +71,8 @@ scripts/build_web.sh  run_dev.sh  run_pi.sh  pair_bt600.sh
 Phone **input** (S21 FE → `bluez_input` → feeder): [docs/phone-bt-source-vs-spp-sink.md](docs/phone-bt-source-vs-spp-sink.md).  
 USB / PC capture (ALSA auto-detect → feeder): [docs/usb-pc-capture.md](docs/usb-pc-capture.md).  
 SPP phone **sink**: enable Phone SPP in Device setup, connect Simple Protocol Player to Pi IP:port — [docs/spp-network-sink.md](docs/spp-network-sink.md).  
-**Spotify** (librespot → `musync_feeder`) + **Apple Music** (best-effort): [docs/spotify-apple.md](docs/spotify-apple.md) · env template `config/streaming.env.example`.
+**Spotify** (OAuth Connect link in UI → librespot → `musync_feeder`) + **Apple Music** (best-effort search/AirPlay): [docs/spotify-apple.md](docs/spotify-apple.md) · env template `config/streaming.env.example` → `~/musync.env` (auto-loaded by `run_pi.sh`).  
+USB/PC capture needs a **USB-A sound card** — Pi 5 USB-C PD is power-only: [docs/usb-pc-capture.md](docs/usb-pc-capture.md).
 
 ## API (minimum)
 
@@ -80,7 +81,9 @@ SPP phone **sink**: enable Phone SPP in Device setup, connect Simple Protocol Pl
 | `GET` | `/api/health` | Backend, PipeWire up?, mapped sinks, graph dry-run |
 | `GET` | `/api/devices` | List sinks (Bluetooth + optional `network_spp`) |
 | `PATCH` | `/api/devices/{id}` | `{ delay_ms?, volume?, mute?, enabled?, listen_port?, … }` |
-| `GET`/`PUT` | `/api/transport` | `{ state, position_ms, source_id?, queue_item_id? }` |
+| `GET`/`PUT` | `/api/transport` | `{ state, position_ms, source_id?, queue_item_id?, title/artist/album/cover_url? }` |
+| `GET` | `/api/now-playing` | Unified now-playing (title, artist, album, cover) |
+| `GET` | `/api/now-playing/cover` | Embedded local cover bytes |
 | `GET` | `/api/sources` | Catalog: `local` + Spotify/Apple hub rows + input hosts |
 | `PUT` | `/api/sources/active` | `{ id }` — activate catalog entry (feeder swap only) |
 | `GET`/`POST` | `/api/queue` | Song queue; each item has `source_type` + optional `input_id` |

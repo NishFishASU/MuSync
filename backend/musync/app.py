@@ -25,6 +25,7 @@ from .models import (
     InputHost,
     InputHostCreate,
     InputHostPatch,
+    NowPlaying,
     QueueItem,
     QueueItemCreate,
     QueueItemPatch,
@@ -40,8 +41,13 @@ from .models import (
     WifiSaveRequest,
     WifiStatus,
 )
+from .nowplaying import resolve_cover_bytes
 from .streaming import get_streaming_service
+from .streaming.credentials import load_streaming_env_files
 from .wifi import WifiBackend, create_wifi_backend
+
+# Client ID/secret from ~/musync.env or config/streaming.local.env before backends boot.
+load_streaming_env_files()
 
 backend: AudioBackend = create_backend()
 wifi_backend: WifiBackend = create_wifi_backend()
@@ -114,6 +120,25 @@ def api_get_transport() -> Transport:
 @app.put("/api/transport", response_model=Transport)
 def api_put_transport(body: TransportPut) -> Transport:
     return backend.set_transport(body)
+
+
+@app.get("/api/now-playing", response_model=NowPlaying)
+def api_now_playing() -> NowPlaying:
+    """Unified title / artist / album / cover for the active cue."""
+    return backend.get_now_playing()
+
+
+@app.get("/api/now-playing/cover")
+def api_now_playing_cover(source: str | None = Query(default=None)) -> Response:
+    """Serve embedded cover art bytes for a local library file (or active cue)."""
+    session = getattr(backend, "_session", None)
+    if session is None:
+        raise HTTPException(status_code=404, detail="No cover available")
+    result = resolve_cover_bytes(session, source_id=source)
+    if result is None:
+        raise HTTPException(status_code=404, detail="No embedded cover art")
+    data, ctype = result
+    return Response(content=data, media_type=ctype, headers={"Cache-Control": "private, max-age=3600"})
 
 
 @app.get("/api/sources", response_model=list[Source])
@@ -224,9 +249,32 @@ def api_streaming_status() -> StreamingStatus:
 
 
 @app.get("/api/streaming/spotify/login")
-def api_spotify_login() -> RedirectResponse:
-    """Start Spotify OAuth — redirects to accounts.spotify.com."""
-    url = get_streaming_service().spotify.auth_url()
+def api_spotify_login(request: Request) -> RedirectResponse:
+    """Link-style OAuth: redirect browser to Spotify authorize → callback → tokens.
+
+    Not a password form. Client ID/secret come from env (``~/musync.env``).
+    When ``MUSYNC_SPOTIFY_REDIRECT_URI`` is unset, derive it from the request Host
+    so Pi LAN access (http://<Pi-IP>:8080/…) matches the Spotify dashboard URI.
+    """
+    import os
+    from urllib.parse import quote
+
+    if not get_streaming_service().spotify.configured():
+        return RedirectResponse(
+            "/?spotify=error&detail="
+            + quote(
+                "Spotify app credentials missing — set MUSYNC_SPOTIFY_CLIENT_ID and "
+                "MUSYNC_SPOTIFY_CLIENT_SECRET in ~/musync.env, restart MuSync, then Connect again"
+            )
+        )
+    configured = (os.environ.get("MUSYNC_SPOTIFY_REDIRECT_URI") or "").strip()
+    redirect_uri = configured or (
+        str(request.base_url).rstrip("/") + "/api/streaming/spotify/callback"
+    )
+    try:
+        url = get_streaming_service().spotify.auth_url(redirect_uri=redirect_uri)
+    except ValueError as exc:
+        return RedirectResponse("/?spotify=error&detail=" + quote(str(exc)))
     return RedirectResponse(url)
 
 
@@ -237,11 +285,18 @@ def api_spotify_callback(
     error: str | None = None,
 ) -> RedirectResponse:
     """OAuth redirect URI — stores tokens, then returns to the SPA."""
+    from urllib.parse import quote
+
     if error:
-        return RedirectResponse(f"/?spotify=error&detail={error}")
+        return RedirectResponse(f"/?spotify=error&detail={quote(error)}")
     if not code or not state:
-        raise ValueError("Missing OAuth code/state")
-    get_streaming_service().spotify.handle_callback(code=code, state=state)
+        return RedirectResponse(
+            "/?spotify=error&detail=" + quote("Missing OAuth code/state — try Connect again")
+        )
+    try:
+        get_streaming_service().spotify.handle_callback(code=code, state=state)
+    except ValueError as exc:
+        return RedirectResponse("/?spotify=error&detail=" + quote(str(exc)))
     # Refresh queue availability now that auth is live.
     try:
         backend.list_sources()
@@ -269,16 +324,30 @@ def api_streaming_search(
     q: str = Query(..., min_length=1),
     limit: int = Query(15, ge=1, le=25),
 ) -> StreamingSearchResponse:
-    return get_streaming_service().search(provider, q, limit=limit)
+    """Search Spotify/Apple. Returns a clear 400 when credentials are missing."""
+    p = (provider or "").strip().lower()
+    svc = get_streaming_service()
+    if p == "spotify" and not svc.spotify.configured():
+        raise ValueError(
+            "Spotify not configured — copy config/streaming.env.example to ~/musync.env, "
+            "set MUSYNC_SPOTIFY_CLIENT_ID + MUSYNC_SPOTIFY_CLIENT_SECRET, "
+            "then restart ./scripts/run_pi.sh (see docs/spotify-apple.md)"
+        )
+    if p in {"apple", "apple_music", "music"} and not svc.apple.configured():
+        raise ValueError(
+            "Apple Music not configured — set MUSYNC_APPLE_TEAM_ID, "
+            "MUSYNC_APPLE_KEY_ID, MUSYNC_APPLE_PRIVATE_KEY_PATH in ~/musync.env "
+            "(search only; hub PCM needs AirPlay — docs/spotify-apple.md)"
+        )
+    return svc.search(provider, q, limit=limit)
 
 
 @app.post("/api/streaming/queue", response_model=QueueItem, status_code=201)
 def api_streaming_queue_add(body: StreamingQueueAdd) -> QueueItem:
     """Add a searched track to the hub queue and optionally activate it."""
     source_type = SourceType.SPOTIFY if body.provider == "spotify" else SourceType.APPLE
+    # Keep title clean; artist/album/cover live on dedicated fields for now-playing.
     title = body.title or body.uri
-    if body.artist:
-        title = f"{body.title or 'Track'} — {body.artist}"
     item = backend.add_queue_item(
         QueueItemCreate(
             source_type=source_type,
@@ -286,6 +355,9 @@ def api_streaming_queue_add(body: StreamingQueueAdd) -> QueueItem:
             title=title,
             duration_ms=body.duration_ms,
             source_id=body.uri,
+            artist=body.artist,
+            album=body.album,
+            cover_url=body.cover_url,
         )
     )
     if body.activate:

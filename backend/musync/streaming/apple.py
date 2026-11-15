@@ -68,6 +68,7 @@ class AppleTrack:
     artist: str
     duration_ms: Optional[int] = None
     album: Optional[str] = None
+    cover_url: Optional[str] = None
 
 
 class AppleMusicClient:
@@ -184,6 +185,13 @@ class AppleMusicClient:
         for raw in songs:
             attrs = raw.get("attributes") or {}
             sid = str(raw.get("id") or "")
+            artwork = attrs.get("artwork") or {}
+            cover = None
+            url_tmpl = artwork.get("url")
+            if isinstance(url_tmpl, str) and "{w}" in url_tmpl:
+                cover = url_tmpl.replace("{w}", "300").replace("{h}", "300")
+            elif isinstance(url_tmpl, str) and url_tmpl.strip():
+                cover = url_tmpl
             out.append(
                 AppleTrack(
                     id=sid,
@@ -192,9 +200,58 @@ class AppleMusicClient:
                     artist=attrs.get("artistName") or "Unknown",
                     duration_ms=attrs.get("durationInMillis"),
                     album=attrs.get("albumName"),
+                    cover_url=cover,
                 )
             )
         return out
+
+    def track_metadata(self, uri: str) -> Optional[AppleTrack]:
+        """Fetch catalog song metadata (now-playing / cover)."""
+        sid = ""
+        raw_uri = (uri or "").strip()
+        if raw_uri.startswith("apple:song:") or raw_uri.startswith("apple:track:"):
+            sid = raw_uri.split(":")[-1]
+        elif raw_uri.isdigit():
+            sid = raw_uri
+        if not sid or not self.authenticated():
+            return None
+        store = _storefront()
+        headers = {"Authorization": f"Bearer {self.developer_token()}"}
+        if _user_token():
+            headers["Music-User-Token"] = _user_token()
+        try:
+            with httpx.Client(timeout=15.0) as client:
+                resp = client.get(
+                    f"{APPLE_CATALOG}/catalog/{store}/songs/{sid}",
+                    headers=headers,
+                )
+                if resp.status_code >= 400:
+                    return None
+                data = resp.json()
+        except Exception as exc:  # noqa: BLE001
+            log.debug("apple track metadata: %s", exc)
+            return None
+        rows = data.get("data") or []
+        if not rows:
+            return None
+        raw = rows[0]
+        attrs = raw.get("attributes") or {}
+        artwork = attrs.get("artwork") or {}
+        cover = None
+        url_tmpl = artwork.get("url")
+        if isinstance(url_tmpl, str) and "{w}" in url_tmpl:
+            cover = url_tmpl.replace("{w}", "300").replace("{h}", "300")
+        elif isinstance(url_tmpl, str) and url_tmpl.strip():
+            cover = url_tmpl
+        return AppleTrack(
+            id=str(raw.get("id") or sid),
+            uri=f"apple:song:{sid}",
+            title=attrs.get("name") or "Song",
+            artist=attrs.get("artistName") or "Unknown",
+            duration_ms=attrs.get("durationInMillis"),
+            album=attrs.get("albumName"),
+            cover_url=cover,
+        )
 
     def play_limits_message(self) -> str:
         if self.airplay_source():
