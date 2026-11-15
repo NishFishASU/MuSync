@@ -30,7 +30,8 @@ Secrets stay in environment variables / local files. Never commit client secrets
 **Connect Spotify always uses loopback** (`?loopback=1`) so opening the UI via
 `http://musync.local:8080` still authorizes with `127.0.0.1` — matching the laptop mock
 and the Dashboard URI. After Spotify redirects to the Pi’s `127.0.0.1` callback, finish
-OAuth in a browser **on the Pi** (local display / VNC) or via `ssh -L 8080:127.0.0.1:8080`.
+OAuth in a browser **on the Pi** (local display / VNC) or via an SSH tunnel from your
+laptop (Streaming tab → **Connect from laptop**, or the commands below).
 
 ### 1. Spotify Developer app
 
@@ -100,14 +101,32 @@ export MUSYNC_BACKEND=pipewire
    **librespot** (on PATH / running), and scopes.
 4. **Connect Spotify** — authorize URL uses **loopback** `127.0.0.1` (not musync.local).
    Complete the Spotify redirect in a browser that can open `http://127.0.0.1:8080`
-   on the Pi (local UI, VNC, or `ssh -L 8080:127.0.0.1:8080 pi@<Pi-IP>` then Connect
-   from your laptop at `http://127.0.0.1:8080`).
+   on the Pi (local UI, VNC, or SSH tunnel from a laptop — see below).
 5. **Queue** → search a track → **Queue & play**
 6. Confirm **librespot** status turns running on Play; audio on Qudelix / SPP
 
 If the UI says **not configured**, credentials are missing — use the Streaming
 form or edit `~/musync.env`, then **Connect Spotify** again. Empty keys soft-fail
 (local / AirPlay / YouTube-without-key still work).
+
+### Connect from laptop (SSH tunnel)
+
+Spotify’s callback is always `http://127.0.0.1:<port>/…`. When you browse the hub at
+`musync.local` / Pi IP, tunnel that port to your laptop:
+
+1. Streaming → **Connect from laptop (SSH tunnel)** → **Copy** (or download `.sh` / `.ps1`).
+2. On the laptop (keep the window open):
+
+   ```bash
+   ssh -N -L 8080:127.0.0.1:8080 pi@<Pi-IP>
+   # or: ./scripts/spotify_oauth_tunnel.sh <Pi-IP>
+   ```
+
+3. Open `http://127.0.0.1:8080/streaming/` on the **same laptop** → **Connect Spotify**.
+4. After Connect succeeds you can close the tunnel; search/play use the Pi over LAN.
+
+Override SSH user with `MUSYNC_SSH_USER` (default `pi`). API:
+`GET /api/streaming/spotify/ssh-tunnel` (+ `.sh` / `.ps1` downloads).
 
 ### Pi test checklist
 
@@ -186,6 +205,9 @@ export MUSYNC_STREAMING_MOCK=1
 | `GET`/`PUT` | `/api/streaming/credentials` | Masked keys → `~/musync.env` (secrets never raw) |
 | `GET` | `/api/streaming/spotify/login` | Start OAuth redirect |
 | `GET` | `/api/streaming/spotify/authorize-url` | JSON preflight (url or error) |
+| `GET` | `/api/streaming/spotify/ssh-tunnel` | Copyable `ssh -L` + steps (optional `?host=`) |
+| `GET` | `/api/streaming/spotify/ssh-tunnel.sh` | Downloadable bash tunnel script |
+| `GET` | `/api/streaming/spotify/ssh-tunnel.ps1` | Downloadable PowerShell tunnel script |
 | `GET` | `/api/streaming/spotify/callback` | OAuth return |
 | `POST` | `/api/streaming/spotify/logout` | Clear tokens |
 | `GET` | `/api/streaming/search?provider=spotify&q=` | Track search |

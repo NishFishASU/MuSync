@@ -869,6 +869,52 @@ body {
 	color: var(--teal);
 }
 
+.ssh-tunnel-panel {
+	margin: 0.85rem 0 1rem;
+	padding: 0.65rem 0.85rem 0.85rem;
+	border-radius: 12px;
+	border: 1px solid var(--line);
+	background: rgba(255, 255, 255, 0.03);
+}
+
+.ssh-tunnel-panel summary {
+	margin-bottom: 0.35rem;
+}
+
+.ssh-tunnel-steps {
+	margin: 0.35rem 0 0.65rem;
+	padding-left: 1.15rem;
+	display: flex;
+	flex-direction: column;
+	gap: 0.25rem;
+	font-size: 0.85rem;
+	color: var(--ink-muted);
+}
+
+.ssh-tunnel-cmd-row {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 0.45rem;
+	align-items: center;
+	margin-bottom: 0.45rem;
+}
+
+.ssh-tunnel-cmd {
+	flex: 1 1 220px;
+	display: block;
+	padding: 0.5rem 0.65rem;
+	border-radius: 8px;
+	border: 1px solid var(--line);
+	background: rgba(0, 0, 0, 0.28);
+	font-size: 0.78rem;
+	word-break: break-all;
+	color: var(--ink);
+}
+
+.ssh-tunnel-links a {
+	color: var(--teal);
+}
+
 .stream-status {
 	display: grid;
 	grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));

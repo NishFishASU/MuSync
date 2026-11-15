@@ -556,11 +556,27 @@ class AirplayStatus(BaseModel):
     note: str = ""
 
 
+class SpotifySshTunnelInfo(BaseModel):
+    """Laptop → Pi ``ssh -L`` helper for Spotify loopback Connect."""
+
+    port: int = 8080
+    host: str = ""
+    user: str = "pi"
+    ready: bool = False
+    command: str = ""
+    open_url: str = ""
+    script_sh: str = "/api/streaming/spotify/ssh-tunnel.sh"
+    script_ps1: str = "/api/streaming/spotify/ssh-tunnel.ps1"
+    steps: list[str] = Field(default_factory=list)
+    hint: str = ""
+
+
 class StreamingStatus(BaseModel):
     spotify: StreamingProviderStatus
     airplay: AirplayStatus
     youtube: StreamingProviderStatus
     mock_playback: bool = False
+    ssh_tunnel: Optional[SpotifySshTunnelInfo] = None
 
 
 class StreamingSearchHit(BaseModel):

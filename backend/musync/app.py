@@ -19,6 +19,11 @@ from .config import media_library_path, resolve_media_file, web_root
 from .lan_url import enrich_wifi_status, lan_ui_url, svg_qr
 from .mdns import get_mdns_status, start_hub_mdns, stop_hub_mdns
 from .streaming.spotify import default_redirect_uri
+from .streaming.ssh_tunnel import (
+    bash_tunnel_script,
+    build_ssh_tunnel_info,
+    powershell_tunnel_script,
+)
 from .models import (
     ActiveQueuePut,
     ActiveSourcePut,
@@ -43,6 +48,7 @@ from .models import (
     QueueItemPatch,
     Source,
     SourceType,
+    SpotifySshTunnelInfo,
     StreamingCredentialsPut,
     StreamingCredentialsStatus,
     StreamingQueueAdd,
@@ -457,6 +463,21 @@ def api_delete_input(host_id: str) -> Response:
     return Response(status_code=204)
 
 
+def _wifi_ips_for_tunnel() -> list[str]:
+    """Best-effort LAN IPs for the SSH tunnel helper (soft-empty on failure)."""
+    try:
+        return list(wifi_backend.status().ips or [])
+    except Exception:  # noqa: BLE001
+        return []
+
+
+def _ssh_tunnel_info(host: str | None = None) -> SpotifySshTunnelInfo:
+    """Build tunnel command / script links from Wi‑Fi LAN IP + MUSYNC_SSH_USER."""
+    return SpotifySshTunnelInfo.model_validate(
+        build_ssh_tunnel_info(_wifi_ips_for_tunnel(), host=host)
+    )
+
+
 def _streaming_status_with_airplay() -> StreamingStatus:
     """Spotify + AirPlay status; enrich AirPlay from live input hosts when possible."""
     from .audio.input_registry import host_is_live
@@ -479,11 +500,13 @@ def _streaming_status_with_airplay() -> StreamingStatus:
                 host_name = host.name
     except Exception:  # noqa: BLE001
         pass
-    return get_streaming_service().status(
+    status = get_streaming_service().status(
         airplay_discovered=discovered,
         airplay_live=live,
         airplay_host_name=host_name,
     )
+    status.ssh_tunnel = _ssh_tunnel_info()
+    return status
 
 
 @app.get("/api/streaming", response_model=StreamingStatus)
@@ -675,6 +698,57 @@ def api_spotify_logout() -> StreamingStatus:
         except Exception:  # noqa: BLE001
             pass
     return _streaming_status_with_airplay()
+
+
+@app.get("/api/streaming/spotify/ssh-tunnel", response_model=SpotifySshTunnelInfo)
+def api_spotify_ssh_tunnel(
+    host: str | None = Query(
+        None,
+        description="Override Pi host/IP (default: first LAN IPv4 from Wi‑Fi)",
+    ),
+) -> SpotifySshTunnelInfo:
+    """JSON helper: copyable ``ssh -L`` command + short Connect-from-laptop steps."""
+    return _ssh_tunnel_info(host=host)
+
+
+@app.get("/api/streaming/spotify/ssh-tunnel.sh")
+def api_spotify_ssh_tunnel_sh(
+    host: str | None = Query(
+        None,
+        description="Override Pi host/IP baked into the script",
+    ),
+) -> Response:
+    """Downloadable bash script that opens the Spotify OAuth loopback tunnel."""
+    info = _ssh_tunnel_info(host=host)
+    body = bash_tunnel_script(host=info.host or "", port=info.port, user=info.user)
+    return Response(
+        content=body,
+        media_type="text/x-shellscript",
+        headers={
+            "Content-Disposition": 'attachment; filename="musync-spotify-ssh-tunnel.sh"',
+            "Cache-Control": "no-store",
+        },
+    )
+
+
+@app.get("/api/streaming/spotify/ssh-tunnel.ps1")
+def api_spotify_ssh_tunnel_ps1(
+    host: str | None = Query(
+        None,
+        description="Override Pi host/IP baked into the script",
+    ),
+) -> Response:
+    """Downloadable PowerShell script (Windows OpenSSH) for the same tunnel."""
+    info = _ssh_tunnel_info(host=host)
+    body = powershell_tunnel_script(host=info.host or "", port=info.port, user=info.user)
+    return Response(
+        content=body,
+        media_type="text/plain",
+        headers={
+            "Content-Disposition": 'attachment; filename="musync-spotify-ssh-tunnel.ps1"',
+            "Cache-Control": "no-store",
+        },
+    )
 
 
 @app.get("/api/streaming/search", response_model=StreamingSearchResponse)
