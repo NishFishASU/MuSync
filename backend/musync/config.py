@@ -478,6 +478,107 @@ def probe_audio_duration_ms(path: Path | str) -> Optional[int]:
     return _probe_ffprobe_duration_ms(p)
 
 
+def cover_cache_dir() -> Path:
+    """Writable cache for extracted embedded album art (gitignored via config/)."""
+    d = repo_root() / "config" / "cover-cache"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def probe_media_tags(path: Path | str) -> dict[str, Optional[str]]:
+    """Best-effort title / artist / album via ffprobe tags (empty when unavailable)."""
+    out: dict[str, Optional[str]] = {"title": None, "artist": None, "album": None}
+    p = Path(path)
+    if not p.is_file():
+        return out
+    ffprobe = shutil.which("ffprobe")
+    if not ffprobe:
+        return out
+    try:
+        proc = subprocess.run(
+            [
+                ffprobe,
+                "-v",
+                "quiet",
+                "-print_format",
+                "json",
+                "-show_entries",
+                "format_tags=title,artist,album,TITLE,ARTIST,ALBUM",
+                str(p),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=5.0,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        log.debug("ffprobe tags failed for %s: %s", p, exc)
+        return out
+    if proc.returncode != 0 or not (proc.stdout or "").strip():
+        return out
+    try:
+        import json
+
+        data = json.loads(proc.stdout)
+    except (json.JSONDecodeError, TypeError):
+        return out
+    tags = (data.get("format") or {}).get("tags") or {}
+    # ffprobe may use any casing.
+    lowered = {str(k).lower(): str(v) for k, v in tags.items() if v}
+    for key in ("title", "artist", "album"):
+        val = lowered.get(key)
+        if val and val.strip():
+            out[key] = val.strip()
+    return out
+
+
+def extract_embedded_cover(path: Path | str) -> Optional[Path]:
+    """Extract embedded cover art to cover-cache; return path or None."""
+    p = Path(path)
+    if not p.is_file():
+        return None
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg:
+        return None
+    # Stable cache key from absolute path + mtime.
+    import hashlib
+
+    key = hashlib.sha1(f"{p.resolve()}:{p.stat().st_mtime_ns}".encode()).hexdigest()[:20]
+    dest = cover_cache_dir() / f"{key}.jpg"
+    if dest.is_file() and dest.stat().st_size > 0:
+        return dest
+    try:
+        proc = subprocess.run(
+            [
+                ffmpeg,
+                "-y",
+                "-i",
+                str(p),
+                "-an",
+                "-vcodec",
+                "mjpeg",
+                "-frames:v",
+                "1",
+                str(dest),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=8.0,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        log.debug("cover extract failed for %s: %s", p, exc)
+        return None
+    if proc.returncode != 0 or not dest.is_file() or dest.stat().st_size == 0:
+        if dest.exists():
+            try:
+                dest.unlink()
+            except OSError:
+                pass
+        return None
+    return dest
+
+
 def media_kind_for_path(path: Path | str) -> MediaKind:
     suffix = Path(path).suffix.lower()
     if suffix in VIDEO_EXTENSIONS:
@@ -522,6 +623,9 @@ def discover_local_sources(media_dir: Path | None = None) -> list[Source]:
         resolved = str(path.resolve())
         kind = media_kind_for_path(path)
         duration_ms = probe_audio_duration_ms(path)
+        tags = probe_media_tags(path)
+        cover = extract_embedded_cover(path)
+        stem_title = path.stem.replace("_", " ").replace("-", " ")
         note = (
             "Local video — audio → musync_feeder; optional muted preview in UI"
             if kind == MediaKind.VIDEO
@@ -530,13 +634,16 @@ def discover_local_sources(media_dir: Path | None = None) -> list[Source]:
         sources.append(
             Source(
                 id=source_id,
-                title=path.stem.replace("_", " ").replace("-", " "),
+                title=tags.get("title") or stem_title,
                 type=SourceType.LOCAL,
                 path=resolved,
                 locator=resolved,
                 available=True,
                 duration_ms=duration_ms,
                 media_kind=kind,
+                artist=tags.get("artist"),
+                album=tags.get("album"),
+                cover_url=f"/api/now-playing/cover?source={source_id}" if cover else None,
                 note=note,
             )
         )

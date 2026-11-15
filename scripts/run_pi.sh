@@ -29,6 +29,16 @@ else
   PY="${PYTHON:-python3}"
 fi
 
+# Streaming credentials (Spotify/Apple) — load before API starts.
+# OAuth itself is link-style Connect in the UI (no password form).
+for envfile in "$HOME/musync.env" "$ROOT/config/streaming.local.env"; do
+  if [[ -f "$envfile" ]]; then
+    # shellcheck disable=SC1090
+    set -a && source "$envfile" && set +a
+    echo "  env:      loaded $envfile"
+  fi
+done
+
 echo "MuSync Pi launcher"
 echo "  backend:  $MUSYNC_BACKEND"
 echo "  python:   $PY"
@@ -37,6 +47,16 @@ echo "  devices:  $MUSYNC_DEVICES_CONFIG"
 echo "  media:    $MUSYNC_MEDIA_DIR"
 echo "  web:      $MUSYNC_WEB_DIR"
 echo "  feeder:   $MUSYNC_PW_FEEDER"
+if [[ -n "${MUSYNC_SPOTIFY_CLIENT_ID:-}" && -n "${MUSYNC_SPOTIFY_CLIENT_SECRET:-}" ]]; then
+  echo "  spotify:  credentials present → use Connect Spotify in UI (OAuth redirect)"
+else
+  echo "  spotify:  NOT CONFIGURED — copy config/streaming.env.example → ~/musync.env"
+fi
+if command -v librespot >/dev/null 2>&1; then
+  echo "  librespot: READY ($(command -v librespot))"
+else
+  echo "  librespot: MISSING (Spotify search/OAuth work; hub PCM needs librespot)"
+fi
 
 if ! "$PY" -c "import uvicorn" 2>/dev/null; then
   echo >&2

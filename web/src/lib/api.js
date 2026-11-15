@@ -130,6 +130,9 @@
  * @property {string | null} [note]
  * @property {number | null} [duration_ms]
  * @property {MediaKind} [media_kind]
+ * @property {string | null} [artist]
+ * @property {string | null} [album]
+ * @property {string | null} [cover_url]
  */
 
 /**
@@ -142,7 +145,27 @@
  * @property {SourceType | null} [source_type]
  * @property {string | null} [input_id]
  * @property {string | null} [title]
+ * @property {string | null} [artist]
+ * @property {string | null} [album]
+ * @property {string | null} [cover_url]
  * @property {MediaKind | null} [media_kind]
+ */
+
+/**
+ * @typedef {Object} NowPlaying
+ * @property {string | null} [title]
+ * @property {string | null} [artist]
+ * @property {string | null} [album]
+ * @property {string | null} [cover_url]
+ * @property {boolean} [has_cover]
+ * @property {SourceType | null} [source_type]
+ * @property {string | null} [input_id]
+ * @property {string | null} [queue_item_id]
+ * @property {string | null} [locator]
+ * @property {TransportState} [state]
+ * @property {number} [position_ms]
+ * @property {number} [duration_ms]
+ * @property {string | null} [note]
  */
 
 /**
@@ -193,6 +216,7 @@
  * @property {string} artist
  * @property {number | null} [duration_ms]
  * @property {string | null} [album]
+ * @property {string | null} [cover_url]
  */
 
 /**
@@ -436,6 +460,9 @@ export function getStreamingStatus() {
 	return api('/api/streaming');
 }
 
+/** Spotify OAuth start — same-origin link redirect (not a password form). */
+export const SPOTIFY_LOGIN_HREF = '/api/streaming/spotify/login';
+
 /** @returns {Promise<StreamingStatus>} */
 export function logoutSpotify() {
 	return api('/api/streaming/spotify/logout', { method: 'POST', body: '{}' });
@@ -457,7 +484,7 @@ export function searchStreaming(provider, q, limit = 15) {
 }
 
 /**
- * @param {{ provider: 'spotify' | 'apple', uri: string, title?: string, artist?: string, duration_ms?: number, activate?: boolean }} body
+ * @param {{ provider: 'spotify' | 'apple', uri: string, title?: string, artist?: string, album?: string, cover_url?: string, duration_ms?: number, activate?: boolean }} body
  * @returns {Promise<QueueItem>}
  */
 export function addStreamingTrack(body) {
@@ -465,6 +492,11 @@ export function addStreamingTrack(body) {
 		method: 'POST',
 		body: JSON.stringify(body)
 	});
+}
+
+/** @returns {Promise<NowPlaying>} */
+export function getNowPlaying() {
+	return api('/api/now-playing');
 }
 
 /** @returns {Promise<WifiStatus>} */

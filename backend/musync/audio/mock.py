@@ -98,7 +98,7 @@ def _mock_live_hosts() -> list[InputHost]:
         ),
         InputHost(
             id="input-2",
-            name="USB Audio CODEC",
+            name="Laptop (USB)",
             kind=HostKind.PC,
             capture_path=CapturePath.USB,
             armed=True,
@@ -292,10 +292,11 @@ class MockAudioBackend(AudioBackend):
                     for h in self._inputs.list_hosts()
                 )
                 if waiting and not already:
+                    keep_laptop = "laptop" in waiting.name.lower()
                     self._inputs.patch_host(
                         waiting.id,
                         InputHostPatch(
-                            name=usb_fix.name,
+                            name=waiting.name if keep_laptop else usb_fix.name,
                             kind=HostKind.PC,
                             capture_path=CapturePath.USB,
                             connected=True,
@@ -327,6 +328,11 @@ class MockAudioBackend(AudioBackend):
                     f"{auto_note}"
                 ),
             )
+
+    def get_now_playing(self):
+        from ..nowplaying import build_now_playing
+
+        return build_now_playing(self._session)
 
     def health(self) -> Health:
         with self._lock:

@@ -14,6 +14,7 @@ from ..models import (
     InputHost,
     InputHostCreate,
     InputHostPatch,
+    NowPlaying,
     QueueItem,
     QueueItemCreate,
     QueueItemPatch,
@@ -123,6 +124,10 @@ class AudioBackend(ABC):
                 note=f"Upload → feeder · {file_path}",
             ),
         )
+
+    def get_now_playing(self) -> NowPlaying:
+        """Unified title/artist/album/cover for the active cue (override in backends)."""
+        raise NotImplementedError
 
     @abstractmethod
     def health(self) -> Health:

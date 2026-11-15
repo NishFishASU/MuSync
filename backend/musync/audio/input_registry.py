@@ -20,13 +20,15 @@ from ..models import (
 
 CAPTURE_NOTES: dict[CapturePath, str] = {
     CapturePath.BT_A2DP: "BT A2DP source → PipeWire bluez_input → musync_feeder",
-    CapturePath.USB: "USB ALSA/PipeWire source → musync_feeder",
+    CapturePath.USB: "USB-A sound card / interface → ALSA → musync_feeder "
+    "(Pi 5 USB-C PD is power-only — not audio)",
     CapturePath.NETWORK: "Network / uploaded file → musync_feeder",
 }
 
 STUB_CAPTURE_NOTES: dict[CapturePath, str] = {
     CapturePath.BT_A2DP: "Waiting for bluez_input — pair phone as A2DP source to Pi",
-    CapturePath.USB: "Waiting for USB sound card (auto-detect on Refresh inputs)",
+    CapturePath.USB: "Waiting for USB-A sound card (not USB-C PD). "
+    "Plug an interface, then Refresh inputs",
     CapturePath.NETWORK: "Upload a file or set endpoint to play into the feeder",
 }
 
@@ -176,42 +178,8 @@ class InputRegistry:
             out: list[Source] = []
             for host in self._hosts.values():
                 path_note = host_live_note(host)
-                if host.offers_local:
-                    out.append(
-                        Source(
-                            id=f"host:{host.id}:local",
-                            title=f"{host.name} · local files",
-                            type=SourceType.LOCAL,
-                            locator=f"host:{host.id}:local",
-                            available=False,
-                            input_id=host.id,
-                            note=f"Stub — upload/share from {host.kind.value}; {path_note}",
-                        )
-                    )
-                if host.offers_spotify:
-                    out.append(
-                        Source(
-                            id=f"host:{host.id}:spotify",
-                            title=f"{host.name} · Spotify",
-                            type=SourceType.SPOTIFY,
-                            locator=f"spotify:host:{host.id}",
-                            available=False,
-                            input_id=host.id,
-                            note=f"Stub — that device's Spotify session; {path_note}",
-                        )
-                    )
-                if host.offers_apple:
-                    out.append(
-                        Source(
-                            id=f"host:{host.id}:apple",
-                            title=f"{host.name} · Apple Music",
-                            type=SourceType.APPLE,
-                            locator=f"apple:host:{host.id}",
-                            available=False,
-                            input_id=host.id,
-                            note=f"Stub — that device's Apple Music session; {path_note}",
-                        )
-                    )
+                # Live capture is the real hub path for phone/PC. Per-device
+                # Spotify/Apple/local session rows stay unavailable (not hub PCM).
                 if host.offers_live_input:
                     live = host_is_live(host)
                     out.append(
@@ -223,6 +191,53 @@ class InputRegistry:
                             available=live,
                             input_id=host.id,
                             note=None if live else path_note,
+                            artist=host.name if live else None,
+                            album=CAPTURE_NOTES[host.capture_path] if live else None,
+                        )
+                    )
+                if host.offers_local:
+                    out.append(
+                        Source(
+                            id=f"host:{host.id}:local",
+                            title=f"{host.name} · local files",
+                            type=SourceType.LOCAL,
+                            locator=f"host:{host.id}:local",
+                            available=False,
+                            input_id=host.id,
+                            note=(
+                                f"On-device files only (not hub) — use live input "
+                                f"or hub media/; {path_note}"
+                            ),
+                        )
+                    )
+                if host.offers_spotify:
+                    out.append(
+                        Source(
+                            id=f"host:{host.id}:spotify",
+                            title=f"{host.name} · Spotify",
+                            type=SourceType.SPOTIFY,
+                            locator=f"spotify:host:{host.id}",
+                            available=False,
+                            input_id=host.id,
+                            note=(
+                                "On-device Spotify session (not hub) — use Streaming "
+                                f"panel + librespot, or live A2DP/USB; {path_note}"
+                            ),
+                        )
+                    )
+                if host.offers_apple:
+                    out.append(
+                        Source(
+                            id=f"host:{host.id}:apple",
+                            title=f"{host.name} · Apple Music",
+                            type=SourceType.APPLE,
+                            locator=f"apple:host:{host.id}",
+                            available=False,
+                            input_id=host.id,
+                            note=(
+                                "On-device Apple session (not hub PCM) — AirPlay/"
+                                f"MusicKit limited; use live input or Spotify; {path_note}"
+                            ),
                         )
                     )
             return out

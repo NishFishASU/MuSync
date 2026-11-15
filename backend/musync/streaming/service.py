@@ -83,6 +83,7 @@ class StreamingService:
                     artist=t.artist,
                     duration_ms=t.duration_ms,
                     album=t.album,
+                    cover_url=t.cover_url,
                 )
                 for t in tracks
             ]
@@ -98,6 +99,7 @@ class StreamingService:
                     artist=t.artist,
                     duration_ms=t.duration_ms,
                     album=t.album,
+                    cover_url=t.cover_url,
                 )
                 for t in tracks
             ]

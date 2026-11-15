@@ -20,6 +20,9 @@ config/profiles.yaml
 config/pipewire-graph.plan.sh
 config/spotify_tokens.json
 config/librespot-cache/
+config/cover-cache/
+config/streaming.local.env
+config/apple-keys/
 *.p8
 media/library/
 !media/samples/.gitkeep
