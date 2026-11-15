@@ -7,12 +7,13 @@ Verified phone path (user-tested)::
 
 SPP app: host = Pi LAN/Tailscale IP, port 1234, 48000 Hz mono s16le.
 
-MuSync matches that argv shape. Do **not** insert ``-af adelay/volume`` on the
-TCP listen path — delay before first PCM makes Simple Protocol Player report
-"unable to stream". Pulse ``feeder.monitor`` is also a poor idle source: it
-often produces no frames until something plays into the feeder, so the phone
-handshake starves. Prefer ``-re -i <file>`` while playing, and ``anullsrc``
-silence while idle so the port stays fed with PCM.
+Per-sink delay/volume belong on this output only (not a global transport
+control). On ``file`` / ``lavfi`` (anullsrc) inputs we attach ``-af``
+adelay+volume: those sources emit PCM immediately, so the phone handshake
+still gets frames (adelay inserts silence samples; it does not starve the
+socket). Prefer ``-re -i <file>`` while playing and ``anullsrc`` while idle —
+never rely on pulse ``feeder.monitor`` for the handshake (it often emits no
+frames until something plays into the feeder).
 """
 
 from __future__ import annotations
@@ -75,7 +76,7 @@ def spp_anullsrc(device: Device) -> str:
 
 
 def spp_audio_filter(device: Device) -> str:
-    """Optional adelay+volume chain — **not** used on the proven SPP listen path."""
+    """Per-sink adelay + volume chain for this SPP output only."""
     parts: list[str] = []
     delay = max(0, int(device.delay_ms))
     if delay:
@@ -88,28 +89,42 @@ def spp_audio_filter(device: Device) -> str:
     return ",".join(parts)
 
 
+def spp_controls_key(device: Device) -> str:
+    """Stable token so listener restarts when per-sink delay/volume/mute change."""
+    vol = 0.0 if device.mute else float(device.volume)
+    return f"d{int(device.delay_ms)}:v{vol:.3f}:m{int(bool(device.mute))}"
+
+
 def build_spp_ffmpeg(
     device: Device,
     *,
     input_kind: SppInputKind,
     input_spec: str,
     ffmpeg_bin: str = "ffmpeg",
+    apply_controls: bool | None = None,
 ) -> list[str]:
-    """Build SPP argv matching the proven manual listen shape (no ``-af``).
+    """Build SPP argv: proven listen shape + optional per-sink ``-af``.
 
-    Manual::
+    Manual baseline::
 
         ffmpeg -re -i <file> -f s16le -acodec pcm_s16le -ar 48000 -ac 1 \\
           tcp://0.0.0.0:1234?listen=1
+
+    Per-sink delay/volume use ``-af adelay,volume`` on ``file`` / ``lavfi``
+    (continuous PCM). Pulse fallback stays filter-free — monitor starvation
+    already breaks the handshake; filters would not help.
     """
     if device.kind != DeviceKind.NETWORK_SPP:
         raise ValueError(f"{device.id} is not a network_spp sink")
     if not input_spec.strip():
         raise ValueError("SPP ffmpeg input_spec must be non-empty")
 
+    if apply_controls is None:
+        apply_controls = input_kind in {"file", "lavfi"}
+
     cmd: list[str] = [ffmpeg_bin, "-hide_banner", "-loglevel", "warning"]
     if input_kind == "file":
-        # Exact proven shape: realtime file read → raw PCM TCP listen.
+        # Proven shape: realtime file read → raw PCM TCP listen (+ optional -af).
         cmd += ["-re", "-i", input_spec]
     elif input_kind == "lavfi":
         # Idle keep-alive: continuous silence so the phone can connect before Play.
@@ -119,6 +134,11 @@ def build_spp_ffmpeg(
         cmd += ["-f", "pulse", "-i", input_spec]
     else:
         raise ValueError(f"Unknown SPP input_kind: {input_kind!r}")
+
+    if apply_controls:
+        af = spp_audio_filter(device)
+        if af:
+            cmd += ["-af", af]
 
     cmd += [
         "-f",
@@ -140,7 +160,7 @@ def build_spp_ffmpeg_from_file(
     path: str,
     ffmpeg_bin: str = "ffmpeg",
 ) -> list[str]:
-    """Verified shape: ``ffmpeg -re -i <file> … tcp://…?listen=1``."""
+    """File → TCP listen with per-sink delay/volume ``-af`` when needed."""
     return build_spp_ffmpeg(
         device, input_kind="file", input_spec=path, ffmpeg_bin=ffmpeg_bin
     )
@@ -158,6 +178,7 @@ def build_spp_ffmpeg_from_pulse(
         input_kind="pulse",
         input_spec=f"{feeder}.monitor",
         ffmpeg_bin=ffmpeg_bin,
+        apply_controls=False,
     )
 
 
@@ -166,7 +187,7 @@ def build_spp_ffmpeg_idle(
     *,
     ffmpeg_bin: str = "ffmpeg",
 ) -> list[str]:
-    """Silent PCM listen so SPP can connect before Play."""
+    """Silent PCM listen so SPP can connect before Play (honors delay/volume)."""
     return build_spp_ffmpeg(
         device,
         input_kind="lavfi",
@@ -178,10 +199,13 @@ def build_spp_ffmpeg_idle(
 def spp_plan_notes(device: Device, *, feeder: str) -> list[str]:
     idle = " ".join(build_spp_ffmpeg_idle(device))
     pulse = " ".join(build_spp_ffmpeg_from_pulse(device, feeder=feeder))
+    af = spp_audio_filter(device)
     return [
         f"{device.id}: SPP TCP listen {spp_tcp_url(device)} "
-        f"({device.sample_rate} Hz / {device.channels} ch s16le) — no -af",
+        f"({device.sample_rate} Hz / {device.channels} ch s16le) "
+        f"— per-sink -af {af}",
         f"{device.id}: idle → {idle}",
-        f"{device.id}: play(local file) → ffmpeg -re -i <path> … {spp_tcp_url(device)}",
+        f"{device.id}: play(local file) → ffmpeg -re -i <path> -af {af} … "
+        f"{spp_tcp_url(device)}",
         f"{device.id}: pulse fallback → {pulse}",
     ]

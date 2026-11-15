@@ -26,28 +26,30 @@ In SPP on the phone:
 | Manual (works) | Old MuSync (broken) |
 |----------------|---------------------|
 | `-re -i <file>` always emits PCM | `-f pulse -i musync_feeder.monitor` often emits **no frames** until Play feeds the null sink |
-| No `-af` | `-af volume=…` / `adelay=…` delayed first PCM → SPP handshake timeout |
+| Continuous PCM from t=0 | Pulse starvation (not `-af` itself) left the phone with no stream |
 | stderr free | `stderr=PIPE` unread could block ffmpeg |
 
 ## MuSync listen shape (fixed)
 
-Idle (SPP enabled, not playing) — continuous silence so the phone can connect:
+Idle (SPP enabled, not playing) — continuous silence so the phone can connect. Per-sink delay/volume use `-af` on this output only:
 
 ```text
 ffmpeg -f lavfi -i anullsrc=channel_layout=mono:sample_rate=48000 \
+  -af adelay=80:all=1,volume=0.7500 \
   -f s16le -acodec pcm_s16le -ar 48000 -ac 1 \
   tcp://0.0.0.0:1234?listen=1
 ```
 
-Playing a hub-local file — **same argv as the proven manual command**:
+Playing a hub-local file — proven listen shape + the same per-sink `-af`:
 
 ```text
 ffmpeg -re -i /path/to/track.wav \
+  -af adelay=80:all=1,volume=0.7500 \
   -f s16le -acodec pcm_s16le -ar 48000 -ac 1 \
   tcp://0.0.0.0:1234?listen=1
 ```
 
-No `-af`. BT sinks still use the PipeWire feeder via mpv; SPP mirrors the local file like the manual demo.
+`PATCH /api/devices/{id}` `{ delay_ms, volume, mute }` restarts **this** SPP listener only. BT sinks keep using PipeWire `module-loopback latency_msec` + `wpctl` on their own node — never a global gain.
 
 ## Pi + Qudelix + SPP phone
 
@@ -70,7 +72,7 @@ See also [demo-checklist.md](demo-checklist.md).
 ss -ltnp | grep 1234
 # expect: LISTEN ...:1234 ... users:(("ffmpeg",pid=…,fd=…))
 
-# 2) Exact argv — should look like manual (file) or anullsrc (idle); NO -af, NO pulse.monitor
+# 2) Exact argv — file or anullsrc (idle); may include -af adelay/volume; NO pulse.monitor
 ps -o args= -C ffmpeg | tr ' ' '\n' | head -40
 # or:
 tr '\0' ' ' < /proc/$(pgrep -f 'ffmpeg.*1234' | head -1)/cmdline; echo

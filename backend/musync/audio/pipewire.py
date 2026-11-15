@@ -129,6 +129,7 @@ from .spp import (
     build_spp_ffmpeg,
     free_spp_listen_port,
     spp_anullsrc,
+    spp_controls_key,
     spp_plan_notes,
     spp_tcp_url,
 )
@@ -625,8 +626,9 @@ class PipeWireBackend(AudioBackend):
             self._exec_soft([pactl, "unload-module", found])
 
     def _apply_volume(self, device: Device) -> None:
+        """Apply per-sink volume on this BT/PipeWire output (not global)."""
         if device.kind == DeviceKind.NETWORK_SPP:
-            # SPP listen matches manual ffmpeg (no -af volume) — avoid bounce.
+            # SPP volume lives in ffmpeg -af; restart is handled by patch_device.
             return
         node = self._pw_node_ids.get(device.id)
         wpctl = self._tools["wpctl"]
@@ -642,8 +644,9 @@ class PipeWireBackend(AudioBackend):
         self._exec_soft([wpctl, "set-volume", node, f"{device.volume:.3f}"])
 
     def _apply_mute(self, device: Device) -> None:
+        """Apply per-sink mute on this BT/PipeWire output (not global)."""
         if device.kind == DeviceKind.NETWORK_SPP:
-            # SPP listen matches manual ffmpeg (no -af) — avoid bounce.
+            # SPP mute lives in ffmpeg -af volume=0; restart via patch_device.
             return
         node = self._pw_node_ids.get(device.id)
         wpctl = self._tools["wpctl"]
@@ -653,9 +656,9 @@ class PipeWireBackend(AudioBackend):
         self._exec_soft([wpctl, "set-mute", node, "1" if device.mute else "0"])
 
     def _apply_delay(self, device: Device) -> None:
-        """Re-wire this sink's loopback (BT). SPP uses manual argv without adelay."""
+        """Re-wire this sink's loopback latency (BT). SPP delay is ffmpeg adelay."""
         if device.kind == DeviceKind.NETWORK_SPP:
-            # Delay is stored for UI but not applied via -af (breaks SPP handshake).
+            # SPP delay lives in ffmpeg -af; restart via patch_device.
             return
         if not device.enabled:
             return
@@ -771,7 +774,11 @@ class PipeWireBackend(AudioBackend):
         is playing. Otherwise feed continuous ``anullsrc`` silence so the phone
         can complete its handshake before Play — pulse ``feeder.monitor`` often
         emits no frames until something plays into the feeder.
+
+        ``source_key`` includes per-sink delay/volume/mute so a control PATCH
+        forces a listener rebuild with the new ``-af`` chain.
         """
+        controls = spp_controls_key(device)
         path = ""
         try:
             path = self._session.active_file_path() or ""
@@ -779,9 +786,9 @@ class PipeWireBackend(AudioBackend):
             path = ""
         transport = self._session.get_transport()
         if path and transport.state == TransportState.PLAYING:
-            return "file", path, f"file:{path}"
+            return "file", path, f"file:{path}|{controls}"
         spec = spp_anullsrc(device)
-        return "lavfi", spec, f"lavfi:{spec}"
+        return "lavfi", spec, f"lavfi:{spec}|{controls}"
 
     def _restart_spp_listener(self, device: Device) -> None:
         """(Re)start TCP listen for an enabled SPP sink.
@@ -1487,23 +1494,36 @@ class PipeWireBackend(AudioBackend):
                 self._pw_node_ids[device_id] = updated.pw_node
             self._persist()
 
-            # SPP uses file/anullsrc without -af — only restart on bind-shape changes.
-            spp_bind_fields = {
+            # Per-sink controls only — never treat delay/volume as global transport.
+            spp_restart_fields = {
                 "listen_host",
                 "listen_port",
                 "sample_rate",
                 "channels",
                 "enabled",
+                "delay_ms",
+                "volume",
+                "mute",
             }
-            if updated.kind == DeviceKind.NETWORK_SPP and spp_bind_fields & set(updates):
+            if updated.kind == DeviceKind.NETWORK_SPP and spp_restart_fields & set(
+                updates
+            ):
+                # Rebuild ffmpeg listen with this sink's -af adelay/volume.
                 self._restart_spp_listener(updated)
             elif updated.kind != DeviceKind.NETWORK_SPP:
-                if "volume" in updates:
-                    self._apply_volume(updated)
-                if "mute" in updates:
-                    self._apply_mute(updated)
+                # BT / PipeWire: loopback latency_msec + wpctl on this node only.
                 if "delay_ms" in updates or "enabled" in updates or "pw_node" in updates:
                     self._ensure_graph(only_device=device_id)
+                if "volume" in updates or "mute" in updates:
+                    # Refresh map so wpctl hits the live bluez node id.
+                    try:
+                        self.refresh_sink_map()
+                    except Exception as exc:  # noqa: BLE001
+                        log.debug("sink map before volume: %s", exc)
+                    if "volume" in updates:
+                        self._apply_volume(updated)
+                    if "mute" in updates:
+                        self._apply_mute(updated)
 
             return updated.model_copy(deep=True)
 
