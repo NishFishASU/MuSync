@@ -84,32 +84,52 @@ DEFAULT_MOCK_DEVICES: list[dict[str, Any]] = [
 
 PLACEHOLDER_SOURCES: list[Source] = [
     Source(
-        id="stream-spotify",
-        title="Spotify (later)",
-        type=SourceType.STREAM,
+        id="spotify:stub",
+        title="Spotify",
+        type=SourceType.SPOTIFY,
+        locator="spotify:track:stub",
         available=False,
-        note="Phase 1 — not in MVP",
+        note="Stub — Spotify feeder not wired yet",
     ),
     Source(
-        id="stream-apple",
-        title="Apple Music (later)",
-        type=SourceType.STREAM,
+        id="apple:stub",
+        title="Apple Music",
+        type=SourceType.APPLE,
+        locator="apple:track:stub",
         available=False,
-        note="Phase 1 — not in MVP",
+        note="Stub — Apple Music feeder not wired yet",
     ),
     Source(
-        id="input-1",
-        title="Phone / PC input (later)",
+        id="input:1",
+        title="Input 1 (phone / PC)",
         type=SourceType.INPUT,
+        locator="input:1",
         available=False,
-        note="Phase 2 — not in MVP",
+        note="Stub — input slot 1 of 4",
     ),
     Source(
-        id="movie-1",
-        title="Movie / HDMI capture (later)",
-        type=SourceType.MOVIE,
+        id="input:2",
+        title="Input 2 (phone / PC)",
+        type=SourceType.INPUT,
+        locator="input:2",
         available=False,
-        note="Phase 2 — not in MVP",
+        note="Stub — input slot 2 of 4",
+    ),
+    Source(
+        id="input:3",
+        title="Input 3 (phone / PC)",
+        type=SourceType.INPUT,
+        locator="input:3",
+        available=False,
+        note="Stub — input slot 3 of 4",
+    ),
+    Source(
+        id="input:4",
+        title="Input 4 (USB-from-PC / network)",
+        type=SourceType.INPUT,
+        locator="input:4",
+        available=False,
+        note="Stub — input slot 4 of 4",
     ),
 ]
 
@@ -214,12 +234,14 @@ def discover_local_sources(media_dir: Path | None = None) -> list[Source]:
             continue
         rel = path.relative_to(root)
         source_id = f"local:{rel.as_posix()}"
+        resolved = str(path.resolve())
         sources.append(
             Source(
                 id=source_id,
                 title=path.stem.replace("_", " ").replace("-", " "),
                 type=SourceType.LOCAL,
-                path=str(path.resolve()),
+                path=resolved,
+                locator=resolved,
                 available=True,
                 # Mock / stub duration; real probing can come later on Pi.
                 duration_ms=180_000,

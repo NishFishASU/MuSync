@@ -92,7 +92,9 @@ def test_health_and_sources(backend: MockAudioBackend) -> None:
     assert health.pipewire_up is False
     sources = backend.list_sources()
     assert any(s.available for s in sources)
-    assert any(not s.available and s.type.value == "stream" for s in sources)
+    assert any(not s.available and s.type.value == "spotify" for s in sources)
+    assert any(not s.available and s.type.value == "apple" for s in sources)
+    assert any(not s.available and s.type.value == "input" for s in sources)
 
 
 def test_unknown_device(backend: MockAudioBackend) -> None:

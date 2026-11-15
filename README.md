@@ -68,9 +68,13 @@ scripts/build_web.sh  run_dev.sh  run_pi.sh  pair_bt600.sh
 | `GET` | `/api/health` | Backend, PipeWire up?, mapped sinks, graph dry-run |
 | `GET` | `/api/devices` | List sinks |
 | `PATCH` | `/api/devices/{id}` | `{ delay_ms?, volume?, mute?, enabled?, pw_node? }` |
-| `GET`/`PUT` | `/api/transport` | `{ state, position_ms, source_id? }` |
-| `GET` | `/api/sources` | Local files + disabled later stubs |
-| `PUT` | `/api/sources/active` | `{ id }` source picker |
+| `GET`/`PUT` | `/api/transport` | `{ state, position_ms, source_id?, queue_item_id? }` |
+| `GET` | `/api/sources` | Catalog: `local` + `spotify` / `apple` / `input` stubs |
+| `PUT` | `/api/sources/active` | `{ id }` — activate catalog entry (feeder swap only) |
+| `GET`/`POST` | `/api/queue` | Song queue; each item has `source_type` |
+| `PATCH` | `/api/queue/{id}` | Switch `source_type` (`local`\|`spotify`\|`apple`\|`input`) without tearing down sinks |
+| `PUT` | `/api/queue/active` | `{ id }` — play this queue item (feeder swap only) |
+| `DELETE` | `/api/queue/{id}` | Remove a queue item |
 
 ## Serving the built UI
 

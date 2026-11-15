@@ -3,32 +3,26 @@
 from __future__ import annotations
 
 import threading
-import time
 from typing import Optional
 
-from ..config import (
-    PLACEHOLDER_SOURCES,
-    clamp_delay_ms,
-    clamp_volume,
-    discover_local_sources,
-    load_devices,
-    save_devices,
-)
+from ..config import clamp_delay_ms, clamp_volume, load_devices, save_devices
 from ..models import (
     Device,
     DevicePatch,
     Health,
+    QueueItem,
+    QueueItemCreate,
+    QueueItemPatch,
     Source,
-    SourceType,
     Transport,
     TransportPut,
-    TransportState,
 )
 from .base import AudioBackend
+from .source_session import SourceSession
 
 
 class MockAudioBackend(AudioBackend):
-    """Fake ≤6 sinks with delay/volume/mute/enabled + local playback clock."""
+    """Fake ≤6 sinks with delay/volume/mute/enabled + song-level source switching."""
 
     name = "mock"
 
@@ -41,56 +35,8 @@ class MockAudioBackend(AudioBackend):
         if len(self._devices) > 6:
             raise ValueError("Mock backend supports at most 6 sinks")
 
-        self._sources = self._build_sources()
-        active = next((s for s in self._sources if s.available), None)
-        self._transport = Transport(
-            state=TransportState.STOPPED,
-            position_ms=0,
-            duration_ms=(active.duration_ms or 0) if active else 0,
-            source_id=active.id if active else None,
-            title=active.title if active else None,
-        )
-        self._play_started_wall: Optional[float] = None
-        self._play_started_pos: int = 0
-
-    def _build_sources(self) -> list[Source]:
-        local = discover_local_sources()
-        if not local:
-            local = [
-                Source(
-                    id="local:demo/sample-tone",
-                    title="Sample Tone (demo)",
-                    type=SourceType.LOCAL,
-                    path=None,
-                    available=True,
-                    duration_ms=180_000,
-                    note="Virtual demo track — drop files under media/ for real paths",
-                )
-            ]
-        return local + list(PLACEHOLDER_SOURCES)
-
-    def _source_by_id(self, source_id: str) -> Source:
-        for src in self._sources:
-            if src.id == source_id:
-                return src
-        raise KeyError(f"Unknown source: {source_id}")
-
-    def _tick_position(self) -> None:
-        """Advance position while playing (monotonic wall clock)."""
-        if self._transport.state != TransportState.PLAYING:
-            return
-        if self._play_started_wall is None:
-            return
-        elapsed = int((time.monotonic() - self._play_started_wall) * 1000)
-        pos = self._play_started_pos + elapsed
-        duration = self._transport.duration_ms or 0
-        if duration and pos >= duration:
-            self._transport.position_ms = duration
-            self._transport.state = TransportState.STOPPED
-            self._play_started_wall = None
-            self._play_started_pos = 0
-        else:
-            self._transport.position_ms = pos
+        # Feeder callbacks are no-ops: mock has no PipeWire graph to preserve.
+        self._session = SourceSession(lock=self._lock)
 
     def _persist(self) -> None:
         try:
@@ -127,84 +73,31 @@ class MockAudioBackend(AudioBackend):
             return updated.model_copy(deep=True)
 
     def get_transport(self) -> Transport:
-        with self._lock:
-            self._tick_position()
-            return self._transport.model_copy(deep=True)
+        return self._session.get_transport()
 
     def set_transport(self, body: TransportPut) -> Transport:
-        with self._lock:
-            self._tick_position()
-            if body.source_id is not None:
-                self._apply_source(body.source_id, reset_position=False)
-
-            if body.position_ms is not None:
-                duration = self._transport.duration_ms or 0
-                pos = max(0, body.position_ms)
-                if duration:
-                    pos = min(pos, duration)
-                self._transport.position_ms = pos
-                if self._transport.state == TransportState.PLAYING:
-                    self._play_started_wall = time.monotonic()
-                    self._play_started_pos = pos
-
-            if body.state is not None:
-                self._apply_state(body.state)
-
-            return self._transport.model_copy(deep=True)
-
-    def _apply_state(self, state: TransportState) -> None:
-        current = self._transport.state
-        if state == TransportState.PLAYING:
-            if current == TransportState.PLAYING:
-                return
-            self._play_started_wall = time.monotonic()
-            self._play_started_pos = self._transport.position_ms
-            self._transport.state = TransportState.PLAYING
-        elif state == TransportState.PAUSED:
-            self._tick_position()
-            self._play_started_wall = None
-            self._transport.state = TransportState.PAUSED
-        elif state == TransportState.STOPPED:
-            self._play_started_wall = None
-            self._play_started_pos = 0
-            self._transport.position_ms = 0
-            self._transport.state = TransportState.STOPPED
-
-    def _apply_source(self, source_id: str, *, reset_position: bool) -> None:
-        src = self._source_by_id(source_id)
-        if not src.available:
-            raise ValueError(f"Source not available in MVP: {source_id}")
-        self._transport.source_id = src.id
-        self._transport.title = src.title
-        self._transport.duration_ms = src.duration_ms or 0
-        if reset_position:
-            self._transport.position_ms = 0
-            self._play_started_wall = None
-            self._play_started_pos = 0
-            if self._transport.state == TransportState.PLAYING:
-                self._play_started_wall = time.monotonic()
+        return self._session.set_transport(body)
 
     def list_sources(self) -> list[Source]:
-        with self._lock:
-            # Refresh local discovery each call so dropped files appear.
-            placeholders = [s for s in self._sources if s.type != SourceType.LOCAL]
-            local = discover_local_sources()
-            if not local:
-                local = [s for s in self._sources if s.type == SourceType.LOCAL]
-            self._sources = local + placeholders
-            return [s.model_copy(deep=True) for s in self._sources]
+        return self._session.list_sources()
 
     def set_active_source(self, source_id: str) -> Transport:
-        with self._lock:
-            was_playing = self._transport.state == TransportState.PLAYING
-            self._apply_source(source_id, reset_position=True)
-            self._transport.state = (
-                TransportState.PLAYING if was_playing else TransportState.STOPPED
-            )
-            if was_playing:
-                self._play_started_wall = time.monotonic()
-                self._play_started_pos = 0
-            return self._transport.model_copy(deep=True)
+        return self._session.set_active_source(source_id)
+
+    def list_queue(self) -> list[QueueItem]:
+        return self._session.list_queue()
+
+    def add_queue_item(self, body: QueueItemCreate) -> QueueItem:
+        return self._session.add_queue_item(body)
+
+    def patch_queue_item(self, item_id: str, patch: QueueItemPatch) -> QueueItem:
+        return self._session.patch_queue_item(item_id, patch)
+
+    def remove_queue_item(self, item_id: str) -> None:
+        self._session.remove_queue_item(item_id)
+
+    def set_active_queue_item(self, item_id: str) -> Transport:
+        return self._session.set_active_queue_item(item_id)
 
     def health(self) -> Health:
         with self._lock:
@@ -219,5 +112,5 @@ class MockAudioBackend(AudioBackend):
                 hci_map=hci_map,
                 mapped_sinks=0,
                 graph_dry_run=True,
-                detail="MockAudioBackend — simulated sinks; no PipeWire",
+                detail="MockAudioBackend — simulated sinks; source switch keeps sink graph (noop)",
             )

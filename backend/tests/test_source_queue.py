@@ -1,0 +1,122 @@
+"""Song-level source switching: local | spotify | apple | input."""
+
+from __future__ import annotations
+
+from musync.audio.mock import MockAudioBackend
+from musync.models import (
+    Device,
+    QueueItemCreate,
+    QueueItemPatch,
+    SourceType,
+    TransportPut,
+    TransportState,
+)
+
+
+def _backend(tmp_path, monkeypatch) -> MockAudioBackend:
+    monkeypatch.setenv("MUSYNC_DEVICES_CONFIG", str(tmp_path / "devices.yaml"))
+    monkeypatch.setenv("MUSYNC_MEDIA_DIR", str(tmp_path / "media"))
+    return MockAudioBackend(
+        devices=[
+            Device(
+                id="sink-1",
+                name="Living Room",
+                mac="AA:BB:CC:DD:EE:01",
+                hci="hci0",
+                connected=True,
+            ),
+            Device(
+                id="sink-2",
+                name="Kitchen",
+                mac="AA:BB:CC:DD:EE:02",
+                hci="hci1",
+                connected=True,
+                delay_ms=40,
+            ),
+        ]
+    )
+
+
+def test_catalog_has_typed_stubs(tmp_path, monkeypatch) -> None:
+    backend = _backend(tmp_path, monkeypatch)
+    sources = backend.list_sources()
+    types = {s.type for s in sources}
+    assert SourceType.LOCAL in types
+    assert SourceType.SPOTIFY in types
+    assert SourceType.APPLE in types
+    assert SourceType.INPUT in types
+    stubs = [s for s in sources if s.type != SourceType.LOCAL]
+    assert stubs and all(not s.available for s in stubs)
+    assert all(s.type.value in {"spotify", "apple", "input"} for s in stubs)
+
+
+def test_queue_seeded_and_source_type_switch(tmp_path, monkeypatch) -> None:
+    backend = _backend(tmp_path, monkeypatch)
+    queue = backend.list_queue()
+    assert queue
+    local = next(q for q in queue if q.source_type == SourceType.LOCAL)
+    assert local.available
+
+    # Switch song to Spotify stub — sinks untouched (mock has no graph teardown).
+    patched = backend.patch_queue_item(
+        local.id, QueueItemPatch(source_type=SourceType.SPOTIFY)
+    )
+    assert patched.source_type == SourceType.SPOTIFY
+    assert patched.available is False
+    assert patched.note and "stub" in patched.note.lower()
+
+    # Switch back to local.
+    restored = backend.patch_queue_item(
+        local.id, QueueItemPatch(source_type=SourceType.LOCAL, source_id=local.source_id)
+    )
+    assert restored.source_type == SourceType.LOCAL
+    assert restored.available is True
+
+
+def test_active_queue_switch_keeps_devices(tmp_path, monkeypatch) -> None:
+    backend = _backend(tmp_path, monkeypatch)
+    before = backend.list_devices()
+    q = backend.list_queue()
+    spotify = backend.add_queue_item(
+        QueueItemCreate(source_type=SourceType.SPOTIFY, title="Stub song")
+    )
+    transport = backend.set_active_queue_item(spotify.id)
+    assert transport.queue_item_id == spotify.id
+    assert transport.source_type == SourceType.SPOTIFY
+    assert transport.state == TransportState.STOPPED
+
+    after = backend.list_devices()
+    assert [d.model_dump() for d in before] == [d.model_dump() for d in after]
+
+
+def test_cannot_play_stub(tmp_path, monkeypatch) -> None:
+    backend = _backend(tmp_path, monkeypatch)
+    item = backend.add_queue_item(QueueItemCreate(source_type=SourceType.APPLE))
+    backend.set_active_queue_item(item.id)
+    try:
+        backend.set_transport(TransportPut(state=TransportState.PLAYING))
+        raised = False
+    except ValueError as exc:
+        raised = True
+        assert "stub" in str(exc).lower() or "apple" in str(exc).lower()
+    assert raised
+
+
+def test_local_playback_still_works(tmp_path, monkeypatch) -> None:
+    backend = _backend(tmp_path, monkeypatch)
+    local = next(q for q in backend.list_queue() if q.available)
+    backend.set_active_queue_item(local.id)
+    playing = backend.set_transport(TransportPut(state=TransportState.PLAYING))
+    assert playing.state == TransportState.PLAYING
+    assert playing.source_type == SourceType.LOCAL
+    stopped = backend.set_transport(TransportPut(state=TransportState.STOPPED))
+    assert stopped.state == TransportState.STOPPED
+    assert stopped.position_ms == 0
+
+
+def test_catalog_active_source_api(tmp_path, monkeypatch) -> None:
+    backend = _backend(tmp_path, monkeypatch)
+    local = next(s for s in backend.list_sources() if s.available)
+    transport = backend.set_active_source(local.id)
+    assert transport.source_id == local.id
+    assert transport.queue_item_id is not None

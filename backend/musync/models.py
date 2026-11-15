@@ -1,4 +1,4 @@
-"""Shared API / domain models for MuSync Phase 0."""
+"""Shared API / domain models for MuSync."""
 
 from __future__ import annotations
 
@@ -53,20 +53,64 @@ class DevicePatch(BaseModel):
 
 
 class SourceType(str, Enum):
+    """Song-level feeder kinds. Streaming/input are stubs until later phases."""
+
     LOCAL = "local"
-    STREAM = "stream"
+    SPOTIFY = "spotify"
+    APPLE = "apple"
     INPUT = "input"
-    MOVIE = "movie"
+
+
+# Source types that can actually feed PCM today.
+PLAYABLE_SOURCE_TYPES = frozenset({SourceType.LOCAL})
 
 
 class Source(BaseModel):
+    """Catalog entry: discovered local file or streaming/input stub."""
+
     id: str
     title: str
     type: SourceType = SourceType.LOCAL
     path: Optional[str] = None
+    locator: Optional[str] = None
     available: bool = True
     note: Optional[str] = None
     duration_ms: Optional[int] = None
+
+
+class QueueItem(BaseModel):
+    """One song/cue in the play queue — source type can switch per item."""
+
+    id: str
+    title: str
+    source_type: SourceType = SourceType.LOCAL
+    locator: Optional[str] = None
+    source_id: Optional[str] = None
+    path: Optional[str] = None
+    available: bool = True
+    note: Optional[str] = None
+    duration_ms: Optional[int] = None
+
+
+class QueueItemCreate(BaseModel):
+    """Add a queue item from a catalog source and/or explicit type + locator."""
+
+    title: Optional[str] = None
+    source_type: SourceType = SourceType.LOCAL
+    locator: Optional[str] = None
+    source_id: Optional[str] = None
+    path: Optional[str] = None
+    duration_ms: Optional[int] = None
+
+
+class QueueItemPatch(BaseModel):
+    """Switch source type / locator on a song without rebuilding sinks."""
+
+    title: Optional[str] = None
+    source_type: Optional[SourceType] = None
+    locator: Optional[str] = None
+    source_id: Optional[str] = None
+    path: Optional[str] = None
 
 
 class Transport(BaseModel):
@@ -74,6 +118,8 @@ class Transport(BaseModel):
     position_ms: int = Field(default=0, ge=0)
     duration_ms: int = Field(default=0, ge=0)
     source_id: Optional[str] = None
+    queue_item_id: Optional[str] = None
+    source_type: Optional[SourceType] = None
     title: Optional[str] = None
 
 
@@ -83,9 +129,14 @@ class TransportPut(BaseModel):
     state: Optional[TransportState] = None
     position_ms: Optional[int] = Field(default=None, ge=0)
     source_id: Optional[str] = None
+    queue_item_id: Optional[str] = None
 
 
 class ActiveSourcePut(BaseModel):
+    id: str
+
+
+class ActiveQueuePut(BaseModel):
     id: str
 
 
