@@ -2,21 +2,24 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import re
+import threading
 from contextlib import asynccontextmanager
 from pathlib import Path
 from urllib.parse import unquote
 
 from fastapi import FastAPI, File, HTTPException, Query, Request, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from . import __version__
 from .audio import AudioBackend, create_backend
 from .config import media_library_path, resolve_media_file, web_root
+from .hub_events import HubEvent, bus, format_sse, publish_playback
 from .lan_url import enrich_wifi_status, lan_ui_url, svg_qr
 from .mdns import get_mdns_status, start_hub_mdns, stop_hub_mdns
 from .streaming.https_tunnel import (
@@ -98,6 +101,30 @@ profile_store: VolumeProfileStore = VolumeProfileStore()
 log = logging.getLogger(__name__)
 
 
+def _wire_playback_push() -> None:
+    """SourceSession → SSE: push now-playing/transport on song start / state change."""
+
+    def _on_playback_change(reason: str) -> None:
+        # Defer off the session lock (may call Spotify tags / now-playing).
+        def _work() -> None:
+            try:
+                publish_playback(
+                    transport=backend.get_transport(),
+                    now_playing=backend.get_now_playing(),
+                    reason=reason,
+                )
+            except Exception as exc:  # noqa: BLE001
+                log.debug("playback push soft-fail: %s", exc)
+
+        threading.Thread(
+            target=_work, name="musync-hub-push", daemon=True
+        ).start()
+
+    session = getattr(backend, "_session", None)
+    if session is not None and hasattr(session, "set_playback_change_hook"):
+        session.set_playback_change_hook(_on_playback_change)
+
+
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     """Advertise ``musync.local``; tear down MuSync audio graph on exit.
@@ -110,6 +137,7 @@ async def lifespan(_app: FastAPI):
 
     port = api_listen_port()
     start_hub_mdns(port=port)
+    _wire_playback_push()
     try:
         yield
     finally:
@@ -364,6 +392,69 @@ def api_avrcp_volume(body: AvrcpVolumePut) -> Device:
 def api_now_playing() -> NowPlaying:
     """Unified title / artist / album / cover for the active cue."""
     return backend.get_now_playing()
+
+
+@app.get("/api/events")
+async def api_events() -> StreamingResponse:
+    """Server-Sent Events: playback push (transport + now-playing) on change.
+
+    SPA prefers this over polling ``/api/now-playing`` (MDAS-71). Emits an
+    initial ``playback`` snapshot, then events on play/pause/skip/queue/advance.
+    Keepalive comments every ~20s; while playing, keepalive includes a light
+    transport position snapshot as ``event: playback`` with ``reason=heartbeat``.
+    """
+
+    async def _gen():
+        import queue as queue_mod
+
+        q = bus.subscribe()
+        try:
+            # Initial snapshot so the UI does not wait for the next song change.
+            try:
+                snap = {
+                    "reason": "snapshot",
+                    "transport": backend.get_transport().model_dump(mode="json"),
+                    "now_playing": backend.get_now_playing().model_dump(mode="json"),
+                }
+                yield format_sse(HubEvent(type="playback", data=snap))
+            except Exception as exc:  # noqa: BLE001
+                log.debug("SSE snapshot: %s", exc)
+            while True:
+                try:
+                    event = await asyncio.to_thread(q.get, True, 20.0)
+                    yield format_sse(event)
+                except queue_mod.Empty:
+                    # Keepalive + optional position heartbeat while playing.
+                    try:
+                        t = backend.get_transport()
+                        if getattr(t.state, "value", str(t.state)) == "playing":
+                            np = backend.get_now_playing()
+                            yield format_sse(
+                                HubEvent(
+                                    type="playback",
+                                    data={
+                                        "reason": "heartbeat",
+                                        "transport": t.model_dump(mode="json"),
+                                        "now_playing": np.model_dump(mode="json"),
+                                    },
+                                )
+                            )
+                        else:
+                            yield ": ping\n\n"
+                    except Exception:  # noqa: BLE001
+                        yield ": ping\n\n"
+        finally:
+            bus.unsubscribe(q)
+
+    return StreamingResponse(
+        _gen(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 @app.get("/api/now-playing/cover")

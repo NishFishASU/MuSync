@@ -104,6 +104,7 @@ USB/PC capture needs a **USB-A sound card** — Pi 5 USB-C PD is power-only: [do
 | `POST` | `/api/avrcp/command` | Relay `{ action, device_id? }` → hub transport (any source); Play promotes that BT sink in turn-taking |
 | `POST` | `/api/avrcp/volume` | Simulate Absolute Volume → slider (`{ device_id, volume }`; Pi polls BlueZ) |
 | `GET` | `/api/now-playing` | Unified now-playing (title, artist, album, cover) |
+| `GET` | `/api/events` | SSE push: `playback` events with `{ reason, transport, now_playing }` on song start / state change (SPA prefers this over polling) |
 | `GET` | `/api/now-playing/cover` | Embedded local cover bytes |
 | `GET` | `/api/sources` | Catalog: `local` + Spotify/AirPlay hub rows + input hosts |
 | `PUT` | `/api/sources/active` | `{ id }` — activate catalog entry (feeder swap only) |

@@ -11,7 +11,16 @@ export default defineConfig({
 		proxy: {
 			'/api': {
 				target: apiTarget,
-				changeOrigin: true
+				changeOrigin: true,
+				// SSE /api/events — disable proxy buffering so EventSource works in npm run dev.
+				configure: (proxy) => {
+					proxy.on('proxyRes', (proxyRes, req) => {
+						if (req.url && req.url.includes('/api/events')) {
+							proxyRes.headers['cache-control'] = 'no-cache';
+							proxyRes.headers['x-accel-buffering'] = 'no';
+						}
+					});
+				}
 			}
 		}
 	},
@@ -20,7 +29,16 @@ export default defineConfig({
 		proxy: {
 			'/api': {
 				target: apiTarget,
-				changeOrigin: true
+				changeOrigin: true,
+				// SSE /api/events — disable proxy buffering so EventSource works in npm run dev.
+				configure: (proxy) => {
+					proxy.on('proxyRes', (proxyRes, req) => {
+						if (req.url && req.url.includes('/api/events')) {
+							proxyRes.headers['cache-control'] = 'no-cache';
+							proxyRes.headers['x-accel-buffering'] = 'no';
+						}
+					});
+				}
 			}
 		}
 	},

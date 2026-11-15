@@ -70,6 +70,7 @@
 		spaPollCadence,
 		startBluetoothScan,
 		stopBluetoothScan,
+		subscribePlaybackEvents,
 		uploadInputFile
 	} from '$lib/api.js';
 
@@ -1532,7 +1533,7 @@
 		}
 	}
 
-	/** Re-armed from setTransport(Play) so idle 3s timers don't delay the next sync. */
+	/** Re-armed from setTransport(Play) so idle timers don't delay the next sync. */
 	/** @type {(() => void) | null} */
 	let schedulePollsNow = null;
 
@@ -1544,6 +1545,9 @@
 		let nowPlayingTimer;
 		/** @type {ReturnType<typeof setInterval> | undefined} */
 		let tickTimer;
+		/** @type {{ close: () => void } | null} */
+		let playbackSub = null;
+		let sseConnected = false;
 
 		function clearAdaptivePolls() {
 			clearTimeout(transportTimer);
@@ -1552,11 +1556,62 @@
 			nowPlayingTimer = undefined;
 		}
 
+		function applyPlaybackPush(payload) {
+			if (!payload) return;
+			const prevQueueId = transport?.queue_item_id;
+			if (payload.transport) {
+				applyTransport(/** @type {import('$lib/api.js').Transport} */ (payload.transport));
+			}
+			if (payload.now_playing) {
+				nowPlaying = /** @type {import('$lib/api.js').NowPlaying} */ (payload.now_playing);
+			}
+			const nextId = payload.transport?.queue_item_id;
+			if (nextId && nextId !== prevQueueId) {
+				getQueueSettings()
+					.then((qs) => {
+						if (qs) queueSettings = qs;
+					})
+					.catch(() => {});
+				listQueue()
+					.then((q) => {
+						queue = q;
+					})
+					.catch(() => {});
+			}
+			schedulePollsNow?.();
+		}
+
+		function stopPlaybackPush() {
+			playbackSub?.close();
+			playbackSub = null;
+			sseConnected = false;
+		}
+
+		function startPlaybackPush() {
+			if (cancelled || document.hidden || playbackSub) return;
+			playbackSub = subscribePlaybackEvents({
+				onPlayback: (data) => {
+					if (cancelled || document.hidden) return;
+					applyPlaybackPush(data);
+				},
+				onOpen: () => {
+					sseConnected = true;
+					schedulePollsNow?.();
+				},
+				onError: () => {
+					// EventSource retries; mark disconnected so poll fallback resumes.
+					sseConnected = false;
+					schedulePollsNow?.();
+				}
+			});
+		}
+
 		function scheduleAdaptivePolls() {
 			clearAdaptivePolls();
 			const cadence = spaPollCadence({
 				playing: transport?.state === 'playing',
-				hidden: document.hidden
+				hidden: document.hidden,
+				sseConnected
 			});
 			if (cadence.paused) return;
 
@@ -1567,7 +1622,6 @@
 					const t = await getTransport();
 					applyTransport(t);
 					if (t.queue_item_id !== prevQueueId) {
-						// Avoid listDevices on the hot path — it used to BT-reconnect under lock.
 						const qs = await getQueueSettings().catch(() => null);
 						if (qs) queueSettings = qs;
 						queue = await listQueue().catch(() => queue);
@@ -1578,37 +1632,40 @@
 				if (cancelled || document.hidden) return;
 				const next = spaPollCadence({
 					playing: transport?.state === 'playing',
-					hidden: document.hidden
+					hidden: document.hidden,
+					sseConnected
 				});
-				if (!next.paused) {
+				if (!next.paused && next.transportMs > 0) {
 					transportTimer = setTimeout(pollTransport, next.transportMs);
 				}
 			};
 
 			const pollNowPlaying = async () => {
-				if (cancelled || document.hidden) return;
+				if (cancelled || document.hidden || sseConnected) return;
 				try {
 					nowPlaying = await getNowPlaying().catch(() => nowPlaying);
 				} catch (err) {
 					console.error(err);
 				}
-				if (cancelled || document.hidden) return;
+				if (cancelled || document.hidden || sseConnected) return;
 				const next = spaPollCadence({
 					playing: transport?.state === 'playing',
-					hidden: document.hidden
+					hidden: document.hidden,
+					sseConnected
 				});
-				if (!next.paused) {
+				if (!next.paused && next.nowPlayingMs > 0) {
 					nowPlayingTimer = setTimeout(pollNowPlaying, next.nowPlayingMs);
 				}
 			};
 
-			// When entering Play, poll transport immediately (not after idle delay).
-			const immediate = transport?.state === 'playing';
+			const immediate = transport?.state === 'playing' && !sseConnected;
 			transportTimer = setTimeout(pollTransport, immediate ? 0 : cadence.transportMs);
-			nowPlayingTimer = setTimeout(
-				pollNowPlaying,
-				immediate ? 50 : cadence.nowPlayingMs
-			);
+			if (cadence.nowPlayingMs > 0) {
+				nowPlayingTimer = setTimeout(
+					pollNowPlaying,
+					immediate ? 50 : cadence.nowPlayingMs
+				);
+			}
 		}
 
 		schedulePollsNow = () => {
@@ -1634,13 +1691,13 @@
 		function onVisibility() {
 			if (cancelled) return;
 			if (document.hidden) {
-				// MDAS-70: Page Visibility — pause all SPA /api pollers + scrub tick.
+				// MDAS-70/71: pause pollers, scrub tick, and SSE while hidden.
 				clearAdaptivePolls();
 				clearTickTimer();
 				stopBtScanPoll();
+				stopPlaybackPush();
 				return;
 			}
-			// Immediate catch-up when the tab becomes visible again.
 			getTransport()
 				.then(applyTransport)
 				.catch(() => {});
@@ -1649,6 +1706,7 @@
 					nowPlaying = np;
 				})
 				.catch(() => {});
+			startPlaybackPush();
 			scheduleAdaptivePolls();
 			startTickTimer();
 		}
@@ -1666,6 +1724,7 @@
 					history.replaceState({}, '', window.location.pathname);
 				}
 				if (!document.hidden) {
+					startPlaybackPush();
 					scheduleAdaptivePolls();
 					startTickTimer();
 				}
@@ -1681,6 +1740,7 @@
 			schedulePollsNow = null;
 			clearAdaptivePolls();
 			clearTickTimer();
+			stopPlaybackPush();
 			document.removeEventListener('visibilitychange', onVisibility);
 			stopBtScanPoll();
 			for (const t of Object.values(patchTimers)) clearTimeout(t);
