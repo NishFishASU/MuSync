@@ -464,6 +464,27 @@ class ActiveQueuePut(BaseModel):
     id: str
 
 
+class QueueSettings(BaseModel):
+    """Queue playback policy: repeat-all loop + turn-taking rotation status."""
+
+    loop: bool = False
+    turn_taking: bool = True
+    turn_device_id: Optional[str] = None
+    turn_order: list[str] = Field(default_factory=list)
+    rotation_note: str = (
+        "Eligible: enabled sinks that are connected (BT) or armed (SPP/Cast). "
+        "If any have a profile/user assignment, only those participate. "
+        "Order: stable list_devices() order. On track end: next queue item + next device."
+    )
+
+
+class QueueSettingsPut(BaseModel):
+    """Update queue loop / turn-taking flags."""
+
+    loop: Optional[bool] = None
+    turn_taking: Optional[bool] = None
+
+
 class AvrcpStatus(BaseModel):
     """Best-effort Absolute Volume + headset transport relay status (soft-fail)."""
 

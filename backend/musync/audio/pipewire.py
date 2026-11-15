@@ -109,6 +109,8 @@ from ..models import (
     QueueItem,
     QueueItemCreate,
     QueueItemPatch,
+    QueueSettings,
+    QueueSettingsPut,
     Source,
     SourceType,
     Transport,
@@ -170,6 +172,12 @@ from .cast import (
     kick_cast_playback,
 )
 from .source_session import SourceSession
+from .turn_taking import (
+    ROTATION_NOTE,
+    eligible_turn_devices,
+    mute_targets_for_turn,
+    next_turn_device_id,
+)
 from .spp import (
     build_spp_ffmpeg,
     free_spp_listen_port,
@@ -259,11 +267,15 @@ class PipeWireBackend(AudioBackend):
 
         # Song/source switches only stop/start the feeder player — sink graph stays.
         self._inputs = InputRegistry(lock=self._lock)
+        self._turn_taking: bool = True
+        self._turn_device_id: Optional[str] = None
+        self._turn_assignments: dict[str, str] = {}
         self._session = SourceSession(
             inputs=self._inputs,
             lock=self._lock,
             on_feeder_stop=self._stop_player_process,
             on_feeder_start=self._start_player_process,
+            on_auto_advance=self._on_queue_auto_advance,
         )
         # BT AVRCP Absolute Volume → sliders; headset buttons → active source.
         # Soft-fail when BlueZ/busctl/Absolute Volume unavailable (API stays up).
@@ -2743,6 +2755,7 @@ class PipeWireBackend(AudioBackend):
             )
 
     def get_transport(self) -> Transport:
+        self._maybe_handle_feeder_eof()
         return self._session.get_transport()
 
     def set_transport(self, body: TransportPut) -> Transport:
@@ -2751,9 +2764,109 @@ class PipeWireBackend(AudioBackend):
         if body.state is TransportState.PLAYING:
             self._ensure_graph()
         transport = self._session.set_transport(body)
+        if body.state is TransportState.PLAYING:
+            self._apply_turn_policy(rotate=False)
         self._sync_spp_listeners()
         self._sync_cast_streams()
         return transport
+
+    def _on_queue_auto_advance(self) -> None:
+        """Track end → next eligible output device (mute solo)."""
+        self._apply_turn_policy(rotate=True)
+
+    def _apply_turn_policy(self, *, rotate: bool) -> None:
+        with self._lock:
+            devices = list(self._devices.values())
+            eligible = eligible_turn_devices(
+                devices, assignments=self._turn_assignments
+            )
+            eligible_ids = [d.id for d in eligible]
+            self._turn_device_id = next_turn_device_id(
+                eligible_ids, self._turn_device_id, rotate=rotate
+            )
+            for device_id, want_mute in mute_targets_for_turn(
+                devices,
+                turn_device_id=self._turn_device_id,
+                turn_taking=self._turn_taking,
+            ):
+                device = self._devices.get(device_id)
+                if device is None or device.mute == want_mute:
+                    continue
+                updated = device.model_copy(update={"mute": want_mute})
+                self._devices[device_id] = updated
+                if updated.kind == DeviceKind.BLUETOOTH:
+                    try:
+                        self._apply_mute(updated)
+                    except Exception as exc:  # noqa: BLE001
+                        log.debug("turn mute %s: %s", device_id, exc)
+                elif updated.kind == DeviceKind.NETWORK_SPP:
+                    try:
+                        self._restart_spp_listener(updated)
+                    except Exception as exc:  # noqa: BLE001
+                        log.debug("turn SPP mute %s: %s", device_id, exc)
+                elif updated.kind == DeviceKind.CAST:
+                    try:
+                        self._restart_cast_stream(updated)
+                    except Exception as exc:  # noqa: BLE001
+                        log.debug("turn Cast mute %s: %s", device_id, exc)
+            try:
+                self._persist()
+            except Exception as exc:  # noqa: BLE001
+                log.debug("turn persist: %s", exc)
+
+    def _maybe_handle_feeder_eof(self) -> None:
+        """Local mpv/pw-play exit → advance (Spotify/YouTube use duration_ms clock)."""
+        proc = self._player_proc
+        if proc is None or proc.poll() is None:
+            return
+        self._player_proc = None
+        try:
+            self._session.notify_playback_ended()
+        except Exception as exc:  # noqa: BLE001
+            log.debug("player EOF advance: %s", exc)
+
+    def get_queue_settings(
+        self, *, assignments: Optional[dict[str, str]] = None
+    ) -> QueueSettings:
+        if assignments is not None:
+            self._turn_assignments = {
+                k: v for k, v in assignments.items() if v
+            }
+        with self._lock:
+            devices = list(self._devices.values())
+            eligible = eligible_turn_devices(
+                devices, assignments=self._turn_assignments
+            )
+            order = [d.id for d in eligible]
+            if self._turn_taking and self._turn_device_id not in order and order:
+                self._turn_device_id = order[0]
+            return QueueSettings(
+                loop=self._session.get_loop(),
+                turn_taking=self._turn_taking,
+                turn_device_id=self._turn_device_id if self._turn_taking else None,
+                turn_order=order,
+                rotation_note=ROTATION_NOTE,
+            )
+
+    def set_queue_settings(
+        self,
+        body: QueueSettingsPut,
+        *,
+        assignments: Optional[dict[str, str]] = None,
+    ) -> QueueSettings:
+        if assignments is not None:
+            self._turn_assignments = {
+                k: v for k, v in assignments.items() if v
+            }
+        if body.loop is not None:
+            self._session.set_loop(body.loop)
+        if body.turn_taking is not None:
+            self._turn_taking = bool(body.turn_taking)
+            self._apply_turn_policy(rotate=False)
+        return self.get_queue_settings(assignments=assignments)
+
+    def notify_playback_ended(self) -> Transport:
+        return self._session.notify_playback_ended()
 
     def list_sources(self) -> list[Source]:
         return self._session.list_sources()
@@ -2779,6 +2892,7 @@ class PipeWireBackend(AudioBackend):
 
     def set_active_queue_item(self, item_id: str) -> Transport:
         transport = self._session.set_active_queue_item(item_id)
+        self._apply_turn_policy(rotate=False)
         self._sync_spp_listeners()
         self._sync_cast_streams()
         return transport

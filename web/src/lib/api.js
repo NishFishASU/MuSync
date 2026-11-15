@@ -268,6 +268,15 @@ export function spaPollRequestsPerSecond(cadence) {
  */
 
 /**
+ * @typedef {Object} QueueSettings
+ * @property {boolean} loop
+ * @property {boolean} turn_taking
+ * @property {string | null} [turn_device_id]
+ * @property {string[]} [turn_order]
+ * @property {string} [rotation_note]
+ */
+
+/**
  * @typedef {Object} Transport
  * @property {TransportState} state
  * @property {number} position_ms
@@ -711,6 +720,22 @@ export function setActiveSource(id) {
 /** @returns {Promise<QueueItem[]>} */
 export function listQueue() {
 	return api('/api/queue');
+}
+
+/** @returns {Promise<QueueSettings>} */
+export function getQueueSettings() {
+	return api('/api/queue/settings');
+}
+
+/**
+ * @param {{ loop?: boolean, turn_taking?: boolean }} body
+ * @returns {Promise<QueueSettings>}
+ */
+export function putQueueSettings(body) {
+	return api('/api/queue/settings', {
+		method: 'PUT',
+		body: JSON.stringify(body)
+	});
 }
 
 /**

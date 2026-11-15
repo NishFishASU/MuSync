@@ -50,6 +50,8 @@ from .models import (
     QueueItem,
     QueueItemCreate,
     QueueItemPatch,
+    QueueSettings,
+    QueueSettingsPut,
     Source,
     SourceType,
     SpotifyHttpsTunnelInfo,
@@ -403,6 +405,37 @@ def api_add_queue_item(body: QueueItemCreate) -> QueueItem:
     return backend.add_queue_item(body)
 
 
+def _profile_assignments() -> dict[str, str]:
+    """device_id → profile/user id for turn-taking eligibility."""
+    try:
+        state = profile_store.state()
+        return {
+            device_id: profile_id
+            for device_id, profile_id in (state.assignments or {}).items()
+            if profile_id
+        }
+    except Exception:  # noqa: BLE001
+        return {}
+
+
+@app.get("/api/queue/settings", response_model=QueueSettings)
+def api_get_queue_settings() -> QueueSettings:
+    """Loop (repeat-all) + turn-taking rotation status / order."""
+    return backend.get_queue_settings(assignments=_profile_assignments())
+
+
+@app.put("/api/queue/settings", response_model=QueueSettings)
+def api_put_queue_settings(body: QueueSettingsPut) -> QueueSettings:
+    """Toggle queue loop and/or turn-taking solo rotation."""
+    return backend.set_queue_settings(body, assignments=_profile_assignments())
+
+
+@app.put("/api/queue/active", response_model=Transport)
+def api_set_active_queue_item(body: ActiveQueuePut) -> Transport:
+    """Activate a queue item (feeder swap only)."""
+    return backend.set_active_queue_item(body.id)
+
+
 @app.patch("/api/queue/{item_id}", response_model=QueueItem)
 def api_patch_queue_item(item_id: str, patch: QueueItemPatch) -> QueueItem:
     """Switch source_type on a song without tearing down the sink graph."""
@@ -413,12 +446,6 @@ def api_patch_queue_item(item_id: str, patch: QueueItemPatch) -> QueueItem:
 def api_delete_queue_item(item_id: str) -> Response:
     backend.remove_queue_item(item_id)
     return Response(status_code=204)
-
-
-@app.put("/api/queue/active", response_model=Transport)
-def api_set_active_queue_item(body: ActiveQueuePut) -> Transport:
-    """Activate a queue item (feeder swap only)."""
-    return backend.set_active_queue_item(body.id)
 
 
 @app.get("/api/inputs", response_model=list[InputHost])

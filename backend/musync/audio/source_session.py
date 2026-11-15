@@ -163,15 +163,20 @@ class SourceSession:
         inputs: Optional[InputRegistry] = None,
         on_feeder_stop: Optional[Callable[[], None]] = None,
         on_feeder_start: Optional[Callable[[], None]] = None,
+        on_auto_advance: Optional[Callable[[], None]] = None,
         lock: Optional[threading.RLock] = None,
     ) -> None:
         self._lock = lock or threading.RLock()
         self._inputs = inputs or InputRegistry(lock=self._lock)
         self._on_feeder_stop = on_feeder_stop
         self._on_feeder_start = on_feeder_start
+        # Fired after binding the next cue on track end (before feeder start)
+        # so backends can rotate the solo turn device.
+        self._on_auto_advance = on_auto_advance
         self._id_seq = itertools.count(1)
         self._sources = self._build_sources()
         self._queue: list[QueueItem] = []
+        self._queue_loop: bool = False
         self._seed_queue_from_locals()
 
         active = self._first_playable_queue_item()
@@ -191,6 +196,7 @@ class SourceSession:
         )
         self._play_started_wall: Optional[float] = None
         self._play_started_pos: int = 0
+        self._advancing_track: bool = False
 
     @property
     def inputs(self) -> InputRegistry:
@@ -396,18 +402,102 @@ class SourceSession:
             return
         if self._play_started_wall is None:
             return
+        if self._advancing_track:
+            return
         elapsed = int((time.monotonic() - self._play_started_wall) * 1000)
         pos = self._play_started_pos + elapsed
         duration = self._transport.duration_ms or 0
         if duration and pos >= duration:
             self._transport.position_ms = duration
+            self._handle_track_end()
+        else:
+            self._transport.position_ms = pos
+
+    def _resolve_next_after_end(self) -> Optional[QueueItem]:
+        """Next available queue item after the active cue (honors loop).
+
+        Skips unavailable stubs. With loop off, returns None past the last
+        available item. With loop on, wraps and may return the same cue when
+        it is the only available item.
+        """
+        if not self._queue:
+            return None
+        ids = [q.id for q in self._queue]
+        qid = self._transport.queue_item_id
+        if qid in ids:
+            start = ids.index(qid)
+        else:
+            start = -1
+        n = len(ids)
+        for step in range(1, n + 1):
+            j = start + step
+            if j >= n:
+                if not self._queue_loop:
+                    return None
+                j = j % n
+            item = self._queue[j]
+            if item.available:
+                return item
+        return None
+
+    def _handle_track_end(self) -> None:
+        """Natural end-of-track: advance (+ optional loop) or stop."""
+        if self._advancing_track:
+            return
+        nxt = self._resolve_next_after_end()
+        if nxt is None:
             self._transport.state = TransportState.STOPPED
             self._play_started_wall = None
             self._play_started_pos = 0
             if self._on_feeder_stop:
                 self._on_feeder_stop()
-        else:
-            self._transport.position_ms = pos
+            return
+
+        self._advancing_track = True
+        try:
+            if self._on_feeder_stop:
+                self._on_feeder_stop()
+            self._bind_transport_to_item(nxt, reset_position=True)
+            if self._on_auto_advance:
+                try:
+                    self._on_auto_advance()
+                except Exception:  # noqa: BLE001
+                    # Soft-fail rotation — still try to play the next cue.
+                    pass
+            if not nxt.available:
+                self._transport.state = TransportState.STOPPED
+                self._play_started_wall = None
+                self._play_started_pos = 0
+                return
+            self._transport.state = TransportState.PLAYING
+            self._play_started_wall = time.monotonic()
+            self._play_started_pos = 0
+            if self._on_feeder_start:
+                self._on_feeder_start()
+        finally:
+            self._advancing_track = False
+
+    def notify_playback_ended(self) -> Transport:
+        """External EOF (mpv / yt-dlp ffmpeg exit) → same advance path as clock."""
+        with self._lock:
+            if self._transport.state != TransportState.PLAYING:
+                return self._transport.model_copy(deep=True)
+            if self._advancing_track:
+                return self._transport.model_copy(deep=True)
+            duration = self._transport.duration_ms or 0
+            if duration:
+                self._transport.position_ms = duration
+            self._handle_track_end()
+            return self._transport.model_copy(deep=True)
+
+    def get_loop(self) -> bool:
+        with self._lock:
+            return self._queue_loop
+
+    def set_loop(self, loop: bool) -> bool:
+        with self._lock:
+            self._queue_loop = bool(loop)
+            return self._queue_loop
 
     def _bind_transport_to_item(self, item: QueueItem, *, reset_position: bool) -> None:
         self._transport.queue_item_id = item.id
