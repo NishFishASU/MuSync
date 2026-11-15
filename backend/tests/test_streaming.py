@@ -224,8 +224,10 @@ def test_spotify_search_api_error_is_400_not_500(tmp_path, monkeypatch) -> None:
     assert "internal server error" not in detail
 
 
-def test_spotify_search_rejects_token_missing_scopes(tmp_path, monkeypatch) -> None:
-    """Old tokens without user-read-private must 400 with reconnect guidance."""
+def test_spotify_status_surfaces_granted_scopes_and_search_market(
+    tmp_path, monkeypatch
+) -> None:
+    """Streaming status exposes granted scopes + search market (never from_token)."""
     from musync.app import create_app
 
     token_path = tmp_path / "spotify_tokens.json"
@@ -236,7 +238,7 @@ def test_spotify_search_rejects_token_missing_scopes(tmp_path, monkeypatch) -> N
                 "refresh_token": "test-refresh",
                 "expires_at": 9999999999,
                 "display_name": "Test User",
-                # Pre-MDAS-40 grant — no user-read-private
+                # Old grant without user-read-private — search must still be allowed
                 "scope": "user-read-playback-state streaming",
             }
         ),
@@ -246,21 +248,19 @@ def test_spotify_search_rejects_token_missing_scopes(tmp_path, monkeypatch) -> N
     monkeypatch.setenv("MUSYNC_SPOTIFY_CLIENT_ID", "cid")
     monkeypatch.setenv("MUSYNC_SPOTIFY_CLIENT_SECRET", "csecret")
     monkeypatch.setenv("MUSYNC_SPOTIFY_TOKEN_PATH", str(token_path))
+    monkeypatch.setenv("MUSYNC_SPOTIFY_MARKET", "GB")
     reset_streaming_service()
     client = TestClient(create_app(audio_backend=backend))
 
     status = client.get("/api/streaming").json()["spotify"]
-    assert "user-read-private" in status["missing_scopes"]
-
-    res = client.get(
-        "/api/streaming/search",
-        params={"provider": "spotify", "q": "Shape Of You"},
-    )
-    assert res.status_code == 400
-    detail = res.json()["detail"].lower()
-    assert "missing required scopes" in detail
-    assert "user-read-private" in detail
-    assert "reconnect" in detail or "connect" in detail
+    assert status["authenticated"] is True
+    assert "user-read-playback-state" in status["scopes"]
+    assert "streaming" in status["scopes"]
+    assert "user-read-private" not in status["scopes"]
+    # user-read-private is optional for search; playback gaps still listed
+    assert "user-modify-playback-state" in status["missing_scopes"]
+    assert status["search_market"] == "GB"
+    assert status["search_market"] != "from_token"
 
 
 def test_spotify_search_insufficient_scope_message(tmp_path, monkeypatch) -> None:
@@ -312,7 +312,7 @@ def test_spotify_search_insufficient_scope_message(tmp_path, monkeypatch) -> Non
     assert res.status_code == 400
     detail = res.json()["detail"].lower()
     assert "insufficient client scope" in detail
-    assert "reconnect" in detail or "disconnect" in detail
+    assert "from_token" in detail or "market" in detail
 
 
 def test_spotify_search_shape_of_you_maps_hits(tmp_path, monkeypatch) -> None:
@@ -389,10 +389,70 @@ def test_spotify_search_shape_of_you_maps_hits(tmp_path, monkeypatch) -> None:
     assert hit["title"] == "Shape of You"
     assert hit["artist"] == "Ed Sheeran"
     assert hit["uri"].startswith("spotify:track:")
-    # market=from_token must be sent so catalog resolves for the signed-in user
+    # Never send market=from_token — use explicit ISO country (default US)
     _args, kwargs = mock_client.get.call_args
-    assert kwargs["params"]["market"] == "from_token"
+    assert kwargs["params"]["market"] == "US"
+    assert kwargs["params"]["market"] != "from_token"
     assert kwargs["params"]["q"] == "Shape Of You"
+
+
+def test_spotify_search_works_without_user_read_private(tmp_path, monkeypatch) -> None:
+    """Catalog search must succeed with old tokens that lack user-read-private."""
+    from unittest.mock import MagicMock, patch
+
+    from musync.app import create_app
+
+    token_path = tmp_path / "spotify_tokens.json"
+    token_path.write_text(
+        json.dumps(
+            {
+                "access_token": "test-access",
+                "refresh_token": "test-refresh",
+                "expires_at": 9999999999,
+                "display_name": "Test User",
+                "scope": "user-read-playback-state streaming",
+            }
+        ),
+        encoding="utf-8",
+    )
+    backend = _backend(tmp_path, monkeypatch)
+    monkeypatch.setenv("MUSYNC_SPOTIFY_CLIENT_ID", "cid")
+    monkeypatch.setenv("MUSYNC_SPOTIFY_CLIENT_SECRET", "csecret")
+    monkeypatch.setenv("MUSYNC_SPOTIFY_TOKEN_PATH", str(token_path))
+    reset_streaming_service()
+    client = TestClient(create_app(audio_backend=backend))
+
+    search_resp = MagicMock()
+    search_resp.status_code = 200
+    search_resp.json.return_value = {
+        "tracks": {
+            "items": [
+                {
+                    "id": "abc",
+                    "uri": "spotify:track:abc",
+                    "name": "Shape of You",
+                    "duration_ms": 1000,
+                    "artists": [{"name": "Ed Sheeran"}],
+                    "album": {"name": "÷", "images": []},
+                }
+            ]
+        }
+    }
+    search_resp.text = "{}"
+    mock_client = MagicMock()
+    mock_client.__enter__.return_value = mock_client
+    mock_client.__exit__.return_value = False
+    mock_client.get.return_value = search_resp
+
+    with patch("musync.streaming.spotify.httpx.Client", return_value=mock_client):
+        res = client.get(
+            "/api/streaming/search",
+            params={"provider": "spotify", "q": "Shape Of You"},
+        )
+
+    assert res.status_code == 200
+    assert res.json()["hits"][0]["title"] == "Shape of You"
+    assert mock_client.get.call_args.kwargs["params"]["market"] == "US"
 
 
 def test_spotify_login_redirects_when_not_configured(tmp_path, monkeypatch) -> None:

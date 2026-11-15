@@ -2338,16 +2338,25 @@
 						</button>
 						{#if streaming?.spotify?.missing_scopes?.length}
 							<p class="hint stream-error" role="alert">
-								Token missing scopes ({streaming.spotify.missing_scopes.join(', ')}). Click
-								<strong>Reconnect Spotify</strong> and approve the consent dialog, then search on
-								Queue.
+								Token missing playback scopes ({streaming.spotify.missing_scopes.join(', ')}).
+								Click <strong>Reconnect Spotify</strong> and approve the consent dialog.
 							</p>
 						{:else}
 							<p class="hint muted">
 								Connected — search &amp; queue tracks on the <a href="/queue/">Queue</a> tab.
-								Use Reconnect if search says insufficient client scope.
 							</p>
 						{/if}
+						<p class="hint muted scopes-line" title="Granted OAuth scopes from last Connect">
+							Granted scopes:
+							{#if streaming?.spotify?.scopes?.length}
+								<code>{streaming.spotify.scopes.join(' ')}</code>
+							{:else}
+								<code>(none stored — Reconnect to refresh)</code>
+							{/if}
+							{#if streaming?.spotify?.search_market}
+								· search market <code>{streaming.spotify.search_market}</code>
+							{/if}
+						</p>
 					{:else}
 						<button
 							type="button"
