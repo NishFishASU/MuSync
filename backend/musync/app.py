@@ -39,6 +39,8 @@ from .models import (
     QueueItemPatch,
     Source,
     SourceType,
+    StreamingCredentialsPut,
+    StreamingCredentialsStatus,
     StreamingQueueAdd,
     StreamingSearchResponse,
     StreamingStatus,
@@ -59,7 +61,11 @@ from .models import (
 from .nowplaying import resolve_cover_bytes
 from .profiles import VolumeProfileStore, apply_profile_to_backend
 from .streaming import get_streaming_service
-from .streaming.credentials import load_streaming_env_files
+from .streaming.credentials import (
+    credentials_status,
+    load_streaming_env_files,
+    save_streaming_credentials,
+)
 from .wifi import WifiBackend, create_wifi_backend
 
 # Client ID/secret from ~/musync.env or config/streaming.local.env before backends boot.
@@ -459,6 +465,34 @@ def _streaming_status_with_airplay() -> StreamingStatus:
 def api_streaming_status() -> StreamingStatus:
     """Spotify auth + AirPlay receive status (secrets never returned)."""
     return _streaming_status_with_airplay()
+
+
+@app.get("/api/streaming/credentials", response_model=StreamingCredentialsStatus)
+def api_streaming_credentials_get() -> StreamingCredentialsStatus:
+    """Masked developer credentials (Client Secret / YouTube key never raw)."""
+    return StreamingCredentialsStatus.model_validate(credentials_status())
+
+
+@app.put("/api/streaming/credentials", response_model=StreamingCredentialsStatus)
+def api_streaming_credentials_put(
+    body: StreamingCredentialsPut,
+) -> StreamingCredentialsStatus:
+    """Persist Spotify / YouTube keys to ``~/musync.env`` (never commit/log).
+
+    Soft-fails on empty body (no write). Applies to process env immediately
+    so Connect / YouTube search work without a restart when possible.
+    """
+    from .streaming.service import reset_streaming_service
+
+    result = save_streaming_credentials(
+        spotify_client_id=body.spotify_client_id,
+        spotify_client_secret=body.spotify_client_secret,
+        spotify_redirect_uri=body.spotify_redirect_uri,
+        youtube_api_key=body.youtube_api_key,
+    )
+    # Rebuild clients so configured()/auth_url pick up new env.
+    reset_streaming_service()
+    return StreamingCredentialsStatus.model_validate(result)
 
 
 def _spotify_redirect_uri(request: Request) -> str:

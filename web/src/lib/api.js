@@ -321,6 +321,35 @@
  */
 
 /**
+ * @typedef {Object} MaskedCredentialField
+ * @property {boolean} set
+ * @property {string} [masked]
+ * @property {string | null} [value]
+ */
+
+/**
+ * @typedef {Object} StreamingCredentialsStatus
+ * @property {string} env_path
+ * @property {boolean} env_exists
+ * @property {MaskedCredentialField} spotify_client_id
+ * @property {MaskedCredentialField} spotify_client_secret
+ * @property {MaskedCredentialField} spotify_redirect_uri
+ * @property {MaskedCredentialField} youtube_api_key
+ * @property {boolean} spotify_configured
+ * @property {boolean} youtube_configured
+ * @property {string[]} [updated_keys]
+ * @property {boolean} [saved]
+ */
+
+/**
+ * @typedef {Object} StreamingCredentialsPut
+ * @property {string} [spotify_client_id]
+ * @property {string} [spotify_client_secret]
+ * @property {string} [spotify_redirect_uri]
+ * @property {string} [youtube_api_key]
+ */
+
+/**
  * @typedef {Object} WifiStatus
  * @property {'mock' | 'nmcli'} backend
  * @property {boolean} connected
@@ -689,6 +718,24 @@ export function setActiveQueueItem(id) {
 /** @returns {Promise<StreamingStatus>} */
 export function getStreamingStatus() {
 	return api('/api/streaming');
+}
+
+/** @returns {Promise<StreamingCredentialsStatus>} */
+export function getStreamingCredentials() {
+	return api('/api/streaming/credentials');
+}
+
+/**
+ * Persist Spotify / YouTube keys to ~/musync.env (API returns masked only).
+ * Omit or leave blank fields to keep existing values; empty body soft-fails.
+ * @param {StreamingCredentialsPut} body
+ * @returns {Promise<StreamingCredentialsStatus>}
+ */
+export function saveStreamingCredentials(body) {
+	return api('/api/streaming/credentials', {
+		method: 'PUT',
+		body: JSON.stringify(body)
+	});
 }
 
 /** Spotify OAuth start — same-origin link redirect (not a password form). */

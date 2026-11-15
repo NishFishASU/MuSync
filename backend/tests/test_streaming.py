@@ -778,6 +778,102 @@ def test_load_streaming_env_parses_export_and_bom(tmp_path, monkeypatch) -> None
     assert "8081" in os.environ["MUSYNC_SPOTIFY_REDIRECT_URI"]
 
 
+def test_credentials_api_masks_secrets_and_persists(tmp_path, monkeypatch) -> None:
+    """GET never returns raw secrets; PUT writes ~/musync.env and masks response."""
+    from musync.app import create_app
+    from musync.streaming.credentials import _MASK
+
+    monkeypatch.setattr("musync.streaming.credentials.Path.home", lambda: tmp_path)
+    monkeypatch.setattr(
+        "musync.streaming.credentials.local_env_path",
+        lambda: tmp_path / "missing.local.env",
+    )
+    monkeypatch.delenv("MUSYNC_SPOTIFY_CLIENT_ID", raising=False)
+    monkeypatch.delenv("MUSYNC_SPOTIFY_CLIENT_SECRET", raising=False)
+    monkeypatch.delenv("MUSYNC_SPOTIFY_REDIRECT_URI", raising=False)
+    monkeypatch.delenv("MUSYNC_YOUTUBE_API_KEY", raising=False)
+    reset_streaming_service()
+
+    backend = _backend(tmp_path, monkeypatch)
+    client = TestClient(create_app(audio_backend=backend))
+
+    empty = client.get("/api/streaming/credentials")
+    assert empty.status_code == 200
+    body = empty.json()
+    assert body["spotify_configured"] is False
+    assert body["youtube_configured"] is False
+    assert body["spotify_client_secret"]["set"] is False
+    assert body["youtube_api_key"]["set"] is False
+    # Soft-fail empty PUT — no write, no crash
+    soft = client.put("/api/streaming/credentials", json={})
+    assert soft.status_code == 200
+    assert soft.json()["saved"] is False
+    assert not (tmp_path / "musync.env").exists()
+
+    secret = "super-secret-value-xyz"
+    yt_key = "AIzaSyTestYouTubeKey123456"
+    put = client.put(
+        "/api/streaming/credentials",
+        json={
+            "spotify_client_id": "my-client-id-abcd",
+            "spotify_client_secret": secret,
+            "spotify_redirect_uri": "http://127.0.0.1:8081/api/streaming/spotify/callback",
+            "youtube_api_key": yt_key,
+        },
+    )
+    assert put.status_code == 200
+    saved = put.json()
+    assert saved["saved"] is True
+    assert saved["spotify_configured"] is True
+    assert saved["youtube_configured"] is True
+    raw = put.text
+    assert secret not in raw
+    assert yt_key not in raw
+    assert saved["spotify_client_secret"]["set"] is True
+    assert saved["spotify_client_secret"]["masked"] == _MASK
+    assert saved["youtube_api_key"]["masked"] == _MASK
+    assert "value" not in saved["spotify_client_secret"] or saved[
+        "spotify_client_secret"
+    ].get("value") in (None, "")
+    assert saved["spotify_redirect_uri"]["value"].endswith("/callback")
+    assert "abcd" in saved["spotify_client_id"]["masked"]
+
+    env_file = tmp_path / "musync.env"
+    assert env_file.is_file()
+    disk = env_file.read_text(encoding="utf-8")
+    assert "MUSYNC_SPOTIFY_CLIENT_SECRET=" in disk
+    assert secret in disk  # on disk only — never in API
+    assert yt_key in disk
+
+    # Process env applied; status reflects configured
+    status = client.get("/api/streaming")
+    assert status.status_code == 200
+    st = status.json()
+    assert st["spotify"]["configured"] is True
+    assert st["youtube"]["configured"] is True
+    assert secret not in status.text
+    assert yt_key not in status.text
+
+    # Blank secret field omitted → keep existing
+    keep = client.put(
+        "/api/streaming/credentials",
+        json={"spotify_client_id": "rotated-id-9999"},
+    )
+    assert keep.status_code == 200
+    assert os.environ["MUSYNC_SPOTIFY_CLIENT_SECRET"] == secret
+    assert "9999" in keep.json()["spotify_client_id"]["masked"]
+    assert secret not in keep.text
+
+
+def test_mask_secret_never_echoes_raw() -> None:
+    from musync.streaming.credentials import mask_secret, _MASK
+
+    assert mask_secret("") == ""
+    assert mask_secret("abc", key="MUSYNC_SPOTIFY_CLIENT_SECRET") == _MASK
+    assert mask_secret("abcdefghij", key="MUSYNC_SPOTIFY_CLIENT_ID").endswith("ghij")
+    assert "abcdef" not in mask_secret("abcdefghij", key="MUSYNC_SPOTIFY_CLIENT_ID")
+
+
 def test_now_playing_api_for_local(tmp_path, monkeypatch) -> None:
     from musync.app import create_app
 

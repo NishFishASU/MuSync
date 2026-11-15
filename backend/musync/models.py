@@ -560,6 +560,51 @@ class StreamingQueueAdd(BaseModel):
     activate: bool = True
 
 
+class MaskedCredentialField(BaseModel):
+    """API view of one env credential — raw secrets never included."""
+
+    set: bool = False
+    masked: str = ""
+    # Only for non-secrets (redirect URI). Secrets omit ``value``.
+    value: Optional[str] = None
+
+
+class StreamingCredentialsStatus(BaseModel):
+    """Masked Spotify / YouTube developer credentials for the Streaming UI."""
+
+    env_path: str = ""
+    env_exists: bool = False
+    spotify_client_id: MaskedCredentialField = Field(
+        default_factory=MaskedCredentialField
+    )
+    spotify_client_secret: MaskedCredentialField = Field(
+        default_factory=MaskedCredentialField
+    )
+    spotify_redirect_uri: MaskedCredentialField = Field(
+        default_factory=MaskedCredentialField
+    )
+    youtube_api_key: MaskedCredentialField = Field(
+        default_factory=MaskedCredentialField
+    )
+    spotify_configured: bool = False
+    youtube_configured: bool = False
+    updated_keys: list[str] = Field(default_factory=list)
+    saved: bool = False
+
+
+class StreamingCredentialsPut(BaseModel):
+    """Write developer credentials to ``~/musync.env``.
+
+    ``None`` / omitted = leave unchanged. Non-empty = set. Empty string =
+    soft-clear that key. Empty body soft-fails (no write).
+    """
+
+    spotify_client_id: Optional[str] = None
+    spotify_client_secret: Optional[str] = None
+    spotify_redirect_uri: Optional[str] = None
+    youtube_api_key: Optional[str] = None
+
+
 class VolumeProfile(BaseModel):
     """Named listening preference for silent-disco style headphone outputs.
 

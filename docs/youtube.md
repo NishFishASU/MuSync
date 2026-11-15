@@ -25,6 +25,11 @@ Secrets stay in environment variables / local files. Never commit API keys (see 
 
 ### 2. Env on the Pi
 
+**Preferred:** Streaming tab → paste the API key → **Save to musync.env**. The API
+writes `~/musync.env` and returns only a masked status (never the raw key).
+
+Or edit the file by hand:
+
 ```bash
 # Prefer a file that is never committed, e.g. ~/musync.env
 export MUSYNC_YOUTUBE_API_KEY="…"
@@ -42,6 +47,7 @@ cp config/streaming.env.example ~/musync.env   # or edit existing
 ```
 
 `run_pi.sh` / API startup auto-load `~/musync.env` and `config/streaming.local.env`.
+Empty key soft-fails (local / Spotify / AirPlay still work).
 
 ### 3. Install yt-dlp + ffmpeg
 
@@ -104,6 +110,7 @@ Local queue + Play work without a real key. With `MUSYNC_STREAMING_MOCK=1` and a
 | Method | Path | Purpose |
 |--------|------|---------|
 | `GET` | `/api/streaming` | Provider status (no secrets) — includes `youtube` |
+| `GET`/`PUT` | `/api/streaming/credentials` | Masked keys → `~/musync.env` (YouTube key never returned raw) |
 | `GET` | `/api/streaming/search?provider=youtube&q=` | Video search |
 | `POST` | `/api/streaming/queue` | `{ provider: "youtube", uri: "youtube:VIDEO_ID", title?, artist?, activate? }` |
 

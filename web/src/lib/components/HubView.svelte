@@ -39,7 +39,9 @@
 		SPOTIFY_LOGIN_HREF,
 		fetchSpotifyAuthorizeUrl,
 		getNowPlaying,
+		getStreamingCredentials,
 		getStreamingStatus,
+		saveStreamingCredentials,
 		getTransport,
 		getWifiStatus,
 		listDevices,
@@ -147,6 +149,8 @@
 
 	/** @type {import('$lib/api.js').StreamingStatus | null} */
 	let streaming = $state(null);
+	/** @type {import('$lib/api.js').StreamingCredentialsStatus | null} */
+	let streamCreds = $state(null);
 	/** @type {import('$lib/api.js').NowPlaying | null} */
 	let nowPlaying = $state(null);
 	/** @type {'spotify' | 'youtube'} */
@@ -156,6 +160,13 @@
 	let streamHits = $state([]);
 	let streamBusy = $state(false);
 	let streamMessage = $state('');
+	let credClientId = $state('');
+	let credClientSecret = $state('');
+	let credRedirectUri = $state('');
+	let credYoutubeKey = $state('');
+	let credBusy = $state(false);
+	let credMessage = $state('');
+	let guidesOpen = $state(false);
 
 	/** @type {Record<string, ReturnType<typeof setTimeout>>} */
 	const patchTimers = {};
@@ -580,6 +591,7 @@
 		apiError = '';
 		if (!selectedId && d.length) selectedId = d[0].id;
 		applyTransport(t);
+		await refreshStreamCreds().catch(() => {});
 		await refreshProfiles().catch(() => {});
 		await refreshWifi().catch(() => {});
 		await refreshDiscovery().catch((err) => {
@@ -590,6 +602,55 @@
 
 	async function refreshStreaming() {
 		streaming = await getStreamingStatus();
+		await refreshStreamCreds().catch(() => {});
+	}
+
+	async function refreshStreamCreds() {
+		const c = await getStreamingCredentials();
+		streamCreds = c;
+		// Prefill redirect URI (not a secret). Leave secret fields blank so
+		// empty submit keeps existing values.
+		if (c?.spotify_redirect_uri?.value) {
+			credRedirectUri = c.spotify_redirect_uri.value;
+		}
+	}
+
+	async function onSaveStreamCreds() {
+		if (credBusy) return;
+		credBusy = true;
+		credMessage = '';
+		/** @type {import('$lib/api.js').StreamingCredentialsPut} */
+		const body = {};
+		const id = credClientId.trim();
+		const secret = credClientSecret.trim();
+		const redirect = credRedirectUri.trim();
+		const yt = credYoutubeKey.trim();
+		if (id) body.spotify_client_id = id;
+		if (secret) body.spotify_client_secret = secret;
+		if (redirect) body.spotify_redirect_uri = redirect;
+		if (yt) body.youtube_api_key = yt;
+		try {
+			const res = await saveStreamingCredentials(body);
+			streamCreds = res;
+			if (res.spotify_redirect_uri?.value) {
+				credRedirectUri = res.spotify_redirect_uri.value;
+			}
+			// Clear secret inputs after save so raw values leave the DOM.
+			credClientSecret = '';
+			credYoutubeKey = '';
+			credClientId = '';
+			streaming = await getStreamingStatus();
+			if (!res.saved) {
+				credMessage = 'Nothing to save — enter at least one value (empty soft-fails).';
+			} else {
+				const n = res.updated_keys?.length || 0;
+				credMessage = `Saved ${n} key${n === 1 ? '' : 's'} to ${res.env_path} (never committed).`;
+			}
+		} catch (err) {
+			credMessage = err instanceof Error ? err.message : String(err);
+		} finally {
+			credBusy = false;
+		}
 	}
 
 	async function refreshNowPlaying() {
@@ -2293,8 +2354,134 @@
 		<section class="panel streaming-panel" aria-labelledby="streaming-heading">
 			<div class="panel-head">
 				<h2 id="streaming-heading">Streaming</h2>
-				<p class="hint">OAuth / account connect only · search lives on Queue</p>
+				<p class="hint">API keys → ~/musync.env · OAuth Connect · search on Queue</p>
 			</div>
+
+			<section class="stream-creds" aria-labelledby="stream-creds-heading">
+				<div class="panel-head stream-creds-head">
+					<h3 id="stream-creds-heading">Developer credentials</h3>
+					<p class="hint muted">
+						Saved to <code>{streamCreds?.env_path || '~/musync.env'}</code> — never committed or
+						returned raw (masked below). Blank fields keep existing values; empty save soft-fails.
+					</p>
+				</div>
+				<form
+					class="cred-form"
+					onsubmit={(e) => {
+						e.preventDefault();
+						onSaveStreamCreds();
+					}}
+				>
+					<label class="cred-field">
+						<span>Spotify Client ID</span>
+						<input
+							type="text"
+							autocomplete="off"
+							spellcheck="false"
+							placeholder={streamCreds?.spotify_client_id?.set
+								? streamCreds.spotify_client_id.masked || '•••• set'
+								: 'from developer.spotify.com'}
+							bind:value={credClientId}
+							aria-label="Spotify Client ID"
+						/>
+					</label>
+					<label class="cred-field">
+						<span>Spotify Client Secret</span>
+						<input
+							type="password"
+							autocomplete="new-password"
+							spellcheck="false"
+							placeholder={streamCreds?.spotify_client_secret?.set
+								? '•••• set — leave blank to keep'
+								: 'from developer.spotify.com'}
+							bind:value={credClientSecret}
+							aria-label="Spotify Client Secret"
+						/>
+					</label>
+					<label class="cred-field">
+						<span>Spotify redirect URI</span>
+						<input
+							type="url"
+							autocomplete="off"
+							spellcheck="false"
+							placeholder="http://&lt;Pi-IP&gt;:8080/api/streaming/spotify/callback"
+							bind:value={credRedirectUri}
+							aria-label="Spotify redirect URI"
+						/>
+					</label>
+					<label class="cred-field">
+						<span>YouTube Data API key</span>
+						<input
+							type="password"
+							autocomplete="new-password"
+							spellcheck="false"
+							placeholder={streamCreds?.youtube_api_key?.set
+								? '•••• set — leave blank to keep'
+								: 'from Google Cloud Console'}
+							bind:value={credYoutubeKey}
+							aria-label="YouTube API key"
+						/>
+					</label>
+					<div class="cred-actions">
+						<button type="submit" class="btn btn-small" disabled={credBusy}>
+							{credBusy ? 'Saving…' : 'Save to musync.env'}
+						</button>
+						<span class="status-pill {streamCreds?.spotify_configured ? 'linked' : 'missing'}">
+							Spotify {streamCreds?.spotify_configured ? 'keys set' : 'keys empty'}
+						</span>
+						<span class="status-pill {streamCreds?.youtube_configured ? 'linked' : 'missing'}">
+							YouTube {streamCreds?.youtube_configured ? 'key set' : 'key empty'}
+						</span>
+					</div>
+				</form>
+				{#if credMessage}
+					<p class="hint" role="status">{credMessage}</p>
+				{/if}
+				<details class="cred-guides" bind:open={guidesOpen}>
+					<summary>Short setup guides (Spotify Dashboard · Google Cloud)</summary>
+					<div class="guide-grid">
+						<div class="guide-block">
+							<strong>Spotify Developer Dashboard</strong>
+							<ol>
+								<li>
+									Open
+									<a
+										href="https://developer.spotify.com/dashboard"
+										target="_blank"
+										rel="noopener noreferrer">developer.spotify.com/dashboard</a
+									>
+									→ Create app
+								</li>
+								<li>Copy <em>Client ID</em> and <em>Client Secret</em> into the fields above</li>
+								<li>
+									Redirect URI (exact match):
+									<code>http://&lt;Pi-IP&gt;:8080/api/streaming/spotify/callback</code>
+									(laptop mock: <code>127.0.0.1</code> + API port, not Vite :5173)
+								</li>
+								<li>Save here → <strong>Connect Spotify</strong> below → search on Queue</li>
+							</ol>
+						</div>
+						<div class="guide-block">
+							<strong>Google Cloud (YouTube Data API)</strong>
+							<ol>
+								<li>
+									Open
+									<a
+										href="https://console.cloud.google.com/"
+										target="_blank"
+										rel="noopener noreferrer">console.cloud.google.com</a
+									>
+									→ create/select a project
+								</li>
+								<li>APIs &amp; Services → Library → enable <em>YouTube Data API v3</em></li>
+								<li>Credentials → Create credentials → API key (optional: restrict to that API)</li>
+								<li>Paste the key above → Save → search YouTube on Queue</li>
+							</ol>
+						</div>
+					</div>
+				</details>
+			</section>
+
 			<div class="stream-status">
 				<div class="stream-card">
 					<strong>Spotify</strong>
@@ -2350,16 +2537,14 @@
 						<button
 							type="button"
 							class="btn btn-small"
-							disabled={streamBusy}
+							disabled={streamBusy || !streaming?.spotify?.configured}
 							onclick={() => onConnectSpotify()}
 						>
 							Connect Spotify
 						</button>
 						<p class="hint muted">
-							Opens Spotify login with a consent dialog (needed scopes for search + playback). App
-							Client ID/Secret stay in <code>~/musync.env</code> (Windows:
-							<code>%USERPROFILE%\musync.env</code>) — not typed here. After connect, use Queue to
-							search.
+							OAuth consent for search + playback. Save Client ID/Secret above first (stored in
+							<code>~/musync.env</code>, never logged). Then use Queue to search.
 						</p>
 					{/if}
 					{#if streaming?.spotify?.librespot_available === false}
@@ -2367,10 +2552,8 @@
 					{/if}
 					{#if !streaming?.spotify?.configured}
 						<p class="hint muted">
-							Setup once: copy <code>config/streaming.env.example</code> → <code>~/musync.env</code>,
-							add Client ID/Secret + redirect
-							<code>http://&lt;Pi-IP&gt;:8080/api/streaming/spotify/callback</code>, restart
-							<code>./scripts/run_pi.sh</code>, then use Connect Spotify.
+							Not configured — paste Client ID/Secret (+ redirect URI) above, or edit
+							<code>~/musync.env</code>. Empty keys soft-fail (local/AirPlay still work).
 						</p>
 					{/if}
 					{#if streaming?.spotify?.note}
@@ -2428,9 +2611,8 @@
 							: 'not configured'}
 					</span>
 					<p class="hint muted">
-						Data API key in <code>~/musync.env</code> (<code>MUSYNC_YOUTUBE_API_KEY</code>).
-						Hub PCM: <code>yt-dlp</code> → <code>ffmpeg</code> →
-						<code>musync_feeder</code> — see docs/youtube.md.
+						API key saved above (<code>MUSYNC_YOUTUBE_API_KEY</code>). Hub PCM:
+						<code>yt-dlp</code> → <code>ffmpeg</code> → <code>musync_feeder</code>.
 					</p>
 					{#if streaming?.youtube?.ytdlp_available === false}
 						<p class="hint muted">Install <code>yt-dlp</code> on the Pi for hub PCM.</p>
@@ -2440,9 +2622,7 @@
 					{/if}
 					{#if !streaming?.youtube?.configured}
 						<p class="hint muted">
-							Setup: enable YouTube Data API v3, create an API key, add
-							<code>MUSYNC_YOUTUBE_API_KEY</code> to <code>~/musync.env</code>, restart
-							<code>./scripts/run_pi.sh</code>.
+							Not configured — paste a YouTube Data API key above (see guide). Empty key soft-fails.
 						</p>
 					{/if}
 					{#if streaming?.youtube?.note}
