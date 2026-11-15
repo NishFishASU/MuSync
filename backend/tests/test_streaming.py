@@ -394,6 +394,23 @@ def test_spotify_search_shape_of_you_maps_hits(tmp_path, monkeypatch) -> None:
     assert kwargs["params"]["market"] == "US"
     assert kwargs["params"]["market"] != "from_token"
     assert kwargs["params"]["q"] == "Shape Of You"
+    # Spotify rejects non-integer / out-of-range limit — must be int string 1..50
+    assert kwargs["params"]["limit"] == "15"
+    assert isinstance(kwargs["params"]["limit"], str)
+
+
+def test_clamp_search_limit_is_int_string_1_to_50() -> None:
+    from musync.streaming.spotify import _clamp_search_limit
+
+    assert _clamp_search_limit(15) == "15"
+    assert _clamp_search_limit("15") == "15"
+    assert _clamp_search_limit(0) == "1"
+    assert _clamp_search_limit(-3) == "1"
+    assert _clamp_search_limit(99) == "50"
+    assert _clamp_search_limit(50) == "50"
+    assert _clamp_search_limit("nope") == "15"
+    assert _clamp_search_limit(None) == "15"
+    assert all(isinstance(_clamp_search_limit(n), str) for n in (1, 25, 50))
 
 
 def test_spotify_search_works_without_user_read_private(tmp_path, monkeypatch) -> None:
