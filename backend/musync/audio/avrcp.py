@@ -41,8 +41,9 @@ VOLUME_EPSILON = 0.025
 ECHO_GUARD_S = 1.75
 # Throttle volume polls so UI list_devices cannot spam busctl.
 VOLUME_POLL_MIN_INTERVAL_S = 0.85
-# Debounce headset double-fires (PlayPause often emits twice).
-ACTION_DEBOUNCE_S = 0.18
+# Debounce headset double-fires (PlayPause often emits twice). Keep short so
+# buttons feel snappy; 0.1s still collapses typical double-press chatter.
+ACTION_DEBOUNCE_S = 0.1
 
 PLAYER_PATH = "/org/musync/player"
 PLAYER_IFACE = "org.mpris.MediaPlayer2.Player"

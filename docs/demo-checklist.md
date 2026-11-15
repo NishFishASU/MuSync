@@ -33,14 +33,14 @@ export MUSYNC_BACKEND=pipewire
 2. Phone SPP → host = **Pi IP** (never `0.0.0.0`), port / rate / channels matching the sink row, PCM s16le.
 3. If Play switched SPP from silence → file, reconnect the phone once.
 4. **Qudelix AVRCP:** with local (or Spotify/YouTube) playing to Qudelix, press headset play/pause/skip — Now playing should follow. Volume buttons still sync Absolute Volume → Outputs slider.
-5. **Local Play timing:** click Play on a hub-local file — audio on Qudelix should start within ~1s (not multi-second). Phone Spotify pause is async and must not gate PCM.
+5. **Local Play timing:** click Play — UI should flip immediately (optimistic); Qudelix audio within ~300–800 ms when the graph is already up. Phone Spotify pause / turn-taking / SPP file-switch run after the Play response.
 
 ```bash
 # AVRCP truth (venv must import apt dbus/gi — run_pi.sh enables system-site-packages)
 curl -s http://127.0.0.1:8080/api/avrcp | python3 -m json.tool
 # Expect: dbus_import_ok true, player_registered true, registered_adapters includes /org/bluez/hci0
 
-# Rough Play latency (local file already selected)
+# Rough Play latency (local file already selected) — target well under 1s when healthy
 python3 - <<'PY'
 import time, urllib.request, json
 body = json.dumps({"state": "playing"}).encode()

@@ -1200,10 +1200,35 @@
 	async function setTransport(body) {
 		try {
 			sourceError = '';
-			applyTransport(await putTransport(body));
-			nowPlaying = await getNowPlaying().catch(() => nowPlaying);
+			// Optimistic UI — don't wait for PUT before flipping Play/Pause chrome.
+			if (transport && body.state) {
+				applyTransport({
+					...transport,
+					state: body.state,
+					position_ms:
+						body.position_ms !== undefined ? body.position_ms : transport.position_ms
+				});
+				if (body.state === 'playing') {
+					schedulePollsNow?.();
+				}
+			}
+			const t = await putTransport(body);
+			applyTransport(t);
+			if (body.state === 'playing') {
+				schedulePollsNow?.();
+			}
+			// Metadata catch-up must not gate the Play button feel.
+			getNowPlaying()
+				.then((np) => {
+					nowPlaying = np;
+				})
+				.catch(() => {});
 		} catch (err) {
 			sourceError = err instanceof Error ? err.message : String(err);
+			// Re-sync from server if optimistic flip was wrong.
+			getTransport()
+				.then(applyTransport)
+				.catch(() => {});
 		}
 	}
 
@@ -1506,6 +1531,10 @@
 		}
 	}
 
+	/** Re-armed from setTransport(Play) so idle 3s timers don't delay the next sync. */
+	/** @type {(() => void) | null} */
+	let schedulePollsNow = null;
+
 	onMount(() => {
 		let cancelled = false;
 		/** @type {ReturnType<typeof setTimeout> | undefined} */
@@ -1537,12 +1566,9 @@
 					const t = await getTransport();
 					applyTransport(t);
 					if (t.queue_item_id !== prevQueueId) {
-						const [qs, d] = await Promise.all([
-							getQueueSettings().catch(() => null),
-							listDevices().catch(() => null)
-						]);
+						// Avoid listDevices on the hot path — it used to BT-reconnect under lock.
+						const qs = await getQueueSettings().catch(() => null);
 						if (qs) queueSettings = qs;
-						if (d) devices = d;
 						queue = await listQueue().catch(() => queue);
 					}
 				} catch (err) {
@@ -1575,9 +1601,18 @@
 				}
 			};
 
-			transportTimer = setTimeout(pollTransport, cadence.transportMs);
-			nowPlayingTimer = setTimeout(pollNowPlaying, cadence.nowPlayingMs);
+			// When entering Play, poll transport immediately (not after idle delay).
+			const immediate = transport?.state === 'playing';
+			transportTimer = setTimeout(pollTransport, immediate ? 0 : cadence.transportMs);
+			nowPlayingTimer = setTimeout(
+				pollNowPlaying,
+				immediate ? 50 : cadence.nowPlayingMs
+			);
 		}
+
+		schedulePollsNow = () => {
+			if (!cancelled) scheduleAdaptivePolls();
+		};
 
 		function onVisibility() {
 			if (cancelled) return;
@@ -1624,6 +1659,7 @@
 
 		return () => {
 			cancelled = true;
+			schedulePollsNow = null;
 			clearAdaptivePolls();
 			clearInterval(tickTimer);
 			document.removeEventListener('visibilitychange', onVisibility);

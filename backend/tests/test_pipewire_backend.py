@@ -186,12 +186,8 @@ def test_play_skips_full_graph_when_links_healthy(
 ) -> None:
     """Second Play must not rediscover BT + bounce loopbacks when already linked."""
     monkeypatch.setattr(backend, "_env_dry_run", lambda: False)
-    monkeypatch.setattr(backend, "_feeder_sink_present", lambda: True)
+    backend._feeder_ok = True
     backend._loopback_module_ids = {"sink-1": "10", "sink-2": "11"}
-    for device_id in ("sink-1", "sink-2"):
-        backend._devices[device_id] = backend._devices[device_id].model_copy(
-            update={"connected": True}
-        )
     calls = {"n": 0}
 
     def boom() -> None:
@@ -201,6 +197,24 @@ def test_play_skips_full_graph_when_links_healthy(
     monkeypatch.setattr(backend, "_ensure_graph", boom)
     backend._ensure_play_ready()
     assert calls["n"] == 0
+
+
+def test_play_ready_does_not_shell_pactl_when_cached(
+    backend: PipeWireBackend, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#59 still called pactl list sinks on every Play — that must stay off the hot path."""
+    monkeypatch.setattr(backend, "_env_dry_run", lambda: False)
+    backend._feeder_ok = True
+    backend._loopback_module_ids = {"sink-1": "10", "sink-2": "11"}
+
+    def boom_pactl() -> bool:
+        raise AssertionError("pactl list sinks must not run on Play")
+
+    monkeypatch.setattr(backend, "_feeder_sink_present", boom_pactl)
+    monkeypatch.setattr(
+        backend, "_ensure_graph", lambda *a, **k: (_ for _ in ()).throw(AssertionError())
+    )
+    backend._ensure_play_ready()
 
 
 def test_local_play_pauses_spotify_async(
@@ -235,6 +249,49 @@ def test_local_play_pauses_spotify_async(
     backend._start_player_process()
     assert order == ["stop", "mpv", "pause_async"]
     assert real_async  # keep reference for lint / intent
+
+
+def test_set_transport_playing_defers_turn_and_spp(
+    backend: PipeWireBackend, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Play HTTP must return before turn-taking YAML persist / SPP restart."""
+    order: list[str] = []
+    monkeypatch.setattr(backend, "_ensure_play_ready", lambda: order.append("ready"))
+    monkeypatch.setattr(
+        backend._session,
+        "set_transport",
+        lambda body: (
+            order.append("session"),
+            backend._session.get_transport().model_copy(
+                update={"state": TransportState.PLAYING}
+            ),
+        )[1],
+    )
+
+    def after(transport) -> None:
+        order.append("after")
+
+    monkeypatch.setattr(backend, "_after_play_side_effects", after)
+    # Run side effects inline so we can assert scheduling without a race.
+    started: list[object] = []
+
+    def fake_thread(*, target=None, args=(), kwargs=None, name=None, daemon=None):
+        started.append(name)
+
+        class _T:
+            def start(self_inner) -> None:
+                if target:
+                    target(*(args or ()))
+
+        return _T()
+
+    monkeypatch.setattr(
+        "musync.audio.pipewire.threading.Thread",
+        fake_thread,
+    )
+    backend.set_transport(TransportPut(state=TransportState.PLAYING))
+    assert order == ["ready", "session", "after"]
+    assert "musync-after-play" in started
 
 
 def test_shutdown_tears_down_graph_and_children(
