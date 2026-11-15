@@ -71,10 +71,10 @@ export MUSYNC_BACKEND=pipewire
 
 1. Open `http://<Pi-IP>:8080`
 2. Device setup → enable Qudelix + Phone SPP → Save
-3. **Streaming** → **Connect Spotify** (same-origin link → Spotify authorize →
-   `/api/streaming/spotify/callback` → tokens). MuSync never asks for your
-   Spotify password; Client ID/Secret stay in `~/musync.env`.
-4. Search a track → **Queue & play**
+3. **Streaming** → **Connect Spotify** (OAuth only — same-origin link → Spotify
+   authorize → `/api/streaming/spotify/callback` → tokens). MuSync never asks
+   for your Spotify password; Client ID/Secret stay in `~/musync.env`.
+4. **Queue** → search a track → **Queue & play** (search UI lives on Queue, not Streaming)
 5. Confirm audio on Qudelix / SPP (`Simple Protocol Player` → Pi IP:port)
 
 If the UI says **not configured**, credentials are missing from the process env —

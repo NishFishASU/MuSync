@@ -332,20 +332,52 @@ export const HOST_KINDS = /** @type {const} */ (['phone', 'pc', 'other']);
  * @param {string} path
  * @param {RequestInit} [options]
  */
+/**
+ * Prefer FastAPI `{ detail }` (string or validation array) over bare statusText
+ * so the UI never only shows "Internal Server Error".
+ * @param {unknown} detail
+ * @param {string} fallback
+ */
+function formatApiDetail(detail, fallback) {
+	if (typeof detail === 'string' && detail.trim()) return detail.trim();
+	if (Array.isArray(detail)) {
+		const parts = detail
+			.map((item) => {
+				if (typeof item === 'string') return item;
+				if (item && typeof item === 'object' && 'msg' in item) {
+					const loc = Array.isArray(item.loc) ? item.loc.join('.') : '';
+					return loc ? `${loc}: ${item.msg}` : String(item.msg);
+				}
+				return null;
+			})
+			.filter(Boolean);
+		if (parts.length) return parts.join('; ');
+	}
+	if (detail != null && typeof detail === 'object') {
+		try {
+			return JSON.stringify(detail);
+		} catch {
+			/* ignore */
+		}
+	}
+	return fallback;
+}
+
 export async function api(path, options = {}) {
 	const res = await fetch(path, {
 		headers: { 'Content-Type': 'application/json', ...(options.headers || {}) },
 		...options
 	});
 	if (!res.ok) {
-		let detail = res.statusText;
+		const fallback = res.statusText || `HTTP ${res.status}`;
+		let detail = fallback;
 		try {
 			const body = await res.json();
-			detail = body.detail || detail;
+			detail = formatApiDetail(body?.detail ?? body?.error, fallback);
 		} catch {
-			/* ignore */
+			/* ignore non-JSON error bodies */
 		}
-		throw new Error(typeof detail === 'string' ? detail : JSON.stringify(detail));
+		throw new Error(detail);
 	}
 	if (res.status === 204) return null;
 	return res.json();

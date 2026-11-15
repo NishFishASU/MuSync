@@ -218,14 +218,9 @@ class SpotifyClient:
         # signed-in user is not on the Dashboard allowlist — never 500.
         try:
             profile = self._get_json("/me")
-        except httpx.HTTPStatusError as exc:
+        except ValueError as exc:
             self.logout()
-            raise self._profile_fetch_error(exc) from exc
-        except httpx.RequestError as exc:
-            self.logout()
-            raise ValueError(
-                f"Spotify profile request failed after login — check network and retry Connect. ({exc})"
-            ) from exc
+            raise
         with self._lock:
             self._tokens["display_name"] = profile.get("display_name") or profile.get("id")
             self._save_tokens()
@@ -250,25 +245,48 @@ class SpotifyClient:
             raise ValueError("Connect a Spotify account first")
         data = self._get_json(
             "/search",
-            params={"q": q, "type": "track", "limit": max(1, min(limit, 25))},
+            params={
+                "q": q,
+                "type": "track",
+                "limit": max(1, min(limit, 25)),
+                # Prefer the signed-in user's market so catalog search isn't empty/forbidden.
+                "market": "from_token",
+            },
         )
         items = (data.get("tracks") or {}).get("items") or []
         out: list[SpotifyTrack] = []
         for raw in items:
-            artists = ", ".join(a.get("name", "") for a in (raw.get("artists") or []) if a.get("name"))
-            images = (raw.get("album") or {}).get("images") or []
+            if not isinstance(raw, dict):
+                continue
+            artists = ", ".join(
+                a.get("name", "") for a in (raw.get("artists") or []) if isinstance(a, dict) and a.get("name")
+            )
+            album = raw.get("album") if isinstance(raw.get("album"), dict) else {}
+            images = album.get("images") or []
             cover = None
             if images:
                 # Prefer mid-size art when present.
-                cover = images[min(1, len(images) - 1)].get("url") or images[0].get("url")
+                mid = images[min(1, len(images) - 1)] if isinstance(images[0], dict) else None
+                first = images[0] if isinstance(images[0], dict) else None
+                cover = (mid or {}).get("url") or (first or {}).get("url")
+            track_id = str(raw.get("id") or "").strip()
+            uri = str(raw.get("uri") or (f"spotify:track:{track_id}" if track_id else "")).strip()
+            if not uri:
+                continue
+            duration = raw.get("duration_ms")
+            if duration is not None and not isinstance(duration, int):
+                try:
+                    duration = int(duration)
+                except (TypeError, ValueError):
+                    duration = None
             out.append(
                 SpotifyTrack(
-                    id=raw.get("id") or "",
-                    uri=raw.get("uri") or f"spotify:track:{raw.get('id')}",
-                    title=raw.get("name") or "Track",
+                    id=track_id or uri,
+                    uri=uri,
+                    title=str(raw.get("name") or "Track"),
                     artist=artists or "Unknown",
-                    duration_ms=raw.get("duration_ms"),
-                    album=(raw.get("album") or {}).get("name"),
+                    duration_ms=duration,
+                    album=album.get("name"),
                     preview_url=raw.get("preview_url"),
                     cover_url=cover,
                 )
@@ -601,28 +619,68 @@ class SpotifyClient:
             return f"Spotify token error ({resp.status_code}): {desc}"
         return f"Spotify token error: {resp.status_code} {body_text}"
 
+    def _headers(self) -> dict[str, str]:
+        return {"Authorization": f"Bearer {self._access_token()}"}
+
+    def _get_json(self, path: str, *, params: Optional[dict[str, Any]] = None) -> dict[str, Any]:
+        """GET Spotify Web API JSON — always raises ValueError (never bare HTTP 500)."""
+        try:
+            with httpx.Client(timeout=20.0) as client:
+                resp = client.get(
+                    f"{SPOTIFY_API}{path}", headers=self._headers(), params=params
+                )
+        except httpx.RequestError as exc:
+            raise ValueError(
+                f"Spotify API network error on {path} — check connectivity and retry. ({exc})"
+            ) from exc
+        if resp.status_code >= 400:
+            raise ValueError(self._web_api_error_message(path, resp))
+        try:
+            data = resp.json()
+        except ValueError as exc:
+            raise ValueError(f"Spotify API returned non-JSON on {path}") from exc
+        if not isinstance(data, dict):
+            raise ValueError(f"Spotify API returned unexpected JSON on {path}")
+        return data
+
     @classmethod
-    def _profile_fetch_error(cls, exc: httpx.HTTPStatusError) -> ValueError:
-        status = exc.response.status_code if exc.response is not None else 0
-        detail = cls._spotify_error_detail(exc)
-        if status == 403:
-            return ValueError(
+    def _web_api_error_message(cls, path: str, resp: httpx.Response) -> str:
+        status = resp.status_code
+        detail = cls._spotify_response_detail(resp)
+        if path == "/me" and status == 403:
+            return (
                 "Spotify /me returned 403 Forbidden — this app is likely in development "
                 "mode and your account is not allowlisted. In Spotify Developer Dashboard → "
                 "your app → User Management, add the Spotify email/username you signed in "
                 "with, then Connect again. "
                 f"({detail})"
             )
-        return ValueError(f"Spotify profile fetch failed ({status}): {detail}")
+        if status == 401:
+            return (
+                "Spotify access token rejected — open Streaming → Connect Spotify again. "
+                f"({detail})"
+            )
+        if status == 403:
+            return (
+                "Spotify API forbidden (403) — check Developer Dashboard User Management "
+                f"allowlist and app scopes, then Connect again. ({path}: {detail})"
+            )
+        if path.startswith("/search"):
+            return f"Spotify search failed ({status}): {detail}"
+        return f"Spotify API error on {path} ({status}): {detail}"
 
-    def _headers(self) -> dict[str, str]:
-        return {"Authorization": f"Bearer {self._access_token()}"}
-
-    def _get_json(self, path: str, *, params: Optional[dict[str, Any]] = None) -> dict[str, Any]:
-        with httpx.Client(timeout=20.0) as client:
-            resp = client.get(f"{SPOTIFY_API}{path}", headers=self._headers(), params=params)
-            resp.raise_for_status()
-            return resp.json()
+    @staticmethod
+    def _spotify_response_detail(resp: httpx.Response) -> str:
+        try:
+            body = resp.json()
+            err = body.get("error") or {}
+            if isinstance(err, dict):
+                return str(err.get("message") or body)[:240]
+            if err:
+                return str(err)[:240]
+            return str(body)[:240]
+        except Exception:  # noqa: BLE001
+            return (resp.text or f"HTTP {resp.status_code}")[:240]
 
     def _put_json(
         self,
