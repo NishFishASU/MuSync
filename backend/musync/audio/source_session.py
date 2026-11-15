@@ -10,6 +10,7 @@ from typing import Callable, Optional
 from ..config import DEMO_DURATION_MS, PLACEHOLDER_SOURCES, discover_local_sources
 from ..models import (
     PLAYABLE_SOURCE_TYPES,
+    MediaKind,
     QueueItem,
     QueueItemCreate,
     QueueItemPatch,
@@ -227,6 +228,7 @@ class SourceSession:
             available=playable,
             note=note,
             duration_ms=src.duration_ms,
+            media_kind=src.media_kind if src.type == SourceType.LOCAL else MediaKind.AUDIO,
         )
 
     def _require_input(self, input_id: Optional[str]) -> None:
@@ -327,6 +329,11 @@ class SourceSession:
         self._transport.input_id = item.input_id
         self._transport.title = item.title
         self._transport.duration_ms = item.duration_ms or 0
+        self._transport.media_kind = (
+            item.media_kind
+            if item.source_type == SourceType.LOCAL and not item.input_id
+            else MediaKind.AUDIO
+        )
         if reset_position:
             self._transport.position_ms = 0
             self._play_started_wall = None
@@ -376,6 +383,7 @@ class SourceSession:
         source_id = body.source_id
         input_id = body.input_id
         duration_ms = body.duration_ms
+        media_kind = body.media_kind
         type_explicit = "source_type" in body.model_fields_set
 
         if src is not None:
@@ -393,6 +401,8 @@ class SourceSession:
                 duration_ms = src.duration_ms
             if input_id is None:
                 input_id = src.input_id
+            if media_kind is None:
+                media_kind = src.media_kind
 
         # Live input / host-bound streaming must name a registered phone/PC.
         if source_type == SourceType.INPUT and not input_id:
@@ -445,6 +455,11 @@ class SourceSession:
             playable = True
             note = "Virtual demo track"
 
+        if media_kind is None:
+            media_kind = MediaKind.AUDIO
+        if source_type != SourceType.LOCAL or input_id:
+            media_kind = MediaKind.AUDIO
+
         return QueueItem(
             id=self._next_queue_id(),
             title=title,
@@ -455,6 +470,7 @@ class SourceSession:
             input_id=input_id,
             available=playable,
             note=note,
+            media_kind=media_kind,
             # Live capture is open-ended (duration 0). Virtual demos invent a length.
             duration_ms=(
                 0
@@ -492,6 +508,8 @@ class SourceSession:
                 data["input_id"] = src.input_id
             if src.duration_ms is not None:
                 data["duration_ms"] = src.duration_ms
+            if "media_kind" not in updates:
+                data["media_kind"] = src.media_kind
 
         data.update(
             {
@@ -503,6 +521,8 @@ class SourceSession:
 
         source_type = SourceType(data["source_type"])
         input_id = data.get("input_id")
+        if source_type != SourceType.LOCAL or input_id:
+            data["media_kind"] = MediaKind.AUDIO
         if source_type == SourceType.INPUT and not input_id:
             hosts = self._inputs.list_hosts()
             if not hosts:
@@ -703,6 +723,7 @@ class SourceSession:
                     self._transport.input_id = None
                     self._transport.title = None
                     self._transport.duration_ms = 0
+                    self._transport.media_kind = None
             del item  # noqa: F841 — clarify we looked it up
 
     def clear_input_bindings(self, host_id: str) -> None:

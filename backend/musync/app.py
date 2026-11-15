@@ -12,7 +12,7 @@ from fastapi.staticfiles import StaticFiles
 
 from . import __version__
 from .audio import AudioBackend, create_backend
-from .config import media_library_path, web_root
+from .config import media_library_path, resolve_media_file, web_root
 from .models import (
     ActiveQueuePut,
     ActiveSourcePut,
@@ -125,6 +125,21 @@ def api_list_sources() -> list[Source]:
 def api_set_active_source(body: ActiveSourcePut) -> Transport:
     """Pick a catalog source; creates/reuses a queue item. Sinks stay up."""
     return backend.set_active_source(body.id)
+
+
+@app.get("/api/media/{rel_path:path}")
+def api_get_media(rel_path: str) -> FileResponse:
+    """Serve a hub-local media file for optional muted video preview in the UI.
+
+    Audio for sinks still comes from mpv → musync_feeder, not this response.
+    """
+    try:
+        path = resolve_media_file(rel_path)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return FileResponse(path)
 
 
 @app.get("/api/queue", response_model=list[QueueItem])

@@ -160,6 +160,7 @@ You do **not** need to hand-edit `devices.yaml` MACs — the web UI discovers sp
 ```bash
 export MUSYNC_BACKEND=pipewire
 cp /path/to/track.flac media/
+cp /path/to/clip.mp4 media/   # optional — audio → musync_feeder; muted preview in UI
 # stop any old MuSync/ffmpeg listen on :1234 first
 ./scripts/run_pi.sh
 # UI: http://<pi-lan-ip>:8080
@@ -173,7 +174,7 @@ Missing or broken `devices.yaml` is fine — MuSync boots with **Phone SPP** def
 2. **Refresh discovery** — Qudelix (and other bluez remotes) appear by friendly name.
 3. Enable the BT sink(s) you want; enable **Phone SPP** and set host/port/rate/channels.
 4. **Save sinks** — writes `config/devices.yaml` atomically (MAC filled from discovery).
-5. Play a hub-local track. Phone Simple Protocol Player → Pi IP:`port`, matching rate/channels s16le.
+5. Play a hub-local audio or video file (Catalog). Phone Simple Protocol Player → Pi IP:`port`, matching rate/channels s16le.
 
 Graph details: [docs/pi-pipewire.md](docs/pi-pipewire.md). SPP details: [docs/spp-network-sink.md](docs/spp-network-sink.md).
 
@@ -218,7 +219,8 @@ sudo systemctl enable --now musync
 
 ## Out of scope (this MVP)
 
-Spotify / Apple Music, phone/PC network inputs, movie/HDMI capture, HDMI-local UI, Uno Q / Grove, wired outs, guided clap calibration.
+HDMI capture / lip-sync picture path, HDMI-local UI, Uno Q / Grove, wired outs, guided clap calibration.
+(Local video audio → feeder is supported; Spotify / Apple / phone-PC capture land as they are wired.)
 
 ## License
 

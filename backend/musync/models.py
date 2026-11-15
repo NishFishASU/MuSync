@@ -136,6 +136,13 @@ class SourceType(str, Enum):
     INPUT = "input"
 
 
+class MediaKind(str, Enum):
+    """Hub-local file kind — video audio still fans out via musync_feeder."""
+
+    AUDIO = "audio"
+    VIDEO = "video"
+
+
 class CapturePath(str, Enum):
     """How a phone/PC feeds the Pi."""
 
@@ -173,6 +180,8 @@ class Source(BaseModel):
     duration_ms: Optional[int] = None
     # Which registered phone/PC this catalog row belongs to (None = hub library).
     input_id: Optional[str] = None
+    # audio | video for hub-local library rows (ignored for stream/input stubs).
+    media_kind: MediaKind = MediaKind.AUDIO
 
 
 class InputHost(BaseModel):
@@ -254,6 +263,7 @@ class QueueItem(BaseModel):
     available: bool = True
     note: Optional[str] = None
     duration_ms: Optional[int] = None
+    media_kind: MediaKind = MediaKind.AUDIO
 
 
 class QueueItemCreate(BaseModel):
@@ -266,6 +276,7 @@ class QueueItemCreate(BaseModel):
     path: Optional[str] = None
     input_id: Optional[str] = None
     duration_ms: Optional[int] = None
+    media_kind: Optional[MediaKind] = None
 
 
 class QueueItemPatch(BaseModel):
@@ -277,6 +288,7 @@ class QueueItemPatch(BaseModel):
     source_id: Optional[str] = None
     path: Optional[str] = None
     input_id: Optional[str] = None
+    media_kind: Optional[MediaKind] = None
 
 
 class Transport(BaseModel):
@@ -288,6 +300,7 @@ class Transport(BaseModel):
     source_type: Optional[SourceType] = None
     input_id: Optional[str] = None
     title: Optional[str] = None
+    media_kind: Optional[MediaKind] = None
 
 
 class TransportPut(BaseModel):

@@ -908,9 +908,10 @@ class PipeWireBackend(AudioBackend):
                 proc.kill()
 
     def _start_mpv_into_feeder(self, path: str, *, position_ms: int = 0) -> None:
+        """Play local audio or video into the feeder (video: audio-only via --no-video)."""
         if self._env_dry_run():
             log.info(
-                "Dry-run playback: mpv --ao=pipewire --audio-device=%s %s",
+                "Dry-run playback: mpv --no-video --ao=pipewire --audio-device=%s %s",
                 self._feeder,
                 path,
             )
@@ -919,6 +920,7 @@ class PipeWireBackend(AudioBackend):
         pw_play = self._tools["pw-play"]
         try:
             if mpv:
+                # --no-video: extract audio from video containers into musync_feeder.
                 self._player_proc = subprocess.Popen(
                     [
                         mpv,

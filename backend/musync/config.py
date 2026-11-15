@@ -1,4 +1,4 @@
-"""Load / save YAML device profiles and discover local audio sources."""
+"""Load / save YAML device profiles and discover local audio/video sources."""
 
 from __future__ import annotations
 
@@ -19,6 +19,7 @@ from .models import (
     Device,
     DeviceConfigEntry,
     DeviceKind,
+    MediaKind,
     Source,
     SourceType,
 )
@@ -29,6 +30,8 @@ log = logging.getLogger(__name__)
 DEMO_DURATION_MS = 180_000
 
 AUDIO_EXTENSIONS = {".wav", ".flac", ".mp3", ".ogg", ".m4a", ".aac"}
+VIDEO_EXTENSIONS = {".mp4", ".mkv", ".webm", ".mov", ".m4v", ".avi"}
+LOCAL_MEDIA_EXTENSIONS = AUDIO_EXTENSIONS | VIDEO_EXTENSIONS
 
 # Always-on SPP template — UI can enable/configure without copying YAML.
 DEFAULT_SPP_DEVICE: dict[str, Any] = {
@@ -462,7 +465,8 @@ def probe_audio_duration_ms(path: Path | str) -> Optional[int]:
     """Return media duration in ms, or None if probing fails.
 
     Prefers stdlib ``wave`` for ``.wav``, then ``ffprobe`` when installed
-    (common on Pi with ffmpeg). Does not invent a stub length for real files.
+    (common on Pi with ffmpeg). Works for audio and video containers.
+    Does not invent a stub length for real files.
     """
     p = Path(path)
     if not p.is_file():
@@ -474,19 +478,55 @@ def probe_audio_duration_ms(path: Path | str) -> Optional[int]:
     return _probe_ffprobe_duration_ms(p)
 
 
+def media_kind_for_path(path: Path | str) -> MediaKind:
+    suffix = Path(path).suffix.lower()
+    if suffix in VIDEO_EXTENSIONS:
+        return MediaKind.VIDEO
+    return MediaKind.AUDIO
+
+
+def resolve_media_file(rel_path: str, *, media_dir: Path | None = None) -> Path:
+    """Resolve a relative path under the media library (no path traversal)."""
+    root = (media_dir or media_library_path()).resolve()
+    cleaned = rel_path.strip().lstrip("/")
+    if not cleaned or cleaned.startswith("..") or "/../" in f"/{cleaned}/":
+        raise ValueError("Invalid media path")
+    candidate = (root / cleaned).resolve()
+    try:
+        candidate.relative_to(root)
+    except ValueError as exc:
+        raise ValueError("Media path escapes library root") from exc
+    if not candidate.is_file():
+        raise FileNotFoundError(f"Media not found: {cleaned}")
+    if candidate.suffix.lower() not in LOCAL_MEDIA_EXTENSIONS:
+        raise ValueError(f"Unsupported media type: {candidate.suffix}")
+    return candidate
+
+
 def discover_local_sources(media_dir: Path | None = None) -> list[Source]:
+    """Discover hub-local audio and video files under ``media/``.
+
+    Video rows stay ``type=local``; audio is extracted by mpv ``--no-video``
+    into ``musync_feeder`` (same fan-out as audio tracks).
+    """
     root = media_dir or media_library_path()
     sources: list[Source] = []
     if not root.is_dir():
         return sources
 
     for path in sorted(root.rglob("*")):
-        if not path.is_file() or path.suffix.lower() not in AUDIO_EXTENSIONS:
+        if not path.is_file() or path.suffix.lower() not in LOCAL_MEDIA_EXTENSIONS:
             continue
         rel = path.relative_to(root)
         source_id = f"local:{rel.as_posix()}"
         resolved = str(path.resolve())
+        kind = media_kind_for_path(path)
         duration_ms = probe_audio_duration_ms(path)
+        note = (
+            "Local video — audio → musync_feeder; optional muted preview in UI"
+            if kind == MediaKind.VIDEO
+            else None
+        )
         sources.append(
             Source(
                 id=source_id,
@@ -496,6 +536,8 @@ def discover_local_sources(media_dir: Path | None = None) -> list[Source]:
                 locator=resolved,
                 available=True,
                 duration_ms=duration_ms,
+                media_kind=kind,
+                note=note,
             )
         )
     return sources

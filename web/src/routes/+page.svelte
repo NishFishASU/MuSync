@@ -32,6 +32,7 @@
 		putTransport,
 		saveWifiNetwork,
 		searchStreaming,
+		mediaPreviewUrl,
 		setActiveQueueItem,
 		setActiveSource,
 		sourceTypeLabel,
@@ -117,6 +118,18 @@
 	/** Play disabled only when the active cue is not ready (stubs / unbound live). */
 	const activeIsStub = $derived(Boolean(activeQueueItem && !activeQueueItem.available));
 	const liveHosts = $derived(inputs.filter((h) => h.connected && h.endpoint));
+	const activeIsVideo = $derived(
+		Boolean(
+			transport?.media_kind === 'video' ||
+				(activeQueueItem?.media_kind === 'video' && activeQueueItem?.source_type === 'local')
+		)
+	);
+	const activeVideoUrl = $derived(
+		activeIsVideo ? mediaPreviewUrl(transport?.source_id || activeQueueItem?.source_id) : null
+	);
+
+	/** @type {HTMLVideoElement | null} */
+	let videoPreviewEl = $state(null);
 
 	/**
 	 * @param {import('$lib/api.js').Transport} t
@@ -142,6 +155,37 @@
 		if (duration > 0) return Math.min(duration, next);
 		return next;
 	}
+
+	/** Keep muted HTML preview roughly in sync with feeder transport (audio is mpv → sinks). */
+	function syncVideoPreview() {
+		const el = videoPreviewEl;
+		if (!el || !activeVideoUrl) return;
+		const targetSec = displayedPositionMs() / 1000;
+		if (Number.isFinite(el.duration) && el.duration > 0) {
+			const clamped = Math.min(el.duration, Math.max(0, targetSec));
+			if (Math.abs(el.currentTime - clamped) > 0.45) {
+				try {
+					el.currentTime = clamped;
+				} catch {
+					/* seek before metadata */
+				}
+			}
+		}
+		if (transport?.state === 'playing') {
+			el.play().catch(() => {});
+		} else {
+			el.pause();
+		}
+	}
+
+	$effect(() => {
+		// Depend on transport + scrub for preview sync.
+		void transport?.state;
+		void transport?.position_ms;
+		void scrubValue;
+		void activeVideoUrl;
+		syncVideoPreview();
+	});
 	const healthLabel = $derived.by(() => {
 		if (apiError) return 'API offline';
 		if (!health) return '…';
@@ -759,6 +803,9 @@
 				{#if transport?.source_type}
 					<span class="type-chip">{sourceTypeLabel(transport.source_type)}</span>
 				{/if}
+				{#if activeIsVideo}
+					<span class="type-chip">Video</span>
+				{/if}
 			</p>
 		</div>
 		{#if activeIsStub}
@@ -775,6 +822,19 @@
 		{/if}
 		{#if sourceError}
 			<p class="stub-banner warn" role="alert">{sourceError}</p>
+		{/if}
+		{#if activeVideoUrl}
+			<div class="video-preview">
+				<video
+					bind:this={videoPreviewEl}
+					src={activeVideoUrl}
+					muted
+					playsinline
+					preload="metadata"
+					aria-label="Muted video preview — audio plays on MuSync sinks"
+				></video>
+				<p class="hint">Muted preview · audio → musync_feeder / sinks</p>
+			</div>
 		{/if}
 		<div class="transport-controls">
 			<button
@@ -1364,7 +1424,12 @@
 				{#each queue as item (item.id)}
 					<li class="queue-row queue-row-host" class:active={item.id === activeQueueId}>
 						<button type="button" class="queue-main" onclick={() => chooseQueueItem(item.id)}>
-							<span class="source-title">{item.title}</span>
+							<span class="source-title">
+								{item.title}
+								{#if item.media_kind === 'video'}
+									<span class="type-chip">Video</span>
+								{/if}
+							</span>
 							<span class="source-sub">
 								{#if item.input_id}
 									{hostName(item.input_id)}
@@ -1433,7 +1498,7 @@
 		<section class="panel sources-panel" aria-labelledby="sources-heading">
 			<div class="panel-head">
 				<h2 id="sources-heading">Catalog</h2>
-				<p class="hint">Local files · live links · stubs</p>
+				<p class="hint">Local audio/video under media/ · live · stubs</p>
 			</div>
 			<div class="catalog-grid">
 				{#each SOURCE_TYPES as type}
@@ -1451,7 +1516,12 @@
 										onclick={() => chooseSource(s.id)}
 									>
 										<span>
-											<span class="source-title">{s.title}</span>
+											<span class="source-title">
+												{s.title}
+												{#if s.media_kind === 'video'}
+													<span class="type-chip">Video</span>
+												{/if}
+											</span>
 											{#if s.id === transport?.source_id || s.note}
 												<span class="source-sub">
 													{s.id === transport?.source_id ? 'active' : ''}{s.id === transport?.source_id &&
@@ -1467,7 +1537,9 @@
 									</button>
 								</li>
 							{:else}
-								<li class="empty-group">None</li>
+								<li class="empty-group">
+									{type === 'local' ? 'Drop files in media/ (wav/flac/mp3/mp4/…)' : 'None'}
+								</li>
 							{/each}
 						</ul>
 					</div>

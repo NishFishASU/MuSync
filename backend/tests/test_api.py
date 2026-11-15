@@ -192,3 +192,17 @@ def test_static_asset_smoke(client: TestClient) -> None:
     asset = client.get(asset_path)
     assert asset.status_code == 200
     assert len(asset.content) > 0
+
+
+def test_media_file_served_for_video_preview(client: TestClient, tmp_path) -> None:
+    media = tmp_path / "media"
+    media.mkdir(parents=True, exist_ok=True)
+    clip = media / "preview.mp4"
+    clip.write_bytes(b"fake-video-bytes")
+    ok = client.get("/api/media/preview.mp4")
+    assert ok.status_code == 200
+    assert ok.content == b"fake-video-bytes"
+    missing = client.get("/api/media/nope.mp4")
+    assert missing.status_code == 404
+    escape = client.get("/api/media/../README.md")
+    assert escape.status_code in {400, 404}
