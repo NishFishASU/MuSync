@@ -1,0 +1,20 @@
+{
+  "name": "musync-queue-grokbot",
+  "private": true,
+  "type": "module",
+  "description": "Agent SDK Grokbot: natural-language MuSync queue search/play via Pi FastAPI",
+  "scripts": {
+    "check": "tsc --noEmit",
+    "dev": "npx --yes @grok/agent-sdk@0.6.0 dev",
+    "validate": "npx --yes @grok/agent-sdk@0.6.0 validate --dir .",
+    "smoke-tools": "npx --yes @grok/agent-sdk@0.6.0 tool call hub_health --dir . --json"
+  },
+  "dependencies": {
+    "@grok/agent-sdk": "^0.6.0",
+    "zod": "^4.6.5"
+  },
+  "devDependencies": {
+    "@types/node": "^22.14.0",
+    "typescript": "6.0.3"
+  }
+}
