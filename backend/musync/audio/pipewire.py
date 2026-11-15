@@ -54,15 +54,21 @@ from typing import Optional
 from ..config import (
     clamp_delay_ms,
     clamp_volume,
-    load_devices,
+    default_spp_device,
+    devices_config_path,
+    load_devices_result,
     repo_root,
+    resolve_devices_from_config,
     save_devices,
     validate_devices,
 )
 from ..models import (
     Device,
+    DeviceConfigEntry,
+    DeviceDiscoverResponse,
     DeviceKind,
     DevicePatch,
+    DiscoveredBluetoothSink,
     Health,
     InputHost,
     InputHostCreate,
@@ -82,8 +88,10 @@ from .pw_tools import (
     GraphPlan,
     PwNode,
     build_sink_commands,
+    discover_bluetooth_remotes,
     discover_nodes,
     find_musync_loopback_ids,
+    friendly_bluez_label,
     match_device_node,
     normalize_mac,
     run_cmd,
@@ -104,7 +112,16 @@ class PipeWireBackend(AudioBackend):
 
     def __init__(self, devices: Optional[list[Device]] = None) -> None:
         self._lock = threading.RLock()
-        loaded = devices if devices is not None else load_devices()
+        if devices is not None:
+            loaded = devices
+            self._config_ok = True
+            self._config_detail = "injected devices"
+        else:
+            loaded, self._config_ok, self._config_detail = load_devices_result(
+                backend="pipewire"
+            )
+            if not self._config_ok:
+                log.warning("devices.yaml: %s", self._config_detail)
         validate_devices(loaded)
         self._devices: dict[str, Device] = {
             d.id: d.model_copy(deep=True) for d in loaded
@@ -122,6 +139,7 @@ class PipeWireBackend(AudioBackend):
         self._loopback_module_ids: dict[str, str] = {}
         self._last_plan: Optional[GraphPlan] = None
         self._discovered: list[PwNode] = []
+        self._bt_remotes_by_mac: dict = {}
         self._player_proc: Optional[subprocess.Popen[str]] = None
         self._spp_procs: dict[str, subprocess.Popen[str]] = {}
 
@@ -197,8 +215,19 @@ class PipeWireBackend(AudioBackend):
             wpctl=self._tools["wpctl"],
             pw_cli=self._tools["pw-cli"],
         )
+        remotes, bt_detail = discover_bluetooth_remotes(
+            bluetoothctl=self._tools["bluetoothctl"],
+        )
         self._discovered = nodes
-        log.info("Sink discovery: %s", detail)
+        self._bt_remotes_by_mac = {normalize_mac(r.mac): r for r in remotes if r.mac}
+        log.info("Sink discovery: %s; %s", detail, bt_detail)
+
+        # Fill friendly names onto bluez nodes from bluetoothctl when possible.
+        for node in nodes:
+            if node.mac and not node.description:
+                remote = self._bt_remotes_by_mac.get(normalize_mac(node.mac))
+                if remote and remote.name:
+                    node.description = remote.name
 
         mapped: dict[str, str] = {}
         for device in self._devices.values():
@@ -210,13 +239,16 @@ class PipeWireBackend(AudioBackend):
                 hci=device.hci,
                 pw_node_override=device.pw_node or self._pw_node_ids.get(device.id, ""),
                 nodes=nodes,
+                name=device.name,
             )
             if node:
                 self._pw_node_ids[device.id] = node.id
                 self._pw_node_names[device.id] = node.name
                 mapped[device.id] = node.id
-                # Reflect link state when we can see the node.
-                if device.mac or device.pw_node:
+                # Auto-fill MAC from discovery when UI saved by name only.
+                if node.mac and not device.mac:
+                    device.mac = normalize_mac(node.mac)
+                if device.mac or device.pw_node or device.name:
                     device.connected = True
             else:
                 # Keep manual override ids even if not currently visible.
@@ -231,6 +263,93 @@ class PipeWireBackend(AudioBackend):
                     if not device.pw_node:
                         device.connected = False
         return mapped
+
+    def _discovery_maps(self) -> tuple[dict, dict, list[DiscoveredBluetoothSink], str]:
+        """Build name/mac lookup maps + UI discovery rows from bluez + remotes."""
+        nodes, detail = discover_nodes(
+            wpctl=self._tools["wpctl"],
+            pw_cli=self._tools["pw-cli"],
+        )
+        remotes, bt_detail = discover_bluetooth_remotes(
+            bluetoothctl=self._tools["bluetoothctl"],
+        )
+        remotes_by_mac = {normalize_mac(r.mac): r for r in remotes if r.mac}
+        self._discovered = nodes
+        self._bt_remotes_by_mac = remotes_by_mac
+
+        by_name: dict = {}
+        by_mac: dict = {}
+        rows: list[DiscoveredBluetoothSink] = []
+        seen_macs: set[str] = set()
+
+        configured_by_name = {
+            d.name.strip().lower(): d.id
+            for d in self._devices.values()
+            if d.kind == DeviceKind.BLUETOOTH and d.name.strip()
+        }
+        configured_by_mac = {
+            normalize_mac(d.mac): d.id
+            for d in self._devices.values()
+            if d.kind == DeviceKind.BLUETOOTH and d.mac.strip()
+        }
+
+        bluez_nodes = [n for n in nodes if n.mac or "bluez" in n.name.lower()]
+        for node in bluez_nodes:
+            label = friendly_bluez_label(node, remotes_by_mac)
+            mac = normalize_mac(node.mac) if node.mac else ""
+            remote = remotes_by_mac.get(mac) if mac else None
+            hint = {
+                "mac": mac,
+                "pw_node": node.id,
+                "pw_name": node.name,
+                "hci": "",
+                "connected": True,
+            }
+            by_name[label.lower()] = hint
+            if mac:
+                by_mac[mac] = hint
+                seen_macs.add(mac)
+            cfg = configured_by_name.get(label.lower()) or (
+                configured_by_mac.get(mac) if mac else None
+            )
+            rows.append(
+                DiscoveredBluetoothSink(
+                    name=label,
+                    mac=mac,
+                    pw_node=node.id,
+                    pw_name=node.name,
+                    paired=bool(remote.paired) if remote else True,
+                    connected=True,
+                    configured_id=cfg,
+                )
+            )
+
+        # Paired remotes not yet visible as PipeWire sinks (offer by name anyway).
+        for remote in remotes:
+            mac = normalize_mac(remote.mac)
+            if mac in seen_macs:
+                continue
+            hint = {
+                "mac": mac,
+                "pw_node": "",
+                "pw_name": "",
+                "hci": "",
+                "connected": remote.connected,
+            }
+            by_name[remote.name.lower()] = hint
+            by_mac[mac] = hint
+            cfg = configured_by_name.get(remote.name.lower()) or configured_by_mac.get(mac)
+            rows.append(
+                DiscoveredBluetoothSink(
+                    name=remote.name or f"BT {mac}",
+                    mac=mac,
+                    paired=remote.paired,
+                    connected=remote.connected,
+                    configured_id=cfg,
+                )
+            )
+
+        return by_name, by_mac, rows, f"{detail}; {bt_detail}"
 
     def _ensure_feeder_commands(self) -> list[list[str]]:
         pactl = self._tools["pactl"]
@@ -691,6 +810,55 @@ class PipeWireBackend(AudioBackend):
                     self._ensure_graph(only_device=device_id)
 
             return updated.model_copy(deep=True)
+
+    def discover_device_setup(self) -> DeviceDiscoverResponse:
+        with self._lock:
+            _by_name, _by_mac, rows, detail = self._discovery_maps()
+            spp = next(
+                (d for d in self._devices.values() if d.kind == DeviceKind.NETWORK_SPP),
+                default_spp_device(),
+            )
+            path = devices_config_path()
+            return DeviceDiscoverResponse(
+                bluetooth=rows,
+                spp_default=spp.model_copy(deep=True),
+                config_path=str(path),
+                config_ok=self._config_ok,
+                config_detail=self._config_detail,
+                detail=detail,
+            )
+
+    def apply_devices_config(self, entries: list[DeviceConfigEntry]) -> list[Device]:
+        with self._lock:
+            by_name, by_mac, _rows, _detail = self._discovery_maps()
+            # Stop SPP listeners that may be removed.
+            old_spp = {
+                d.id for d in self._devices.values() if d.kind == DeviceKind.NETWORK_SPP
+            }
+            resolved = resolve_devices_from_config(
+                entries,
+                existing=list(self._devices.values()),
+                discovery_by_name=by_name,
+                discovery_by_mac=by_mac,
+            )
+            new_ids = {d.id for d in resolved}
+            for spp_id in old_spp - new_ids:
+                self._stop_spp_listener(spp_id)
+            self._devices = {d.id: d.model_copy(deep=True) for d in resolved}
+            self._pw_node_ids = {
+                d.id: d.pw_node
+                for d in self._devices.values()
+                if d.pw_node and d.kind == DeviceKind.BLUETOOTH
+            }
+            self._persist()
+            self._config_ok = True
+            self._config_detail = f"saved {len(resolved)} sinks via UI"
+            try:
+                self.refresh_sink_map()
+                self._ensure_graph()
+            except Exception as exc:  # noqa: BLE001
+                log.warning("Graph refresh after config apply failed: %s", exc)
+            return [d.model_copy(deep=True) for d in self._devices.values()]
 
     def get_transport(self) -> Transport:
         return self._session.get_transport()

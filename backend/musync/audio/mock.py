@@ -5,11 +5,23 @@ from __future__ import annotations
 import threading
 from typing import Optional
 
-from ..config import clamp_delay_ms, clamp_volume, load_devices, save_devices, validate_devices
+from ..config import (
+    clamp_delay_ms,
+    clamp_volume,
+    default_spp_device,
+    devices_config_path,
+    load_devices,
+    resolve_devices_from_config,
+    save_devices,
+    validate_devices,
+)
 from ..models import (
     Device,
+    DeviceConfigEntry,
+    DeviceDiscoverResponse,
     DeviceKind,
     DevicePatch,
+    DiscoveredBluetoothSink,
     Health,
     InputHost,
     InputHostCreate,
@@ -21,6 +33,28 @@ from ..models import (
     Transport,
     TransportPut,
 )
+
+# Laptop/dev discovery fixtures — friendly names, no real bluez.
+_MOCK_DISCOVERED = [
+    DiscoveredBluetoothSink(
+        name="Qudelix-5K",
+        mac="AA:BB:CC:DD:EE:01",
+        pw_node="48",
+        pw_name="bluez_output.AA_BB_CC_DD_EE_01.1",
+        hci="hci0",
+        paired=True,
+        connected=True,
+    ),
+    DiscoveredBluetoothSink(
+        name="Kitchen Speaker",
+        mac="AA:BB:CC:DD:EE:02",
+        pw_node="49",
+        pw_name="bluez_output.AA_BB_CC_DD_EE_02.1",
+        hci="hci1",
+        paired=True,
+        connected=True,
+    ),
+]
 from .base import AudioBackend
 from .input_registry import InputRegistry
 from .source_session import SourceSession
@@ -33,11 +67,13 @@ class MockAudioBackend(AudioBackend):
 
     def __init__(self, devices: Optional[list[Device]] = None) -> None:
         self._lock = threading.RLock()
-        loaded = devices if devices is not None else load_devices()
+        loaded = devices if devices is not None else load_devices(backend="mock")
         validate_devices(loaded)
         self._devices: dict[str, Device] = {
             d.id: d.model_copy(deep=True) for d in loaded
         }
+        self._config_ok = True
+        self._config_detail = "mock"
 
         # Feeder callbacks are no-ops: mock has no PipeWire graph to preserve.
         self._inputs = InputRegistry(lock=self._lock)
@@ -81,6 +117,62 @@ class MockAudioBackend(AudioBackend):
             self._devices[device_id] = updated
             self._persist()
             return updated.model_copy(deep=True)
+
+    def discover_device_setup(self) -> DeviceDiscoverResponse:
+        with self._lock:
+            configured = {
+                d.name.strip().lower(): d.id
+                for d in self._devices.values()
+                if d.kind == DeviceKind.BLUETOOTH and d.name.strip()
+            }
+            also_mac = {
+                d.mac.strip().upper(): d.id
+                for d in self._devices.values()
+                if d.kind == DeviceKind.BLUETOOTH and d.mac.strip()
+            }
+            bluetooth: list[DiscoveredBluetoothSink] = []
+            for item in _MOCK_DISCOVERED:
+                cfg = configured.get(item.name.lower()) or also_mac.get(item.mac.upper())
+                bluetooth.append(item.model_copy(update={"configured_id": cfg}))
+            spp = next(
+                (d for d in self._devices.values() if d.kind == DeviceKind.NETWORK_SPP),
+                default_spp_device(),
+            )
+            path = devices_config_path()
+            return DeviceDiscoverResponse(
+                bluetooth=bluetooth,
+                spp_default=spp.model_copy(deep=True),
+                config_path=str(path),
+                config_ok=self._config_ok,
+                config_detail=self._config_detail,
+                detail="mock discovery — Qudelix-5K + Kitchen Speaker fixtures",
+            )
+
+    def apply_devices_config(self, entries: list[DeviceConfigEntry]) -> list[Device]:
+        with self._lock:
+            by_name = {
+                d.name.lower(): {
+                    "mac": d.mac,
+                    "pw_node": d.pw_node,
+                    "hci": d.hci,
+                    "connected": d.connected,
+                }
+                for d in _MOCK_DISCOVERED
+            }
+            by_mac = {
+                d.mac.upper(): by_name[d.name.lower()]
+                for d in _MOCK_DISCOVERED
+                if d.mac
+            }
+            resolved = resolve_devices_from_config(
+                entries,
+                existing=list(self._devices.values()),
+                discovery_by_name=by_name,
+                discovery_by_mac=by_mac,
+            )
+            self._devices = {d.id: d.model_copy(deep=True) for d in resolved}
+            self._persist()
+            return [d.model_copy(deep=True) for d in self._devices.values()]
 
     def get_transport(self) -> Transport:
         return self._session.get_transport()

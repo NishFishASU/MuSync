@@ -260,14 +260,106 @@ def discover_nodes(
     return [], detail
 
 
+@dataclass
+class BtRemote:
+    """A bluetoothctl-known remote (paired / connected speaker)."""
+
+    mac: str
+    name: str
+    paired: bool = False
+    connected: bool = False
+
+
+def parse_bluetoothctl_devices(text: str) -> list[BtRemote]:
+    """Parse ``bluetoothctl devices`` lines: ``Device AA:BB:… Name``."""
+    remotes: list[BtRemote] = []
+    line_re = re.compile(
+        r"^Device\s+([0-9A-Fa-f]{2}(?::[0-9A-Fa-f]{2}){5})\s+(.+)$"
+    )
+    for raw in text.splitlines():
+        m = line_re.match(raw.strip())
+        if not m:
+            continue
+        remotes.append(
+            BtRemote(mac=normalize_mac(m.group(1)), name=m.group(2).strip())
+        )
+    return remotes
+
+
+def parse_bluetoothctl_info(text: str) -> dict[str, str]:
+    """Best-effort key/value parse of ``bluetoothctl info <mac>``."""
+    info: dict[str, str] = {}
+    for raw in text.splitlines():
+        line = raw.strip()
+        if ":" not in line:
+            continue
+        key, _, val = line.partition(":")
+        info[key.strip().lower()] = val.strip()
+    return info
+
+
+def discover_bluetooth_remotes(
+    *,
+    bluetoothctl: Optional[str],
+) -> tuple[list[BtRemote], str]:
+    """List paired/known BT remotes with friendly names (no MAC typing needed)."""
+    if not bluetoothctl:
+        return [], "bluetoothctl missing"
+    try:
+        proc = run_cmd([bluetoothctl, "devices"], timeout=4.0)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return [], f"bluetoothctl devices error: {exc}"
+    if proc.returncode != 0:
+        return [], (proc.stderr or proc.stdout or "bluetoothctl devices failed").strip()
+
+    remotes = parse_bluetoothctl_devices(proc.stdout or "")
+    # Enrich paired/connected flags when cheap.
+    for remote in remotes:
+        try:
+            info_proc = run_cmd(
+                [bluetoothctl, "info", remote.mac], timeout=3.0
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            continue
+        if info_proc.returncode != 0:
+            continue
+        info = parse_bluetoothctl_info(info_proc.stdout or "")
+        name = info.get("name") or info.get("alias")
+        if name:
+            remote.name = name
+        paired = info.get("paired", "").lower()
+        connected = info.get("connected", "").lower()
+        remote.paired = paired in {"yes", "true", "1"}
+        remote.connected = connected in {"yes", "true", "1"}
+    return remotes, f"bluetoothctl → {len(remotes)} remotes"
+
+
+def friendly_bluez_label(node: PwNode, remotes_by_mac: dict[str, BtRemote]) -> str:
+    """Prefer bluetoothctl name, then node description, then truncated node name."""
+    if node.mac:
+        remote = remotes_by_mac.get(normalize_mac(node.mac))
+        if remote and remote.name:
+            return remote.name
+    desc = (node.description or "").strip()
+    # wpctl often appends "[vol: 0.80]" — strip that.
+    desc = re.sub(r"\[vol:[^\]]*\]", "", desc).strip()
+    if desc and not desc.lower().startswith("bluez"):
+        return desc
+    name = node.name
+    if node.mac:
+        return f"BT {normalize_mac(node.mac)}"
+    return name or f"node-{node.id}"
+
+
 def match_device_node(
     *,
     mac: str,
     hci: str,
     pw_node_override: str,
     nodes: list[PwNode],
+    name: str = "",
 ) -> Optional[PwNode]:
-    """Match a configured device to a discovered PipeWire node."""
+    """Match a configured device to a discovered PipeWire node (MAC, id, or name)."""
     if pw_node_override:
         for n in nodes:
             if n.id == pw_node_override or n.name == pw_node_override:
@@ -282,6 +374,14 @@ def match_device_node(
             if n.mac and normalize_mac(n.mac) == want:
                 return n
             if suffix and suffix.lower() in n.name.lower():
+                return n
+
+    # Match by friendly speaker name (Qudelix etc.) when MAC not yet known.
+    want_name = (name or "").strip().lower()
+    if want_name:
+        for n in nodes:
+            hay = f"{n.description} {n.name}".lower()
+            if want_name in hay or (n.description and n.description.strip().lower() == want_name):
                 return n
 
     # Last resort: name contains hci tag (rare; mostly for tests/fixtures).

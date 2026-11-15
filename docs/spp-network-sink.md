@@ -23,22 +23,16 @@ In SPP on the phone:
 
 ## MuSync integration
 
-1. Seed from the Pi example (includes `spp-1` already):
+1. Launch with PipeWire backend (no YAML required — SPP defaults always offered):
 
 ```bash
-cp config/devices.pi-2sink.example.yaml config/devices.yaml
-# edit Qudelix MAC; leave spp-1 enabled:
-#   kind: network_spp
-#   listen_port: 1234
-#   sample_rate: 48000
-#   channels: 1
-export MUSYNC_DEVICES_CONFIG="$PWD/config/devices.yaml"
 export MUSYNC_BACKEND=pipewire
+./scripts/run_pi.sh
 ```
 
-   Mock cloud defaults also include `spp-1` on port `1234` when no yaml exists.
-2. Set `delay_ms` / `volume` like any other sink in the web UI.
-3. With `MUSYNC_BACKEND=pipewire`, MuSync starts (while `spp-1` is **enabled** — not only on Play):
+2. In the web UI **Device setup**: enable **Phone SPP**, set host/port/rate/channels, optionally enable discovered BT by name, **Save sinks**.
+3. Set `delay_ms` / `volume` on the sink row like any other output.
+4. With `MUSYNC_BACKEND=pipewire`, MuSync starts ffmpeg (while SPP is **enabled** — not only on Play):
 
 ```text
 ffmpeg -f pulse -i musync_feeder.monitor -af "adelay=…,volume=…" \
@@ -47,19 +41,18 @@ ffmpeg -f pulse -i musync_feeder.monitor -af "adelay=…,volume=…" \
 ```
 
 Bluez loopbacks for Qudelix / BT600 sinks are unchanged — SPP is an extra fan-out leg from the same feeder.
+Mock/cloud defaults also include `spp-1` on port `1234`.
 
 ## Pi + Qudelix + SPP phone
 
 ```bash
-cp config/devices.pi-2sink.example.yaml config/devices.yaml
-nano config/devices.yaml   # real Qudelix MAC; spp-1 enabled: true
-export MUSYNC_DEVICES_CONFIG="$PWD/config/devices.yaml"
 export MUSYNC_BACKEND=pipewire
 # stop manual ffmpeg listen / old MuSync if any
 ./scripts/run_pi.sh
 
-# UI: enable Qudelix + Phone SPP, Play a hub-local track
-# Phone: open SPP → Pi LAN/Tailscale IP:1234 → 48000 mono s16le
+# UI Device setup: enable Qudelix by name + Phone SPP → Save
+# Play a hub-local track
+# Phone: open SPP → Pi LAN/Tailscale IP:port → matching rate/channels s16le
 ```
 
 Notes:

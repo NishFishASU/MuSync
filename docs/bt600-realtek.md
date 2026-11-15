@@ -127,7 +127,7 @@ wpctl status | sed -n '/Sinks:/,/Sources:/p'
 # look for bluez_output.AA_BB_…
 ```
 
-Persist MAC ↔ `hciN` in `config/devices.yaml` (see `config/devices.pi-2sink.example.yaml`).
+Prefer **Device setup** in the web UI (discover by name → Save). Optional YAML templates remain in `config/devices.pi-2sink.example.yaml`.
 
 ## Quick verify checklist
 

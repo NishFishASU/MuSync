@@ -6,6 +6,8 @@ from abc import ABC, abstractmethod
 
 from ..models import (
     Device,
+    DeviceConfigEntry,
+    DeviceDiscoverResponse,
     DevicePatch,
     Health,
     InputHost,
@@ -38,6 +40,16 @@ class AudioBackend(ABC):
 
     @abstractmethod
     def patch_device(self, device_id: str, patch: DevicePatch) -> Device:
+        ...
+
+    @abstractmethod
+    def discover_device_setup(self) -> DeviceDiscoverResponse:
+        """List bluez sinks by name + always-available SPP defaults (no MAC typing)."""
+        ...
+
+    @abstractmethod
+    def apply_devices_config(self, entries: list[DeviceConfigEntry]) -> list[Device]:
+        """Persist UI sink selection (type + SPP details; MAC filled from discovery)."""
         ...
 
     @abstractmethod

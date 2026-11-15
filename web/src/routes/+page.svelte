@@ -10,6 +10,7 @@
 		connectWifi,
 		deleteInput,
 		deleteQueueItem,
+		discoverDevices,
 		fmtMs,
 		forgetWifiNetwork,
 		getHealth,
@@ -23,6 +24,7 @@
 		patchDevice,
 		patchInput,
 		patchQueueItem,
+		putDevicesConfig,
 		putTransport,
 		saveWifiNetwork,
 		setActiveQueueItem,
@@ -61,6 +63,22 @@
 	let newHostKind = $state('phone');
 	/** @type {import('$lib/api.js').CapturePath} */
 	let newHostPath = $state('network');
+
+	/** @type {import('$lib/api.js').DiscoveredBluetoothSink[]} */
+	let discoveredBt = $state([]);
+	/** @type {import('$lib/api.js').Device | null} */
+	let sppDefault = $state(null);
+	/** @type {Set<string>} */
+	let setupBtNames = $state(new Set());
+	let setupSppEnabled = $state(true);
+	let setupSppHost = $state('0.0.0.0');
+	let setupSppPort = $state(1234);
+	let setupSppRate = $state(48000);
+	let setupSppChannels = $state(1);
+	let setupBusy = $state(false);
+	let setupMessage = $state('');
+	let setupDetail = $state('');
+	let setupConfigOk = $state(true);
 
 	/** @type {Record<string, ReturnType<typeof setTimeout>>} */
 	const patchTimers = {};
@@ -192,6 +210,35 @@
 		}
 	}
 
+	async function refreshDiscovery() {
+		const disc = await discoverDevices();
+		discoveredBt = disc.bluetooth || [];
+		sppDefault = disc.spp_default || null;
+		setupDetail = disc.detail || '';
+		setupConfigOk = disc.config_ok !== false;
+		if (sppDefault) {
+			setupSppEnabled = Boolean(sppDefault.enabled);
+			setupSppHost = sppDefault.listen_host || '0.0.0.0';
+			setupSppPort = sppDefault.listen_port || 1234;
+			setupSppRate = sppDefault.sample_rate || 48000;
+			setupSppChannels = sppDefault.channels || 1;
+		}
+		const names = new Set();
+		for (const bt of discoveredBt) {
+			if (bt.configured_id || devices.some((d) => d.kind !== 'network_spp' && d.name === bt.name && d.enabled)) {
+				names.add(bt.name);
+			}
+		}
+		// Also mark currently configured BT devices that match discovery names.
+		for (const d of devices) {
+			if (d.kind === 'network_spp') continue;
+			if (discoveredBt.some((bt) => bt.name === d.name) && d.enabled) {
+				names.add(d.name);
+			}
+		}
+		setupBtNames = names;
+	}
+
 	async function refresh() {
 		const [h, d, t, s, q, i] = await Promise.all([
 			getHealth(),
@@ -210,10 +257,61 @@
 		if (!selectedId && d.length) selectedId = d[0].id;
 		applyTransport(t);
 		await refreshWifi().catch(() => {});
+		await refreshDiscovery().catch((err) => {
+			setupMessage = err instanceof Error ? err.message : String(err);
+		});
+	}
+
+	/** @param {string} name */
+	function toggleSetupBt(name) {
+		const next = new Set(setupBtNames);
+		if (next.has(name)) next.delete(name);
+		else next.add(name);
+		setupBtNames = next;
+	}
+
+	async function saveDeviceSetup() {
+		if (setupBusy) return;
+		setupBusy = true;
+		setupMessage = '';
+		try {
+			/** @type {import('$lib/api.js').DeviceConfigEntry[]} */
+			const entries = [];
+			for (const bt of discoveredBt) {
+				if (!setupBtNames.has(bt.name)) continue;
+				entries.push({
+					id: bt.configured_id || undefined,
+					name: bt.name,
+					kind: 'bluetooth',
+					enabled: true,
+					pw_node: bt.pw_node || undefined
+				});
+			}
+			entries.push({
+				id: sppDefault?.id || 'spp-1',
+				name: sppDefault?.name || 'Phone SPP',
+				kind: 'network_spp',
+				enabled: setupSppEnabled,
+				listen_host: setupSppHost.trim() || '0.0.0.0',
+				listen_port: Number(setupSppPort) || 1234,
+				sample_rate: Number(setupSppRate) || 48000,
+				channels: Number(setupSppChannels) || 1
+			});
+			const saved = await putDevicesConfig(entries);
+			devices = saved;
+			setupMessage = `Saved ${saved.length} sink${saved.length === 1 ? '' : 's'} — no YAML edit needed`;
+			if (!selectedId && saved.length) selectedId = saved[0].id;
+			await refreshDiscovery();
+			health = await getHealth().catch(() => health);
+		} catch (err) {
+			setupMessage = err instanceof Error ? err.message : String(err);
+		} finally {
+			setupBusy = false;
+		}
 	}
 
 	/**
-	 * @param {Partial<Pick<import('$lib/api.js').Device, 'delay_ms' | 'volume' | 'mute' | 'enabled' | 'listen_host' | 'listen_port' | 'sample_rate' | 'channels'>>} partial
+	 * @param {Partial<Pick<import('$lib/api.js').Device, 'delay_ms' | 'volume' | 'mute' | 'enabled' | 'kind' | 'listen_host' | 'listen_port' | 'sample_rate' | 'channels'>>} partial
 	 */
 	function queueDevicePatch(partial) {
 		const id = selectedId;
@@ -527,11 +625,102 @@
 		</div>
 	</section>
 
+	<section class="panel setup-panel" aria-labelledby="setup-heading">
+		<div class="panel-head">
+			<h2 id="setup-heading">Device setup</h2>
+			<p class="hint">Pick BT by name · set SPP type details · save — no YAML / MAC typing</p>
+		</div>
+		{#if !setupConfigOk}
+			<p class="setup-warn">Config missing or broken — started from defaults. Save below to write devices.yaml.</p>
+		{/if}
+		<div class="setup-grid">
+			<div class="setup-col">
+				<h3 class="setup-sub">Bluetooth (auto-discovered)</h3>
+				{#if discoveredBt.length === 0}
+					<p class="hint">No bluez sinks yet — pair a speaker, then Refresh.</p>
+				{:else}
+					<ul class="setup-list">
+						{#each discoveredBt as bt (bt.name + (bt.mac || ''))}
+							<li>
+								<label class="check setup-check">
+									<input
+										type="checkbox"
+										checked={setupBtNames.has(bt.name)}
+										onchange={() => toggleSetupBt(bt.name)}
+									/>
+									<span>
+										<strong>{bt.name}</strong>
+										<span class="device-sub">
+											{bt.connected ? 'connected' : bt.paired ? 'paired' : 'seen'}
+											{#if bt.pw_name}
+												· {bt.pw_name}
+											{/if}
+										</span>
+									</span>
+								</label>
+							</li>
+						{/each}
+					</ul>
+				{/if}
+			</div>
+			<div class="setup-col">
+				<h3 class="setup-sub">Stream / sink type</h3>
+				<label class="check setup-check">
+					<input type="checkbox" bind:checked={setupSppEnabled} />
+					<span>
+						<strong>Phone SPP</strong>
+						<span class="device-sub">network_spp · TCP listen for Simple Protocol Player</span>
+					</span>
+				</label>
+				{#if setupSppEnabled}
+					<div class="setup-spp-fields">
+						<label class="field">
+							<span>Listen host</span>
+							<input type="text" bind:value={setupSppHost} autocomplete="off" />
+						</label>
+						<label class="field">
+							<span>Port</span>
+							<input type="number" min="1" max="65535" bind:value={setupSppPort} />
+						</label>
+						<label class="field">
+							<span>Sample rate</span>
+							<select bind:value={setupSppRate}>
+								<option value={44100}>44100</option>
+								<option value={48000}>48000</option>
+							</select>
+						</label>
+						<label class="field">
+							<span>Channels</span>
+							<select bind:value={setupSppChannels}>
+								<option value={1}>Mono (1)</option>
+								<option value={2}>Stereo (2)</option>
+							</select>
+						</label>
+					</div>
+				{/if}
+			</div>
+		</div>
+		<div class="setup-actions">
+			<button type="button" class="btn btn-ghost" disabled={setupBusy} onclick={() => refreshDiscovery()}>
+				Refresh discovery
+			</button>
+			<button type="button" class="btn" disabled={setupBusy} onclick={() => saveDeviceSetup()}>
+				{setupBusy ? 'Saving…' : 'Save sinks'}
+			</button>
+		</div>
+		{#if setupMessage}
+			<p class="setup-msg">{setupMessage}</p>
+		{/if}
+		{#if setupDetail}
+			<p class="hint setup-detail">{setupDetail}</p>
+		{/if}
+	</section>
+
 	<div class="split">
 		<section class="panel devices-panel" aria-labelledby="devices-heading">
 			<div class="panel-head">
 				<h2 id="devices-heading">Devices</h2>
-				<p class="hint">BT sinks + SPP TCP · tap a row for delay &amp; volume</p>
+				<p class="hint">Configured sinks · tap a row for delay &amp; volume</p>
 			</div>
 			<ul class="device-list">
 				{#each devices as d (d.id)}
@@ -550,13 +739,15 @@
 									{d.name}
 									{#if d.kind === 'network_spp'}
 										<span class="type-chip">SPP</span>
+									{:else}
+										<span class="type-chip">BT</span>
 									{/if}
 								</span>
 								<span class="device-sub">
 									{#if d.kind === 'network_spp'}
 										tcp://{d.listen_host || '0.0.0.0'}:{d.listen_port || 1234} · {d.sample_rate || 48000} Hz · {d.channels || 1} ch · delay {d.delay_ms} ms · vol {Math.round(d.volume * 100)}%
 									{:else}
-										{d.hci || '—'} · {d.mac || 'no MAC'} · delay {d.delay_ms} ms · vol {Math.round(d.volume * 100)}%
+										{d.name} · delay {d.delay_ms} ms · vol {Math.round(d.volume * 100)}%
 									{/if}
 								</span>
 							</span>
@@ -594,11 +785,40 @@
 					{#if selected.kind === 'network_spp'}
 						SPP TCP · {selected.listen_host}:{selected.listen_port} · {selected.sample_rate} Hz / {selected.channels} ch · {selected.connected ? 'listening' : 'idle'}
 					{:else}
-						{selected.hci || 'hci?'} · {selected.mac || 'MAC unset'} · {selected.connected ? 'linked' : 'missing'}
+						Bluetooth · {selected.connected ? 'linked' : 'waiting for bluez'} · use Device setup to pick by name
 					{/if}
 				</p>
 
+				<label class="field">
+					<span>Sink type</span>
+					<select
+						value={selected.kind || 'bluetooth'}
+						onchange={(e) => {
+							queueDevicePatch({
+								kind: /** @type {import('$lib/api.js').DeviceKind} */ (
+									/** @type {HTMLSelectElement} */ (e.currentTarget).value
+								)
+							});
+						}}
+					>
+						<option value="bluetooth">Bluetooth (A2DP)</option>
+						<option value="network_spp">Phone SPP (TCP)</option>
+					</select>
+				</label>
+
 				{#if selected.kind === 'network_spp'}
+					<label class="field">
+						<span>Listen host</span>
+						<input
+							type="text"
+							value={selected.listen_host || '0.0.0.0'}
+							oninput={(e) => {
+								queueDevicePatch({
+									listen_host: /** @type {HTMLInputElement} */ (e.currentTarget).value
+								});
+							}}
+						/>
+					</label>
 					<label class="field">
 						<span>Listen port</span>
 						<input

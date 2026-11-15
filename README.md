@@ -128,40 +128,10 @@ pip install -r requirements.txt
 ./scripts/build_web.sh   # or rsync a laptop-built web/build/
 ```
 
-### 2. Seed Qudelix + SPP profile (required)
-
-If the UI shows **Speaker A/B** with fake `AA:BB:…` **MISSING** and no **Phone SPP**, you are still on placeholders (or an old `devices.yaml` without `network_spp`). Reset and edit:
+### 2. Pair BT600 ↔ Qudelix
 
 ```bash
-cd /path/to/MuSync
-cp config/devices.pi-2sink.example.yaml config/devices.yaml
-
-# Find the Qudelix MAC (after pairing):
-bluetoothctl devices
-# or: ./scripts/pair_bt600.sh hci0
-
-nano config/devices.yaml
-# sink-1 (Qudelix):  mac: "A0:B1:C2:D3:E4:F5"   # real MAC — not AA:BB / REPLACE_
-# sink-1:             enabled: true
-# spp-1:              kind: network_spp
-# spp-1:              enabled: true
-# spp-1:              listen_port: 1234
-# (optional) sink-2:  enabled: false until you have a second BT600 speaker
-```
-
-Point the process at that file (default path is the same if you launch from the repo):
-
-```bash
-export MUSYNC_DEVICES_CONFIG="$PWD/config/devices.yaml"
-export MUSYNC_BACKEND=pipewire
-```
-
-`run_pi.sh` auto-seeds only when `devices.yaml` is **missing**; it will **warn** if placeholders remain.
-
-### 3. Pair BT600 ↔ Qudelix
-
-```bash
-./scripts/pair_bt600.sh hci0    # enter Qudelix MAC when prompted
+./scripts/pair_bt600.sh hci0    # enter Qudelix MAC when prompted (pairing only)
 # optional second dongle:
 # ./scripts/pair_bt600.sh hci1
 ```
@@ -173,22 +143,33 @@ wpctl status | sed -n '/Sinks:/,/Sources:/p'
 # look for bluez_output.<MAC_WITH_UNDERSCORES>
 ```
 
-### 4. Media + launch (restart after editing yaml)
+You do **not** need to hand-edit `devices.yaml` MACs — the web UI discovers speakers by name.
+
+### 3. Media + launch
 
 ```bash
+export MUSYNC_BACKEND=pipewire
 cp /path/to/track.flac media/
 # stop any old MuSync/ffmpeg listen on :1234 first
 ./scripts/run_pi.sh
 # UI: http://<pi-lan-ip>:8080
 ```
 
-In the UI: **Qudelix** + **Phone SPP** should both list; enable them, Play a hub-local track. On the phone open Simple Protocol Player → Pi IP:`1234`, 48000 Hz mono s16le.
+Missing or broken `devices.yaml` is fine — MuSync boots with **Phone SPP** defaults.
 
-Graph details and manual `pactl`/`wpctl` commands: [docs/pi-pipewire.md](docs/pi-pipewire.md).
+### 4. Device setup in the web UI (no YAML copy)
+
+1. Open **Device setup**.
+2. **Refresh discovery** — Qudelix (and other bluez remotes) appear by friendly name.
+3. Enable the BT sink(s) you want; enable **Phone SPP** and set host/port/rate/channels.
+4. **Save sinks** — writes `config/devices.yaml` atomically (MAC filled from discovery).
+5. Play a hub-local track. Phone Simple Protocol Player → Pi IP:`port`, matching rate/channels s16le.
+
+Graph details: [docs/pi-pipewire.md](docs/pi-pipewire.md). SPP details: [docs/spp-network-sink.md](docs/spp-network-sink.md).
 
 ### 5. Scale to 4 then 6
 
-Append sinks to `devices.yaml` (unique `id`, `mac`, `hci`). Use a **powered USB hub**. Same software path — no redesign. Pair each new dongle with `./scripts/pair_bt600.sh hciN`.
+Enable more discovered BT sinks in the UI (≤6 A2DP). Use a **powered USB hub**. Pair each new dongle with `./scripts/pair_bt600.sh hciN`.
 
 ### Optional systemd
 
