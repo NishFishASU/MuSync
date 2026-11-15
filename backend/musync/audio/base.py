@@ -173,6 +173,14 @@ class AudioBackend(ABC):
         """Unified title/artist/album/cover for the active cue (override in backends)."""
         raise NotImplementedError
 
+    def shutdown(self) -> None:
+        """Release session resources on SIGINT/SIGTERM / FastAPI lifespan.
+
+        PipeWire backend tears down MuSync-owned loopbacks, feeder null-sinks,
+        and child processes. Does not unpair BlueZ devices.
+        """
+        return
+
     def get_avrcp_status(self):
         """BT Absolute Volume + transport relay status (soft-fail when unsupported)."""
         from ..models import AvrcpStatus

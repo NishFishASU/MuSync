@@ -144,6 +144,7 @@ from .pw_tools import (
     discover_sources,
     feeder_listed_in_sinks,
     feeder_null_sink_args,
+    find_all_musync_owned_loopback_ids,
     find_feeder_null_sink_ids,
     find_musync_capture_ids,
     find_musync_loopback_ids,
@@ -287,12 +288,14 @@ class PipeWireBackend(AudioBackend):
         )
 
         # Refresh map / plan once at startup (no-op / dry-run without hardware).
-        # Purge orphan MuSync_Feeder null-sinks from prior soft-load restarts.
+        # Purge orphan capture→feeder→sink loopbacks + MuSync_Feeder null-sinks
+        # left by Ctrl+C / crashed prior runs (avoid duplicate soft-loads).
         # Free SPP ports + soft-reconnect paired BT so UI shows READY after reboot.
         # Adapter probe is soft — unhealthy USB HCI timeouts must not block API boot.
         try:
             self._refresh_adapters(force=True)
             if not self._env_dry_run():
+                self._purge_orphan_loopbacks()
                 self._ensure_feeder(reset=True)
                 self._free_configured_spp_ports()
             self.refresh_sink_map()
@@ -568,6 +571,41 @@ class PipeWireBackend(AudioBackend):
             )
         return len(ids)
 
+    def _purge_orphan_loopbacks(self) -> int:
+        """Unload MuSync-owned capture/sink loopbacks (tracked + orphan scan).
+
+        Clears phone→feeder→Qudelix bridges left after Ctrl+C so a restart does
+        not stack duplicates. Safe when dry-run / pactl missing.
+        """
+        if self._env_dry_run():
+            return 0
+        pactl = self._tools["pactl"]
+        if not pactl:
+            return 0
+
+        # Drop tracked indexes first (best-effort; module may already be gone).
+        for device_id in list(self._loopback_module_ids.keys()):
+            self._unload_loopback(device_id)
+        for host_id in list(self._capture_module_ids.keys()):
+            self._unload_capture(host_id)
+        self._loopback_module_ids.clear()
+        self._capture_module_ids.clear()
+        self._active_capture_host_id = None
+
+        proc = self._exec_soft([pactl, "list", "modules", "short"])
+        if not proc or not proc.stdout:
+            return 0
+        ids = find_all_musync_owned_loopback_ids(proc.stdout, self._feeder)
+        for mid in ids:
+            self._exec_soft([pactl, "unload-module", mid])
+        if ids:
+            log.warning(
+                "Purged %d orphan MuSync loopback module(s): %s",
+                len(ids),
+                ", ".join(ids),
+            )
+        return len(ids)
+
     def _load_feeder_module(self) -> None:
         pactl = self._tools["pactl"]
         if not pactl:
@@ -591,7 +629,8 @@ class PipeWireBackend(AudioBackend):
         """Idempotent feeder: one ``musync_feeder`` null-sink, purge orphans.
 
         ``reset=True`` (startup): unload all MuSync feeder modules, then create one.
-        Otherwise: create only when missing; if duplicates exist, purge + recreate.
+        Otherwise: reuse a single healthy feeder (no duplicate soft-load); if
+        duplicates exist or the sink is missing, purge + recreate.
         """
         if self._env_dry_run():
             return
@@ -602,14 +641,25 @@ class PipeWireBackend(AudioBackend):
         ids = self._list_feeder_module_ids()
         present = self._feeder_sink_present()
 
-        if reset or len(ids) > 1 or (present and len(ids) == 0):
-            # Orphans / restart: wipe MuSync feeders then create exactly one.
+        if reset:
+            # Startup / hard reset: wipe every MuSync feeder, then create exactly one.
             if ids:
+                self._purge_feeder_modules()
+            elif present:
+                # Sink listed without a matching module row — still try purge by re-scan.
+                self._purge_feeder_modules()
+            self._load_feeder_module()
+            return
+
+        if len(ids) > 1 or (present and len(ids) == 0):
+            # Orphans / inconsistent state: wipe then create exactly one.
+            if ids or present:
                 self._purge_feeder_modules()
             self._load_feeder_module()
             return
 
         if len(ids) == 1 and present:
+            # Healthy single feeder — reuse (never soft-load a duplicate).
             return
 
         if len(ids) == 0 and not present:
@@ -1600,6 +1650,63 @@ class PipeWireBackend(AudioBackend):
                 proc.wait(timeout=2.0)
             except subprocess.TimeoutExpired:
                 proc.kill()
+
+    def _stop_all_spp_listeners(self) -> None:
+        for device_id in list(self._spp_procs.keys()):
+            self._stop_spp_listener(device_id)
+
+    def _stop_all_cast_streams(self) -> None:
+        for device_id in list(self._cast_procs.keys()):
+            self._stop_cast_stream(device_id)
+
+    def shutdown(self) -> None:
+        """Graceful teardown on SIGINT/SIGTERM / FastAPI lifespan.
+
+        Stops librespot / yt-dlp / ffmpeg / mpv children, unloads MuSync-owned
+        capture→feeder→sink loopbacks, and purges ``musync_feeder`` null-sinks
+        so phone audio does not keep reaching Qudelix after exit.
+
+        Does **not** disconnect or unpair BlueZ A2DP devices — raw BT links may
+        remain until the user disconnects Bluetooth manually.
+        """
+        log.info(
+            "Shutting down MuSync audio graph "
+            "(loopbacks + feeder + children; BlueZ pairing left intact)"
+        )
+        try:
+            self._avrcp.stop_watcher()
+        except Exception as exc:  # noqa: BLE001
+            log.debug("AVRCP stop on shutdown: %s", exc)
+
+        try:
+            self._stop_player_process(keep_librespot=False, pause_spotify=True)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("Player/streaming stop on shutdown: %s", exc)
+
+        try:
+            self._stop_all_spp_listeners()
+        except Exception as exc:  # noqa: BLE001
+            log.warning("SPP stop on shutdown: %s", exc)
+
+        try:
+            self._stop_all_cast_streams()
+        except Exception as exc:  # noqa: BLE001
+            log.warning("Cast stop on shutdown: %s", exc)
+
+        if self._env_dry_run():
+            return
+
+        try:
+            self._purge_orphan_loopbacks()
+        except Exception as exc:  # noqa: BLE001
+            log.warning("Loopback purge on shutdown: %s", exc)
+
+        try:
+            n = self._purge_feeder_modules()
+            if n:
+                log.info("Shutdown purged %d musync_feeder null-sink module(s)", n)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("Feeder purge on shutdown: %s", exc)
 
     def _pause_competing_phone_playback(self) -> None:
         """Soft-fail: pause Spotify on the phone when hub local/YouTube/… starts."""

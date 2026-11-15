@@ -25,6 +25,8 @@ Environment=PATH=/home/pi/.cargo/bin:/home/pi/.local/bin:/usr/local/sbin:/usr/lo
 # HDMI/console: big LAN URL + printable QR before API listen (soft-fail OK).
 ExecStartPre=-/usr/bin/python3 -m musync.lan_banner --console
 ExecStart=/usr/bin/python3 -m musync
+# Allow FastAPI lifespan to unload MuSync loopbacks/feeder + stop children.
+TimeoutStopSec=15
 Restart=on-failure
 RestartSec=3
 

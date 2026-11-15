@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import re
 from contextlib import asynccontextmanager
@@ -94,9 +95,17 @@ wifi_backend: WifiBackend = create_wifi_backend()
 profile_store: VolumeProfileStore = VolumeProfileStore()
 
 
+log = logging.getLogger(__name__)
+
+
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
-    """Advertise ``musync.local`` for UI LAN discovery (not Spotify OAuth)."""
+    """Advertise ``musync.local``; tear down MuSync audio graph on exit.
+
+    SIGINT/SIGTERM (Ctrl+C, systemd stop) runs this ``finally`` via uvicorn:
+    stop children + unload MuSync PipeWire loopbacks/feeder. BlueZ pairing is
+    left intact — disconnect the phone/speaker in Bluetooth settings if needed.
+    """
     from .streaming.spotify import api_listen_port
 
     port = api_listen_port()
@@ -104,6 +113,10 @@ async def lifespan(_app: FastAPI):
     try:
         yield
     finally:
+        try:
+            backend.shutdown()
+        except Exception as exc:  # noqa: BLE001 — never block process exit
+            log.warning("Audio backend shutdown soft-fail: %s", exc)
         stop_hub_mdns()
 
 

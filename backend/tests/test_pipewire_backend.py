@@ -181,6 +181,50 @@ def test_transport_still_works_software(backend: PipeWireBackend) -> None:
     assert playing.state == TransportState.PLAYING
 
 
+def test_shutdown_tears_down_graph_and_children(
+    backend: PipeWireBackend, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Ctrl+C / lifespan must unload MuSync loopbacks + feeder (not leave phone→Qudelix)."""
+    monkeypatch.setenv("MUSYNC_PW_DRY_RUN", "0")
+    backend._tools["pactl"] = "/usr/bin/pactl"
+    backend._loopback_module_ids["sink-1"] = "40"
+    backend._capture_module_ids["phone"] = "41"
+    backend._active_capture_host_id = "phone"
+    modules = (
+        "40\tmodule-loopback sink_input_properties=media.name=musync_loopback_sink_1\n"
+        "41\tmodule-loopback sink_input_properties=media.name=musync_capture_phone\n"
+        "50\tmodule-null-sink sink_name=musync_feeder "
+        "sink_properties=device.description=MuSync_Feeder\n"
+        "51\tmodule-loopback source=musync_feeder.monitor sink=bluez_output.AA\n"
+    )
+    calls: list[list[str]] = []
+
+    def fake_exec(args: list[str]):
+        calls.append(list(args))
+        from types import SimpleNamespace
+
+        if args[1:3] == ["list", "modules"]:
+            return SimpleNamespace(returncode=0, stdout=modules, stderr="")
+        if args[1] == "unload-module":
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(backend, "_exec_soft", fake_exec)
+    monkeypatch.setattr(backend, "_env_dry_run", lambda: False)
+    monkeypatch.setattr(backend, "_stop_player_process", lambda **_k: None)
+    monkeypatch.setattr(backend._avrcp, "stop_watcher", lambda: None)
+
+    backend.shutdown()
+
+    unloaded = {c[2] for c in calls if len(c) >= 3 and c[1] == "unload-module"}
+    assert "40" in unloaded and "41" in unloaded
+    assert "50" in unloaded  # feeder null-sink
+    assert "51" in unloaded  # orphan feeder→sink loopback
+    assert backend._loopback_module_ids == {}
+    assert backend._capture_module_ids == {}
+    assert backend._active_capture_host_id is None
+
+
 def test_ensure_feeder_idempotent_purges_orphans(
     backend: PipeWireBackend, monkeypatch: pytest.MonkeyPatch
 ) -> None:

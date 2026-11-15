@@ -183,16 +183,20 @@ for port in "${SPP_PORTS[@]}"; do
 done
 sleep 0.2
 
-# Optional: show orphan MuSync feeders before boot (backend purges on startup).
+# Optional: show orphan MuSync feeders / loopbacks before boot (backend purges on startup).
 if command -v pactl >/dev/null 2>&1; then
   feeder_n=$(pactl list modules short 2>/dev/null | grep -c "module-null-sink.*sink_name=${MUSYNC_PW_FEEDER}" || true)
+  loop_n=$(pactl list modules short 2>/dev/null | grep -cE "module-loopback.*(musync_loopback_|musync_capture_|sink=${MUSYNC_PW_FEEDER}|source=${MUSYNC_PW_FEEDER}\\.monitor)" || true)
   if [[ "${feeder_n:-0}" -gt 1 ]]; then
     echo
     echo "NOTE: found ${feeder_n} ${MUSYNC_PW_FEEDER} null-sink modules — MuSync will purge orphans on startup."
   elif [[ "${feeder_n:-0}" -eq 1 ]]; then
-    echo "  feeder: one ${MUSYNC_PW_FEEDER} module present (idempotent)"
+    echo "  feeder: one ${MUSYNC_PW_FEEDER} module present (reused unless reset)"
   else
     echo "  feeder: no ${MUSYNC_PW_FEEDER} yet (created on startup)"
+  fi
+  if [[ "${loop_n:-0}" -gt 0 ]]; then
+    echo "NOTE: found ${loop_n} leftover MuSync loopback module(s) — purged on startup / Ctrl+C teardown."
   fi
 fi
 
