@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Run MuSync on a Raspberry Pi 5 with the PipeWire backend.
-# Demo path: pair 2 speakers first, then start the API/UI.
+# Demo path: build SvelteKit UI → pair 2 speakers → start API + SPA.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 
@@ -10,6 +10,7 @@ export MUSYNC_HOST="${MUSYNC_HOST:-0.0.0.0}"
 export MUSYNC_PORT="${MUSYNC_PORT:-8080}"
 export MUSYNC_DEVICES_CONFIG="${MUSYNC_DEVICES_CONFIG:-$ROOT/config/devices.yaml}"
 export MUSYNC_MEDIA_DIR="${MUSYNC_MEDIA_DIR:-$ROOT/media}"
+export MUSYNC_WEB_DIR="${MUSYNC_WEB_DIR:-$ROOT/web/build}"
 # Set MUSYNC_PW_DRY_RUN=1 to plan-only (no pactl/wpctl mutations).
 # Unset / 0 for live graph on a real Pi session.
 export MUSYNC_PW_FEEDER="${MUSYNC_PW_FEEDER:-musync_feeder}"
@@ -21,7 +22,22 @@ echo "  backend:  $MUSYNC_BACKEND"
 echo "  listen:   http://${MUSYNC_HOST}:${MUSYNC_PORT}"
 echo "  devices:  $MUSYNC_DEVICES_CONFIG"
 echo "  media:    $MUSYNC_MEDIA_DIR"
+echo "  web:      $MUSYNC_WEB_DIR"
 echo "  feeder:   $MUSYNC_PW_FEEDER"
+
+if [[ ! -f "$MUSYNC_WEB_DIR/index.html" ]]; then
+  echo
+  echo "SvelteKit UI not built at $MUSYNC_WEB_DIR"
+  if command -v npm >/dev/null 2>&1; then
+    echo "Running ./scripts/build_web.sh …"
+    "$ROOT/scripts/build_web.sh"
+  else
+    echo "Node/npm not found. Either:" >&2
+    echo "  - install Node 20+ and run: ./scripts/build_web.sh" >&2
+    echo "  - or copy a prebuilt web/build/ from a laptop" >&2
+    exit 1
+  fi
+fi
 
 if [[ ! -f "$MUSYNC_DEVICES_CONFIG" ]]; then
   echo
@@ -61,7 +77,8 @@ echo "  2) ./scripts/pair_bt600.sh hci0"
 echo "  3) ./scripts/pair_bt600.sh hci1"
 echo "  4) Put real MACs into $MUSYNC_DEVICES_CONFIG"
 echo "  5) Drop a WAV/FLAC/MP3 into $MUSYNC_MEDIA_DIR"
-echo "  6) Open http://<pi-lan-ip>:${MUSYNC_PORT} — enable both sinks, set delays, Play"
+echo "  6) Ensure UI built: ./scripts/build_web.sh  (or rsync web/build/)"
+echo "  7) Open http://<pi-lan-ip>:${MUSYNC_PORT} — enable both sinks, set delays, Play"
 echo
 
 exec python3 -m musync

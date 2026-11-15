@@ -133,7 +133,9 @@ def media_library_path() -> Path:
 
 
 def web_root() -> Path:
-    return env_path("MUSYNC_WEB_DIR", repo_root() / "web")
+    """Static UI root. Prefer SvelteKit `web/build` (adapter-static output)."""
+    default = repo_root() / "web" / "build"
+    return env_path("MUSYNC_WEB_DIR", default)
 
 
 def validate_devices(devices: list[Device], *, require_min: int | None = None) -> list[Device]:

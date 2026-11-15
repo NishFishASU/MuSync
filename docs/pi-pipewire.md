@@ -36,11 +36,13 @@ Force plan-only: `MUSYNC_PW_DRY_RUN=1`.
 ## Bring-up: 2 speakers first
 
 1. Install packages (see README).
-2. `cp config/devices.pi-2sink.example.yaml config/devices.yaml`
-3. `./scripts/pair_bt600.sh hci0` then `./scripts/pair_bt600.sh hci1`
-4. Write real MACs into `devices.yaml`
-5. `./scripts/run_pi.sh`
-6. UI: enable both sinks, nudge `delay_ms` until slap-back disappears, Play
+2. Build the SvelteKit UI FastAPI serves: `./scripts/build_web.sh` → `web/build/`  
+   (or copy a laptop-built `web/build/` onto the Pi — Node is not required at runtime).
+3. `cp config/devices.pi-2sink.example.yaml config/devices.yaml`
+4. `./scripts/pair_bt600.sh hci0` then `./scripts/pair_bt600.sh hci1`
+5. Write real MACs into `devices.yaml`
+6. `./scripts/run_pi.sh` (auto-builds UI if `web/build/index.html` is missing and npm exists)
+7. UI: enable both sinks, nudge `delay_ms` until slap-back disappears, Play
 
 Scale to 4 then 6 by appending sinks (unique `id` / `mac` / `hci`) — same software path.
 
