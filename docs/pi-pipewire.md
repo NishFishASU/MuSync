@@ -6,7 +6,7 @@ each enabled Bluetooth speaker with **per-sink delay** and **volume**.
 ## Graph
 
 ```
-mpv --ao=pipewire --audio-device=musync_feeder
+mpv local file  OR  bluez_input / USB capture (module-loopback)
         │
         ▼
   musync_feeder          (pactl module-null-sink)
@@ -14,8 +14,10 @@ mpv --ao=pipewire --audio-device=musync_feeder
         │  module-loopback latency_msec=<delay_ms>
         ├────────────────► bluez_output.<MAC_1>   (BT600 hci0)
         └────────────────► bluez_output.<MAC_2>   (BT600 hci1)
-                           … up to 6
+                           … up to 6 (+ optional SPP TCP)
 ```
+
+Phone as **A2DP source** (S21 FE → `bluez_input`) vs phone as **SPP sink**: see [phone-bt-source-vs-spp-sink.md](./phone-bt-source-vs-spp-sink.md).
 
 | Control | Mechanism |
 |---------|-----------|

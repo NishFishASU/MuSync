@@ -99,6 +99,23 @@
  */
 
 /**
+ * @typedef {Object} DiscoveredCaptureSource
+ * @property {string} name
+ * @property {string} [pw_node]
+ * @property {string} [pw_name]
+ * @property {string} [mac]
+ * @property {CapturePath} [capture_path]
+ * @property {boolean} [connected]
+ * @property {string | null} [configured_id]
+ */
+
+/**
+ * @typedef {Object} CaptureDiscoverResponse
+ * @property {DiscoveredCaptureSource[]} sources
+ * @property {string} [detail]
+ */
+
+/**
  * @typedef {Object} QueueItem
  * @property {string} id
  * @property {string} title
@@ -284,6 +301,11 @@ export function listInputs() {
 	return api('/api/inputs');
 }
 
+/** @returns {Promise<CaptureDiscoverResponse>} */
+export function discoverInputs() {
+	return api('/api/inputs/discover');
+}
+
 /**
  * @param {{ name: string, kind?: HostKind, capture_path?: CapturePath, armed?: boolean, connected?: boolean, endpoint?: string }} body
  * @returns {Promise<InputHost>}
@@ -305,6 +327,31 @@ export function patchInput(id, patch) {
 		method: 'PATCH',
 		body: JSON.stringify(patch)
 	});
+}
+
+/**
+ * @param {string} id
+ * @param {File} file
+ * @returns {Promise<InputHost>}
+ */
+export async function uploadInputFile(id, file) {
+	const body = new FormData();
+	body.append('file', file);
+	const res = await fetch(`/api/inputs/${encodeURIComponent(id)}/upload`, {
+		method: 'POST',
+		body
+	});
+	if (!res.ok) {
+		let detail = res.statusText;
+		try {
+			const json = await res.json();
+			detail = json.detail || detail;
+		} catch {
+			/* ignore */
+		}
+		throw new Error(typeof detail === 'string' ? detail : JSON.stringify(detail));
+	}
+	return res.json();
 }
 
 /**

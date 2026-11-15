@@ -20,6 +20,11 @@ _BLUEZ_MAC_RE = re.compile(
     r"bluez[_-](?:output|sink)\.([0-9A-Fa-f]{2}(?:_[0-9A-Fa-f]{2}){5})",
     re.IGNORECASE,
 )
+# Phone/PC as A2DP source → Pi: bluez_input.XX_XX_… or bluez_source.…
+_BLUEZ_INPUT_MAC_RE = re.compile(
+    r"bluez[_-](?:input|source)\.([0-9A-Fa-f]{2}(?:_[0-9A-Fa-f]{2}){5})",
+    re.IGNORECASE,
+)
 _MAC_COLON_RE = re.compile(r"([0-9A-Fa-f]{2}(?::[0-9A-Fa-f]{2}){5})")
 
 
@@ -121,53 +126,64 @@ def sh_quote(arg: str) -> str:
     return "'" + arg.replace("'", "'\"'\"'") + "'"
 
 
-def parse_wpctl_status(text: str) -> list[PwNode]:
-    """Extract sink-like entries from `wpctl status` (best-effort)."""
+_WPCTL_NODE_LINE = re.compile(
+    r"^\s*[│|]?\s*\*?\s*(\d+)\.\s+(\S+)(?:\s+(.*))?$"
+)
+
+
+def _parse_wpctl_section(text: str, section: str, media_class: str) -> list[PwNode]:
+    """Extract nodes from a wpctl status section (Sinks / Sources)."""
     nodes: list[PwNode] = []
-    in_sinks = False
-    # Lines like:  " │  *   48. bluez_output.AA_BB_….1 [vol: 0.80]"
-    line_re = re.compile(
-        r"^\s*[│|]?\s*\*?\s*(\d+)\.\s+(\S+)(?:\s+(.*))?$"
-    )
+    in_section = False
+    section_key = f"{section}:"
     for raw in text.splitlines():
         line = raw.rstrip()
         lower = line.lower()
-        if "sinks:" in lower:
-            in_sinks = True
+        if section_key in lower:
+            in_section = True
             continue
-        if in_sinks and (
-            "sources:" in lower
-            or "filters:" in lower
-            or "streams:" in lower
-            or re.match(r"^\s*[│|]?\s*$", line)
-            and "sinks" not in lower
-        ):
-            # Leaving sinks section when a new major heading appears.
-            if re.search(r"^\s*[├└│].*sources:", lower) or re.match(
-                r"^\s*sources:", lower
-            ):
-                in_sinks = False
-                continue
-        if not in_sinks:
+        if in_section:
+            # Next major Audio subsection ends this one.
+            if re.search(
+                r"^\s*[├└│|].*(sinks|sources|filters|streams|devices):",
+                lower,
+            ) or re.match(r"^\s*(sinks|sources|filters|streams|devices):", lower):
+                if section_key not in lower:
+                    in_section = False
+                    continue
+        if not in_section:
             continue
-        m = line_re.search(line)
+        m = _WPCTL_NODE_LINE.search(line)
         if not m:
             continue
         node_id, name, rest = m.group(1), m.group(2), (m.group(3) or "").strip()
+        name = name.rstrip(".")
         mac = ""
-        bm = _BLUEZ_MAC_RE.search(name) or _BLUEZ_MAC_RE.search(rest)
-        if bm:
-            mac = normalize_mac(bm.group(1))
+        for pattern in (_BLUEZ_MAC_RE, _BLUEZ_INPUT_MAC_RE):
+            bm = pattern.search(name) or pattern.search(rest)
+            if bm:
+                mac = normalize_mac(bm.group(1))
+                break
         nodes.append(
             PwNode(
                 id=node_id,
-                name=name.rstrip("."),
+                name=name,
                 description=rest,
                 mac=mac,
-                media_class="Audio/Sink",
+                media_class=media_class,
             )
         )
     return nodes
+
+
+def parse_wpctl_status(text: str) -> list[PwNode]:
+    """Extract sink-like entries from `wpctl status` (best-effort)."""
+    return _parse_wpctl_section(text, "sinks", "Audio/Sink")
+
+
+def parse_wpctl_sources(text: str) -> list[PwNode]:
+    """Extract source-like entries (bluez_input / USB mic) from `wpctl status`."""
+    return _parse_wpctl_section(text, "sources", "Audio/Source")
 
 
 def parse_pw_cli_list_nodes(text: str) -> list[PwNode]:
@@ -258,6 +274,228 @@ def discover_nodes(
             detail = f"{detail}; pw-cli error: {exc}"
 
     return [], detail
+
+
+def parse_pw_cli_list_sources(text: str) -> list[PwNode]:
+    """Like parse_pw_cli_list_nodes but prefer Audio/Source."""
+    nodes: list[PwNode] = []
+    current: dict[str, str] = {}
+
+    def flush() -> None:
+        nonlocal current
+        if not current:
+            return
+        node_id = current.get("id") or current.get("object.serial") or ""
+        name = (
+            current.get("node.name")
+            or current.get("name")
+            or current.get("application.name")
+            or ""
+        )
+        if node_id and name:
+            mac = ""
+            for pattern in (_BLUEZ_INPUT_MAC_RE, _BLUEZ_MAC_RE):
+                bm = pattern.search(name)
+                if bm:
+                    mac = normalize_mac(bm.group(1))
+                    break
+            if not mac:
+                cm = _MAC_COLON_RE.search(current.get("device.string", ""))
+                if cm:
+                    mac = normalize_mac(cm.group(1))
+            nodes.append(
+                PwNode(
+                    id=str(node_id),
+                    name=name,
+                    description=current.get("node.description", ""),
+                    mac=mac,
+                    media_class=current.get("media.class", ""),
+                )
+            )
+        current = {}
+
+    id_re = re.compile(r"id\s+(\d+)", re.IGNORECASE)
+    kv_re = re.compile(r"^\s*([A-Za-z0-9._-]+)\s*=\s*\"?([^\"]*)\"?\s*$")
+    for raw in text.splitlines():
+        line = raw.rstrip()
+        id_m = id_re.search(line)
+        if id_m and ("type" in line.lower() or line.strip().startswith("id")):
+            flush()
+            current = {"id": id_m.group(1)}
+            continue
+        kv = kv_re.match(line)
+        if kv and current is not None:
+            current[kv.group(1)] = kv.group(2)
+    flush()
+    sources = [n for n in nodes if "source" in n.media_class.lower()]
+    return sources or nodes
+
+
+def discover_sources(
+    *,
+    wpctl: Optional[str],
+    pw_cli: Optional[str],
+) -> tuple[list[PwNode], str]:
+    """Discover Audio/Source nodes (bluez_input, USB capture, etc.)."""
+    if wpctl:
+        try:
+            proc = run_cmd([wpctl, "status"], timeout=4.0)
+            if proc.returncode == 0 and proc.stdout.strip():
+                nodes = parse_wpctl_sources(proc.stdout)
+                return nodes, f"wpctl sources → {len(nodes)} entries"
+            detail = (proc.stderr or proc.stdout or "wpctl status failed").strip()
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            detail = f"wpctl status error: {exc}"
+    else:
+        detail = "wpctl missing"
+
+    if pw_cli:
+        try:
+            proc = run_cmd([pw_cli, "ls", "Node"], timeout=4.0)
+            if proc.returncode != 0:
+                proc = run_cmd([pw_cli, "list-objects", "Node"], timeout=4.0)
+            if proc.returncode == 0 and proc.stdout.strip():
+                nodes = parse_pw_cli_list_sources(proc.stdout)
+                return nodes, f"pw-cli sources → {len(nodes)} ({detail})"
+            detail = (
+                f"{detail}; pw-cli failed: "
+                f"{(proc.stderr or proc.stdout or '').strip()}"
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            detail = f"{detail}; pw-cli error: {exc}"
+
+    return [], detail
+
+
+def classify_capture_source(node: PwNode) -> str:
+    """Return capture_path value: bt_a2dp | usb | network (fallback)."""
+    hay = f"{node.name} {node.description}".lower()
+    if "bluez_input" in hay or "bluez_source" in hay or (
+        node.mac and "bluez" in hay
+    ):
+        return "bt_a2dp"
+    if (
+        "alsa_input" in hay
+        or "usb" in hay
+        or "analog" in hay
+        or hay.startswith("hw:")
+    ):
+        return "usb"
+    return "network"
+
+
+def is_capture_candidate(node: PwNode) -> bool:
+    """Filter monitor/virtual sources; keep phone BT + USB audio inputs."""
+    hay = f"{node.name} {node.description}".lower()
+    if "musync_feeder" in hay or ".monitor" in hay:
+        return False
+    if "bluez_input" in hay or "bluez_source" in hay:
+        return True
+    if "alsa_input" in hay or ("usb" in hay and "input" in hay):
+        return True
+    # Named phone remotes sometimes show without bluez_ prefix in description.
+    if node.mac and "bluez" in hay:
+        return True
+    return False
+
+
+def match_capture_source(
+    *,
+    endpoint: str,
+    name: str,
+    nodes: list[PwNode],
+    prefer_path: str = "bt_a2dp",
+) -> Optional[PwNode]:
+    """Match a registered host to a discovered PipeWire source."""
+    ep = (endpoint or "").strip()
+    if ep:
+        for n in nodes:
+            if n.id == ep or n.name == ep or ep in n.name:
+                return n
+        # Endpoint may be a MAC.
+        try:
+            want = normalize_mac(ep)
+        except Exception:  # noqa: BLE001
+            want = ""
+        if want and ":" in want:
+            for n in nodes:
+                if n.mac and normalize_mac(n.mac) == want:
+                    return n
+
+    want_name = (name or "").strip().lower()
+    if want_name:
+        for n in nodes:
+            hay = f"{n.description} {n.name}".lower()
+            if want_name in hay or (
+                n.description and n.description.strip().lower() == want_name
+            ):
+                return n
+
+    # Prefer a single bluez_input when host asks for BT A2DP.
+    path_nodes = [
+        n
+        for n in nodes
+        if classify_capture_source(n) == prefer_path and is_capture_candidate(n)
+    ]
+    if len(path_nodes) == 1:
+        return path_nodes[0]
+    return None
+
+
+def build_capture_loopback_commands(
+    *,
+    host_id: str,
+    feeder: str,
+    source_ref: str,
+    tools: dict[str, Optional[str]],
+) -> tuple[list[list[str]], list[str]]:
+    """Wire a PipeWire source into musync_feeder (phone A2DP / USB → fan-out)."""
+    cmds: list[list[str]] = []
+    notes: list[str] = []
+    pactl = tools.get("pactl")
+    pw_link = tools.get("pw-link")
+    tag = capture_module_tag(host_id)
+
+    if pactl:
+        cmds.append(
+            [
+                pactl,
+                "load-module",
+                "module-loopback",
+                "latency_msec=20",
+                f"source={source_ref}",
+                f"sink={feeder}",
+                "sink_dont_move=true",
+                "source_dont_move=true",
+                f"sink_input_properties=media.name={tag}",
+            ]
+        )
+        notes.append(f"{host_id}: capture loopback {source_ref} → {feeder}")
+    elif pw_link:
+        cmds.append([pw_link, f"{source_ref}:capture_FL", f"{feeder}:playback_FL"])
+        cmds.append([pw_link, f"{source_ref}:capture_FR", f"{feeder}:playback_FR"])
+        notes.append(
+            f"{host_id}: pw-link capture (no latency tag) {source_ref} → {feeder}"
+        )
+    else:
+        notes.append(
+            f"{host_id}: no pactl/pw-link — cannot route {source_ref} into {feeder}"
+        )
+    return cmds, notes
+
+
+def capture_module_tag(host_id: str) -> str:
+    safe = re.sub(r"[^A-Za-z0-9_]+", "_", host_id)
+    return f"musync_capture_{safe}"
+
+
+def find_musync_capture_ids(modules_text: str, host_id: str) -> list[str]:
+    tag = capture_module_tag(host_id)
+    found: list[str] = []
+    for mid, rest in parse_pactl_modules_short(modules_text):
+        if tag in rest or f"musync_capture_{host_id}" in rest:
+            found.append(mid)
+    return found
 
 
 @dataclass

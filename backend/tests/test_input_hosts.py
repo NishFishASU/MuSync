@@ -1,11 +1,14 @@
-"""Phone/PC input hosts (≤4) + per-queue active input binding."""
+"""Phone/PC input hosts (≤4) + per-queue active input binding + live capture."""
 
 from __future__ import annotations
+
+from pathlib import Path
 
 from fastapi.testclient import TestClient
 
 from musync import app as app_module
 from musync.audio.mock import MockAudioBackend
+from musync.audio.pw_tools import parse_wpctl_sources
 from musync.models import (
     CapturePath,
     Device,
@@ -15,6 +18,8 @@ from musync.models import (
     QueueItemCreate,
     QueueItemPatch,
     SourceType,
+    TransportPut,
+    TransportState,
 )
 
 
@@ -37,8 +42,12 @@ def test_demo_hosts_and_max_four(tmp_path, monkeypatch) -> None:
         CapturePath.USB,
         CapturePath.NETWORK,
     }
+    # Mock seeds S21 FE as live BT A2DP.
+    s21 = next(h for h in hosts if "S21" in h.name)
+    assert s21.capture_path == CapturePath.BT_A2DP
+    assert s21.connected is True
+    assert s21.endpoint
 
-    # Fill to 4
     while len(backend.list_inputs()) < 4:
         n = len(backend.list_inputs()) + 1
         backend.add_input(
@@ -53,32 +62,43 @@ def test_demo_hosts_and_max_four(tmp_path, monkeypatch) -> None:
     assert raised
 
 
-def test_queue_binds_active_input(tmp_path, monkeypatch) -> None:
+def test_queue_binds_active_live_input(tmp_path, monkeypatch) -> None:
     backend = _backend(tmp_path, monkeypatch)
-    host = backend.list_inputs()[0]
+    host = next(h for h in backend.list_inputs() if h.connected)
     item = backend.add_queue_item(
         QueueItemCreate(source_type=SourceType.INPUT, input_id=host.id, title="Live from phone")
     )
     assert item.input_id == host.id
     assert item.source_type == SourceType.INPUT
-    assert item.available is False
+    assert item.available is True
     assert host.capture_path.value in (item.locator or "")
 
     other = backend.add_input(
-        InputHostCreate(name="Android", kind=HostKind.PHONE, capture_path=CapturePath.BT_A2DP)
+        InputHostCreate(
+            name="Android waiting",
+            kind=HostKind.PHONE,
+            capture_path=CapturePath.BT_A2DP,
+            connected=False,
+        )
     )
     patched = backend.patch_queue_item(item.id, QueueItemPatch(input_id=other.id))
     assert patched.input_id == other.id
     assert "bt_a2dp" in (patched.locator or "")
+    assert patched.available is False
 
+    # Re-bind to live host and play.
+    live = backend.patch_queue_item(item.id, QueueItemPatch(input_id=host.id))
+    assert live.available is True
     transport = backend.set_active_queue_item(item.id)
-    assert transport.input_id == other.id
+    assert transport.input_id == host.id
     assert transport.source_type == SourceType.INPUT
+    playing = backend.set_transport(TransportPut(state=TransportState.PLAYING))
+    assert playing.state == TransportState.PLAYING
 
 
 def test_per_host_catalog_contributions(tmp_path, monkeypatch) -> None:
     backend = _backend(tmp_path, monkeypatch)
-    host = backend.list_inputs()[0]
+    host = next(h for h in backend.list_inputs() if h.connected)
     sources = backend.list_sources()
     host_rows = [s for s in sources if s.input_id == host.id]
     types = {s.type for s in host_rows}
@@ -86,10 +106,13 @@ def test_per_host_catalog_contributions(tmp_path, monkeypatch) -> None:
     assert SourceType.SPOTIFY in types
     assert SourceType.APPLE in types
     assert SourceType.INPUT in types
-    assert all(not s.available for s in host_rows)
+    live = next(s for s in host_rows if s.type == SourceType.INPUT)
+    assert live.available is True
+    stubs = [s for s in host_rows if s.type != SourceType.INPUT]
+    assert all(not s.available for s in stubs)
 
 
-def test_api_inputs_and_queue_binding(tmp_path, monkeypatch) -> None:
+def test_api_inputs_discover_and_upload(tmp_path, monkeypatch) -> None:
     backend = _backend(tmp_path, monkeypatch)
     app_module.backend = backend
     client = TestClient(app_module.app)
@@ -98,34 +121,69 @@ def test_api_inputs_and_queue_binding(tmp_path, monkeypatch) -> None:
     assert listed.status_code == 200
     assert len(listed.json()) >= 1
 
+    discovered = client.get("/api/inputs/discover")
+    assert discovered.status_code == 200
+    body = discovered.json()
+    assert any("S21" in s["name"] or "bluez_input" in s.get("pw_name", "") for s in body["sources"])
+
     created = client.post(
         "/api/inputs",
         json={
             "name": "Work PC",
             "kind": "pc",
-            "capture_path": "usb",
+            "capture_path": "network",
             "armed": True,
         },
     )
     assert created.status_code == 201
     host_id = created.json()["id"]
-    assert created.json()["capture_path"] == "usb"
+    assert created.json()["capture_path"] == "network"
 
-    patched = client.patch(f"/api/inputs/{host_id}", json={"capture_path": "network"})
-    assert patched.status_code == 200
-    assert patched.json()["capture_path"] == "network"
+    # Upload stub → connected + playable into feeder path.
+    wav = tmp_path / "tone.wav"
+    # Minimal RIFF header + silence is enough for path existence; mpv not required in mock.
+    wav.write_bytes(b"RIFF" + b"\x00" * 36 + b"data" + b"\x00" * 8)
+    uploaded = client.post(
+        f"/api/inputs/{host_id}/upload",
+        files={"file": ("tone.wav", wav.read_bytes(), "audio/wav")},
+    )
+    assert uploaded.status_code == 200
+    assert uploaded.json()["connected"] is True
+    assert uploaded.json()["endpoint"]
+    assert Path(uploaded.json()["endpoint"]).is_file()
 
     queued = client.post(
         "/api/queue",
-        json={"source_type": "input", "input_id": host_id, "title": "PC line-in"},
+        json={"source_type": "input", "input_id": host_id, "title": "PC upload"},
     )
     assert queued.status_code == 201
-    assert queued.json()["input_id"] == host_id
+    assert queued.json()["available"] is True
 
     active = client.put("/api/queue/active", json={"id": queued.json()["id"]})
     assert active.status_code == 200
     assert active.json()["input_id"] == host_id
 
+    play = client.put("/api/transport", json={"state": "playing"})
+    assert play.status_code == 200
+    assert play.json()["state"] == "playing"
+
     deleted = client.delete(f"/api/inputs/{host_id}")
     assert deleted.status_code == 204
     assert all(h["id"] != host_id for h in client.get("/api/inputs").json())
+
+
+def test_parse_wpctl_sources_bluez_input() -> None:
+    sample = """
+Audio
+ ├─ Sinks:
+ │      48. bluez_output.AA_BB_CC_DD_EE_01.1
+ ├─ Sources:
+ │      61. bluez_input.AA_BB_CC_DD_EE_21 [vol: 1.00]
+ │      62. alsa_input.usb-Generic_USB_Audio-00.analog-stereo
+ ├─ Filters:
+"""
+    sources = parse_wpctl_sources(sample)
+    assert len(sources) >= 2
+    assert sources[0].id == "61"
+    assert "bluez_input" in sources[0].name
+    assert sources[0].mac == "AA:BB:CC:DD:EE:21"

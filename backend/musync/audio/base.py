@@ -5,6 +5,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 
 from ..models import (
+    CaptureDiscoverResponse,
     Device,
     DeviceConfigEntry,
     DeviceDiscoverResponse,
@@ -103,6 +104,25 @@ class AudioBackend(ABC):
     @abstractmethod
     def remove_input(self, host_id: str) -> None:
         ...
+
+    @abstractmethod
+    def discover_capture_sources(self) -> CaptureDiscoverResponse:
+        """List PipeWire Audio/Source nodes (bluez_input / USB) for host binding."""
+        ...
+
+    def bind_input_upload(self, host_id: str, file_path: str) -> InputHost:
+        """Network capture stub: point host at an uploaded file that plays into feeder."""
+        from ..models import CapturePath
+
+        return self.patch_input(
+            host_id,
+            InputHostPatch(
+                capture_path=CapturePath.NETWORK,
+                connected=True,
+                endpoint=file_path,
+                note=f"Upload → feeder · {file_path}",
+            ),
+        )
 
     @abstractmethod
     def health(self) -> Health:

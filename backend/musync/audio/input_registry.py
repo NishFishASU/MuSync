@@ -1,9 +1,10 @@
-"""Phone/PC input hosts (≤4) — capture paths are stubs until Pi wiring."""
+"""Phone/PC input hosts (≤4) — BT A2DP / USB / network capture into the feeder."""
 
 from __future__ import annotations
 
 import itertools
 import threading
+from pathlib import Path
 from typing import Optional
 
 from ..models import (
@@ -18,24 +19,51 @@ from ..models import (
 )
 
 CAPTURE_NOTES: dict[CapturePath, str] = {
-    CapturePath.BT_A2DP: "Stub — BT A2DP source→Pi not wired (dongle contention risk)",
-    CapturePath.USB: "Stub — USB audio interface capture not wired",
-    CapturePath.NETWORK: "Stub — network / AirPlay / upload path not wired",
+    CapturePath.BT_A2DP: "BT A2DP source → PipeWire bluez_input → musync_feeder",
+    CapturePath.USB: "USB audio capture → musync_feeder",
+    CapturePath.NETWORK: "Network / uploaded file → musync_feeder",
+}
+
+STUB_CAPTURE_NOTES: dict[CapturePath, str] = {
+    CapturePath.BT_A2DP: "Waiting for bluez_input — pair phone as A2DP source to Pi",
+    CapturePath.USB: "Waiting for USB Audio/Source on the Pi",
+    CapturePath.NETWORK: "Upload a file or set endpoint to play into the feeder",
 }
 
 
+def host_live_note(host: InputHost) -> str:
+    if host.connected and host.endpoint:
+        return f"Live · {CAPTURE_NOTES[host.capture_path]} · {host.endpoint}"
+    return host.note or STUB_CAPTURE_NOTES[host.capture_path]
+
+
+def host_is_live(host: InputHost) -> bool:
+    """True when this host can feed PCM into the fan-out right now."""
+    if not host.offers_live_input:
+        return False
+    if not host.connected:
+        return False
+    if not host.endpoint:
+        return False
+    if host.capture_path == CapturePath.NETWORK:
+        # Network path is live when endpoint is an existing file (upload stub).
+        return Path(host.endpoint).is_file()
+    # BT A2DP / USB: connected + PipeWire source endpoint.
+    return True
+
+
 def default_demo_hosts() -> list[InputHost]:
-    """Two example hosts so the UI is usable without registration ceremony."""
+    """Demo hosts — S21 FE BT path + USB PC; mock marks S21 live."""
     return [
         InputHost(
             id="input-1",
-            name="Nishanth's iPhone",
+            name="Galaxy S21 FE",
             kind=HostKind.PHONE,
-            capture_path=CapturePath.NETWORK,
+            capture_path=CapturePath.BT_A2DP,
             armed=True,
             connected=False,
-            endpoint="airplay:stub",
-            note=CAPTURE_NOTES[CapturePath.NETWORK],
+            endpoint=None,
+            note=STUB_CAPTURE_NOTES[CapturePath.BT_A2DP],
         ),
         InputHost(
             id="input-2",
@@ -44,8 +72,8 @@ def default_demo_hosts() -> list[InputHost]:
             capture_path=CapturePath.USB,
             armed=False,
             connected=False,
-            endpoint="usb:audio:stub",
-            note=CAPTURE_NOTES[CapturePath.USB],
+            endpoint=None,
+            note=STUB_CAPTURE_NOTES[CapturePath.USB],
         ),
     ]
 
@@ -106,7 +134,12 @@ class InputRegistry:
                 offers_spotify=body.offers_spotify,
                 offers_apple=body.offers_apple,
                 offers_live_input=body.offers_live_input,
-                note=body.note or CAPTURE_NOTES[body.capture_path],
+                note=body.note
+                or (
+                    CAPTURE_NOTES[body.capture_path]
+                    if body.connected and body.endpoint
+                    else STUB_CAPTURE_NOTES[body.capture_path]
+                ),
             )
             self._hosts[host.id] = host
             return host.model_copy(deep=True)
@@ -118,9 +151,15 @@ class InputRegistry:
             data = self._hosts[host_id].model_dump()
             updates = patch.model_dump(exclude_unset=True)
             data.update(updates)
-            if "capture_path" in updates and "note" not in updates:
+            if "note" not in updates:
                 path = CapturePath(data["capture_path"])
-                data["note"] = CAPTURE_NOTES[path]
+                connected = bool(data.get("connected"))
+                endpoint = data.get("endpoint")
+                data["note"] = (
+                    CAPTURE_NOTES[path]
+                    if connected and endpoint
+                    else STUB_CAPTURE_NOTES[path]
+                )
             updated = InputHost.model_validate(data)
             self._hosts[host_id] = updated
             return updated.model_copy(deep=True)
@@ -132,11 +171,11 @@ class InputRegistry:
             del self._hosts[host_id]
 
     def catalog_sources(self) -> list[Source]:
-        """Per-host contribution stubs: local / Spotify / Apple / live input."""
+        """Per-host contribution rows: local / Spotify / Apple stubs + live input."""
         with self._lock:
             out: list[Source] = []
             for host in self._hosts.values():
-                path_note = CAPTURE_NOTES[host.capture_path]
+                path_note = host_live_note(host)
                 if host.offers_local:
                     out.append(
                         Source(
@@ -174,15 +213,16 @@ class InputRegistry:
                         )
                     )
                 if host.offers_live_input:
+                    live = host_is_live(host)
                     out.append(
                         Source(
                             id=f"host:{host.id}:input",
                             title=f"{host.name} · live ({host.capture_path.value})",
                             type=SourceType.INPUT,
                             locator=f"input:{host.id}:{host.capture_path.value}",
-                            available=False,
+                            available=live,
                             input_id=host.id,
-                            note=path_note,
+                            note=None if live else path_note,
                         )
                     )
             return out

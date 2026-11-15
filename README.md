@@ -60,13 +60,15 @@ config/
   devices.pi-2sink.example.yaml   # start here on Pi
   devices.example.yaml            # full 6-sink template
 docs/pi-pipewire.md
-docs/spp-network-sink.md   # Simple Protocol Player TCP output
-docs/wifi-join.md          # phone hotspot join (nmcli)
+docs/spp-network-sink.md              # phone as SPP TCP *output*
+docs/phone-bt-source-vs-spp-sink.md   # phone as BT A2DP *source* vs SPP sink
+docs/wifi-join.md                     # phone hotspot join (nmcli)
 backend/musync/wifi/       # nmcli on Pi; mock on laptop
 scripts/build_web.sh  run_dev.sh  run_pi.sh  pair_bt600.sh
 ```
 
-SPP phone sink: enable `spp-1` (`kind: network_spp`) in devices config, Play a local track, connect Simple Protocol Player to the Pi IP on port `1234` (48000 mono). Details: [docs/spp-network-sink.md](docs/spp-network-sink.md).
+Phone **input** (S21 FE → `bluez_input` → feeder): [docs/phone-bt-source-vs-spp-sink.md](docs/phone-bt-source-vs-spp-sink.md).  
+SPP phone **sink**: enable Phone SPP in Device setup, connect Simple Protocol Player to Pi IP:port — [docs/spp-network-sink.md](docs/spp-network-sink.md).
 
 ## API (minimum)
 
@@ -83,7 +85,9 @@ SPP phone sink: enable `spp-1` (`kind: network_spp`) in devices config, Play a l
 | `PUT` | `/api/queue/active` | `{ id }` — play this queue item (feeder swap only) |
 | `DELETE` | `/api/queue/{id}` | Remove a queue item |
 | `GET`/`POST` | `/api/inputs` | Register ≤4 phone/PC hosts (`capture_path`: `bt_a2dp`\|`usb`\|`network`) |
-| `PATCH`/`DELETE` | `/api/inputs/{id}` | Arm / change capture path / remove host |
+| `GET` | `/api/inputs/discover` | Live PipeWire sources (`bluez_input` / USB) for host binding |
+| `POST` | `/api/inputs/{id}/upload` | Network path: upload file that plays into the feeder |
+| `PATCH`/`DELETE` | `/api/inputs/{id}` | Arm / bind endpoint / remove host |
 | `GET` | `/api/wifi` | Wi-Fi status + IPv4 (for SPP / LAN) |
 | `GET`/`POST`/`DELETE` | `/api/wifi/networks` | List / pre-save / forget SSIDs (no passwords returned) |
 | `POST` | `/api/wifi/connect` | Join SSID (`password` optional if saved) |
@@ -104,7 +108,7 @@ Pi tip: `web/build/` is gitignored — build on a laptop (or once on the Pi with
 | Sinks | In-memory fake devices (≤6) | Same model; maps MAC/`pw_node` → WirePlumber ids |
 | Delay | Stored on device object | `pactl module-loopback latency_msec=N` from feeder |
 | Volume/mute | In-memory | `wpctl set-volume` / `set-mute` |
-| Playback | Software clock | `mpv --ao=pipewire --audio-device=musync_feeder` |
+| Playback | Software clock (+ live input cue) | `mpv` **or** `bluez_input`/`USB` loopback → `musync_feeder` |
 | Without hardware | Always | **Dry-run**: writes `config/pipewire-graph.plan.sh` |
 | UI | Same SvelteKit `web/build` | Same |
 

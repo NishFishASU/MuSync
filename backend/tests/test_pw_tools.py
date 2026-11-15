@@ -1,10 +1,14 @@
 from __future__ import annotations
 
 from musync.audio.pw_tools import (
+    build_capture_loopback_commands,
     build_sink_commands,
+    classify_capture_source,
     find_musync_loopback_ids,
+    is_capture_candidate,
     match_device_node,
     normalize_mac,
+    parse_wpctl_sources,
     parse_wpctl_status,
     PwNode,
 )
@@ -21,6 +25,8 @@ Audio
  │
  ├─ Sources:
  │      51. Mic
+ │      61. bluez_input.AA_BB_CC_DD_EE_21 [vol: 1.00]
+ │      62. alsa_input.usb-Generic_USB_Audio-00.analog-stereo
  │
  ├─ Filters:
  │
@@ -83,3 +89,28 @@ def test_build_sink_commands_with_pactl() -> None:
 def test_find_musync_loopback_ids() -> None:
     text = "12\tmodule-loopback sink_input_properties=media.name=musync_loopback_sink_1\n"
     assert find_musync_loopback_ids(text, "sink-1") == ["12"]
+
+
+def test_parse_wpctl_sources_and_classify() -> None:
+    sources = parse_wpctl_sources(SAMPLE_WPCTL)
+    bluez = next(s for s in sources if "bluez_input" in s.name)
+    usb = next(s for s in sources if "alsa_input" in s.name)
+    assert bluez.mac == "AA:BB:CC:DD:EE:21"
+    assert classify_capture_source(bluez) == "bt_a2dp"
+    assert classify_capture_source(usb) == "usb"
+    assert is_capture_candidate(bluez)
+    assert is_capture_candidate(usb)
+
+
+def test_build_capture_loopback_commands() -> None:
+    cmds, notes = build_capture_loopback_commands(
+        host_id="input-1",
+        feeder="musync_feeder",
+        source_ref="bluez_input.AA_BB_CC_DD_EE_21",
+        tools={"pactl": "/usr/bin/pactl", "pw-link": None},
+    )
+    flat = [" ".join(c) for c in cmds]
+    assert any("module-loopback" in line for line in flat)
+    assert any("bluez_input.AA_BB_CC_DD_EE_21" in line for line in flat)
+    assert any("sink=musync_feeder" in line for line in flat)
+    assert notes

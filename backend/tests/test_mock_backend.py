@@ -94,6 +94,8 @@ def test_health_and_sources(backend: MockAudioBackend) -> None:
     assert any(s.available for s in sources)
     assert any(not s.available and s.type.value == "spotify" for s in sources)
     assert any(not s.available and s.type.value == "apple" for s in sources)
+    # Live S21 FE input is available; waiting USB host still contributes an unavailable row.
+    assert any(s.available and s.type.value == "input" for s in sources)
     assert any(not s.available and s.type.value == "input" for s in sources)
 
 

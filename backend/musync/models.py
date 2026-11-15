@@ -137,11 +137,11 @@ class SourceType(str, Enum):
 
 
 class CapturePath(str, Enum):
-    """How a phone/PC feeds the Pi — stubs until capture is wired on hardware."""
+    """How a phone/PC feeds the Pi."""
 
-    BT_A2DP = "bt_a2dp"  # device as A2DP source → Pi
-    USB = "usb"  # USB audio interface / UAC from PC
-    NETWORK = "network"  # AirPlay / Pulse / file upload stub
+    BT_A2DP = "bt_a2dp"  # device as A2DP source → bluez_input → feeder
+    USB = "usb"  # USB audio interface / UAC from PC → feeder
+    NETWORK = "network"  # uploaded file / network path played into feeder
 
 
 class HostKind(str, Enum):
@@ -152,8 +152,9 @@ class HostKind(str, Enum):
 
 MAX_INPUT_HOSTS = 4
 
-# Source types that can actually feed PCM today.
-PLAYABLE_SOURCE_TYPES = frozenset({SourceType.LOCAL})
+# Source types that can feed PCM when their prerequisites are met.
+# INPUT is playable when the bound host is live (connected capture endpoint).
+PLAYABLE_SOURCE_TYPES = frozenset({SourceType.LOCAL, SourceType.INPUT})
 
 
 class Source(BaseModel):
@@ -172,7 +173,7 @@ class Source(BaseModel):
 
 
 class InputHost(BaseModel):
-    """A phone or PC that can feed the hub (≤4). Capture is stubbed."""
+    """A phone or PC that can feed the hub (≤4)."""
 
     id: str
     name: str
@@ -180,7 +181,7 @@ class InputHost(BaseModel):
     capture_path: CapturePath = CapturePath.NETWORK
     armed: bool = False
     connected: bool = False
-    endpoint: Optional[str] = None
+    endpoint: Optional[str] = None  # PipeWire source name/id or upload file path
     # What this host can contribute into the queue (stubs OK).
     offers_local: bool = True
     offers_spotify: bool = True
@@ -215,6 +216,25 @@ class InputHostPatch(BaseModel):
     offers_apple: Optional[bool] = None
     offers_live_input: Optional[bool] = None
     note: Optional[str] = None
+
+
+class DiscoveredCaptureSource(BaseModel):
+    """A PipeWire Audio/Source usable as phone/PC live input (e.g. bluez_input)."""
+
+    name: str
+    pw_node: str = ""
+    pw_name: str = ""
+    mac: str = ""
+    capture_path: CapturePath = CapturePath.BT_A2DP
+    connected: bool = True
+    configured_id: Optional[str] = None
+
+
+class CaptureDiscoverResponse(BaseModel):
+    """Discovery payload for binding a host to a live PipeWire source."""
+
+    sources: list[DiscoveredCaptureSource] = Field(default_factory=list)
+    detail: str = ""
 
 
 class QueueItem(BaseModel):

@@ -2,19 +2,21 @@
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from urllib.parse import unquote
 
-from fastapi import FastAPI, HTTPException, Request, Response
+from fastapi import FastAPI, File, HTTPException, Request, Response, UploadFile
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from . import __version__
 from .audio import AudioBackend, create_backend
-from .config import web_root
+from .config import media_library_path, web_root
 from .models import (
     ActiveQueuePut,
     ActiveSourcePut,
+    CaptureDiscoverResponse,
     Device,
     DeviceDiscoverResponse,
     DevicePatch,
@@ -150,8 +152,14 @@ def api_set_active_queue_item(body: ActiveQueuePut) -> Transport:
 
 @app.get("/api/inputs", response_model=list[InputHost])
 def api_list_inputs() -> list[InputHost]:
-    """Registered phone/PC hosts (≤4). Capture paths are stubs."""
+    """Registered phone/PC hosts (≤4). Live hosts refresh from PipeWire sources."""
     return backend.list_inputs()
+
+
+@app.get("/api/inputs/discover", response_model=CaptureDiscoverResponse)
+def api_discover_inputs() -> CaptureDiscoverResponse:
+    """Discover bluez_input / USB Audio/Source nodes for host binding."""
+    return backend.discover_capture_sources()
 
 
 @app.post("/api/inputs", response_model=InputHost, status_code=201)
@@ -162,6 +170,25 @@ def api_add_input(body: InputHostCreate) -> InputHost:
 @app.patch("/api/inputs/{host_id}", response_model=InputHost)
 def api_patch_input(host_id: str, patch: InputHostPatch) -> InputHost:
     return backend.patch_input(host_id, patch)
+
+
+@app.post("/api/inputs/{host_id}/upload", response_model=InputHost)
+async def api_upload_input(host_id: str, file: UploadFile = File(...)) -> InputHost:
+    """Network capture stub: save upload and route playback into the feeder."""
+    hosts = {h.id: h for h in backend.list_inputs()}
+    if host_id not in hosts:
+        raise KeyError(f"Unknown input host: {host_id}")
+
+    raw_name = Path(file.filename or "upload.bin").name
+    safe = re.sub(r"[^A-Za-z0-9._-]+", "_", raw_name) or "upload.bin"
+    dest_dir = media_library_path() / "uploads" / host_id
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    dest = dest_dir / safe
+    data = await file.read()
+    if not data:
+        raise ValueError("Uploaded file is empty")
+    dest.write_bytes(data)
+    return backend.bind_input_upload(host_id, str(dest.resolve()))
 
 
 @app.delete("/api/inputs/{host_id}", status_code=204)
