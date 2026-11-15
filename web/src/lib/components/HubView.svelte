@@ -35,6 +35,7 @@
 		discoverInputs,
 		fmtMs,
 		forgetWifiNetwork,
+		getAvrcpStatus,
 		getHealth,
 		SPOTIFY_LOGIN_HREF,
 		fetchSpotifyAuthorizeUrl,
@@ -86,6 +87,8 @@
 	let transport = $state(null);
 	/** @type {import('$lib/api.js').Health | null} */
 	let health = $state(null);
+	/** @type {import('$lib/api.js').AvrcpStatus | null} */
+	let avrcp = $state(null);
 	/** @type {import('$lib/api.js').WifiStatus | null} */
 	let wifi = $state(null);
 	/** @type {import('$lib/api.js').WifiNetwork[]} */
@@ -362,7 +365,29 @@
 			typeof healthyAdapters === 'number' && typeof adapterN === 'number'
 				? ` · BT ${healthyAdapters}/${adapterN}`
 				: '';
-		return `${mode} · ${health.enabled_count}/${health.sink_count} outs · ${inputs.length}/4 ins${adapters}${readiness}`;
+		const buttons =
+			health.backend === 'pipewire' && health.avrcp_player_registered === false
+				? ' · no headset buttons'
+				: health.avrcp_player_registered
+					? ' · AVRCP'
+					: '';
+		return `${mode} · ${health.enabled_count}/${health.sink_count} outs · ${inputs.length}/4 ins${adapters}${readiness}${buttons}`;
+	});
+
+	const avrcpWarn = $derived.by(() => {
+		if (!avrcp || health?.backend !== 'pipewire') return '';
+		if (avrcp.player_registered) return '';
+		if (avrcp.dbus_import_ok === false) {
+			return (
+				avrcp.last_error ||
+				'Headset buttons unavailable — install python3-dbus/gi and use a venv with system-site-packages'
+			);
+		}
+		return (
+			avrcp.last_error ||
+			avrcp.detail ||
+			'Headset play/pause/skip not registered (Absolute Volume may still work)'
+		);
 	});
 
 	const healthyAdapterCount = $derived(btAdapters.filter((a) => a.healthy !== false).length);
@@ -674,7 +699,7 @@
 	}
 
 	async function refresh() {
-		const [h, d, t, s, q, qs, i, st, np] = await Promise.all([
+		const [h, d, t, s, q, qs, i, st, np, av] = await Promise.all([
 			getHealth(),
 			listDevices(),
 			getTransport(),
@@ -683,7 +708,8 @@
 			getQueueSettings().catch(() => null),
 			listInputs(),
 			getStreamingStatus().catch(() => null),
-			getNowPlaying().catch(() => null)
+			getNowPlaying().catch(() => null),
+			getAvrcpStatus().catch(() => null)
 		]);
 		health = h;
 		devices = d;
@@ -693,6 +719,7 @@
 		inputs = i;
 		if (st) streaming = st;
 		if (np) nowPlaying = np;
+		if (av) avrcp = av;
 		apiError = '';
 		if (!selectedId && d.length) selectedId = d[0].id;
 		applyTransport(t);
@@ -1617,11 +1644,17 @@
 		<div
 			class="health"
 			data-ok={apiError ? 'false' : health ? String(Boolean(health.ok)) : undefined}
-			title={health?.detail || apiError || ''}
+			title={avrcpWarn || health?.detail || apiError || ''}
 		>
 			{healthLabel}
 		</div>
 	</header>
+
+	{#if avrcpWarn}
+		<p class="avrcp-warn" role="status" title={avrcp?.detail || ''}>
+			{avrcpWarn}
+		</p>
+	{/if}
 
 	{#if section !== 'now'}
 	<aside class="sticky-chrome" aria-label="Now playing">

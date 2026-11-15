@@ -1051,7 +1051,8 @@ class SpotifyClient:
         if not self.authenticated():
             return
         try:
-            self._put_json("/me/player/pause", json_body=None)
+            # Short timeout — pause must not gate hub local/YouTube PCM start.
+            self._put_json("/me/player/pause", json_body=None, timeout=3.0)
         except Exception as exc:  # noqa: BLE001
             log.debug("Spotify pause: %s", exc)
 
@@ -1061,11 +1062,14 @@ class SpotifyClient:
         Uses Web API ``/me/player/pause`` when OAuth tokens exist. Returns True
         when the pause request succeeded. Cannot mute non-Spotify phone apps —
         the MuSync SPA has no OS-level exclusive-audio API on Android/iOS.
+
+        Keep the HTTP timeout short: hub Play starts PCM first and pauses the
+        phone asynchronously — a 20s Spotify hang must not delay local audio.
         """
         if not self.authenticated():
             return False
         try:
-            self._put_json("/me/player/pause", json_body=None)
+            self._put_json("/me/player/pause", json_body=None, timeout=3.0)
             log.info("Paused Spotify remote playback (phone/other devices yield to hub)")
             return True
         except Exception as exc:  # noqa: BLE001
@@ -1314,8 +1318,9 @@ class SpotifyClient:
         *,
         params: Optional[dict[str, str]] = None,
         json_body: Optional[dict[str, Any]],
+        timeout: float = 20.0,
     ) -> None:
-        with httpx.Client(timeout=20.0) as client:
+        with httpx.Client(timeout=float(timeout)) as client:
             resp = client.put(
                 f"{SPOTIFY_API}{path}",
                 headers=self._headers(),
