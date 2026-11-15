@@ -58,16 +58,19 @@ config/
   devices.pi-2sink.example.yaml   # start here on Pi
   devices.example.yaml            # full 6-sink template
 docs/pi-pipewire.md
+docs/spp-network-sink.md   # Simple Protocol Player TCP output
 scripts/build_web.sh  run_dev.sh  run_pi.sh  pair_bt600.sh
 ```
+
+SPP phone sink: enable `spp-1` (`kind: network_spp`) in devices config, Play a local track, connect Simple Protocol Player to the Pi IP on port `1234` (48000 mono). Details: [docs/spp-network-sink.md](docs/spp-network-sink.md).
 
 ## API (minimum)
 
 | Method | Path | Purpose |
 |--------|------|---------|
 | `GET` | `/api/health` | Backend, PipeWire up?, mapped sinks, graph dry-run |
-| `GET` | `/api/devices` | List sinks |
-| `PATCH` | `/api/devices/{id}` | `{ delay_ms?, volume?, mute?, enabled?, pw_node? }` |
+| `GET` | `/api/devices` | List sinks (Bluetooth + optional `network_spp`) |
+| `PATCH` | `/api/devices/{id}` | `{ delay_ms?, volume?, mute?, enabled?, listen_port?, … }` |
 | `GET`/`PUT` | `/api/transport` | `{ state, position_ms, source_id?, queue_item_id? }` |
 | `GET` | `/api/sources` | Catalog: `local` + `spotify` / `apple` / `input` stubs |
 | `PUT` | `/api/sources/active` | `{ id }` — activate catalog entry (feeder swap only) |

@@ -5,9 +5,10 @@ from __future__ import annotations
 import threading
 from typing import Optional
 
-from ..config import clamp_delay_ms, clamp_volume, load_devices, save_devices
+from ..config import clamp_delay_ms, clamp_volume, load_devices, save_devices, validate_devices
 from ..models import (
     Device,
+    DeviceKind,
     DevicePatch,
     Health,
     InputHost,
@@ -32,12 +33,11 @@ class MockAudioBackend(AudioBackend):
 
     def __init__(self, devices: Optional[list[Device]] = None) -> None:
         self._lock = threading.RLock()
+        loaded = devices if devices is not None else load_devices()
+        validate_devices(loaded)
         self._devices: dict[str, Device] = {
-            d.id: d.model_copy(deep=True)
-            for d in (devices if devices is not None else load_devices())
+            d.id: d.model_copy(deep=True) for d in loaded
         }
-        if len(self._devices) > 6:
-            raise ValueError("Mock backend supports at most 6 sinks")
 
         # Feeder callbacks are no-ops: mock has no PipeWire graph to preserve.
         self._inputs = InputRegistry(lock=self._lock)
@@ -73,6 +73,11 @@ class MockAudioBackend(AudioBackend):
                 updates["volume"] = clamp_volume(updates["volume"])
             data.update(updates)
             updated = Device.model_validate(data)
+            # SPP mock: "connected" means armed/listening when enabled.
+            if updated.kind == DeviceKind.NETWORK_SPP and "connected" not in updates:
+                updated.connected = bool(updated.enabled)
+            trial = [updated if d.id == device_id else d for d in self._devices.values()]
+            validate_devices(trial)
             self._devices[device_id] = updated
             self._persist()
             return updated.model_copy(deep=True)

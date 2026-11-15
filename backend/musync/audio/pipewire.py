@@ -57,9 +57,11 @@ from ..config import (
     load_devices,
     repo_root,
     save_devices,
+    validate_devices,
 )
 from ..models import (
     Device,
+    DeviceKind,
     DevicePatch,
     Health,
     InputHost,
@@ -88,6 +90,7 @@ from .pw_tools import (
     which,
 )
 from .source_session import SourceSession
+from .spp import build_spp_ffmpeg_from_pulse, spp_plan_notes, spp_tcp_url
 
 log = logging.getLogger(__name__)
 
@@ -101,24 +104,26 @@ class PipeWireBackend(AudioBackend):
 
     def __init__(self, devices: Optional[list[Device]] = None) -> None:
         self._lock = threading.RLock()
+        loaded = devices if devices is not None else load_devices()
+        validate_devices(loaded)
         self._devices: dict[str, Device] = {
-            d.id: d.model_copy(deep=True)
-            for d in (devices if devices is not None else load_devices())
+            d.id: d.model_copy(deep=True) for d in loaded
         }
-        if len(self._devices) > 6:
-            raise ValueError("MuSync supports at most 6 sinks")
         if len(self._devices) < 1:
             raise ValueError("At least one device profile is required")
 
         self._feeder = os.environ.get("MUSYNC_PW_FEEDER", DEFAULT_FEEDER).strip() or DEFAULT_FEEDER
         self._pw_node_ids: dict[str, str] = {
-            d.id: d.pw_node for d in self._devices.values() if d.pw_node
+            d.id: d.pw_node
+            for d in self._devices.values()
+            if d.pw_node and d.kind == DeviceKind.BLUETOOTH
         }
         self._pw_node_names: dict[str, str] = {}
         self._loopback_module_ids: dict[str, str] = {}
         self._last_plan: Optional[GraphPlan] = None
         self._discovered: list[PwNode] = []
         self._player_proc: Optional[subprocess.Popen[str]] = None
+        self._spp_procs: dict[str, subprocess.Popen[str]] = {}
 
         self._tools = {
             "wpctl": which("wpctl"),
@@ -128,6 +133,7 @@ class PipeWireBackend(AudioBackend):
             "mpv": which("mpv"),
             "pactl": which("pactl"),
             "bluetoothctl": which("bluetoothctl"),
+            "ffmpeg": which("ffmpeg"),
         }
 
         # Song/source switches only stop/start the feeder player — sink graph stays.
@@ -196,6 +202,9 @@ class PipeWireBackend(AudioBackend):
 
         mapped: dict[str, str] = {}
         for device in self._devices.values():
+            if device.kind == DeviceKind.NETWORK_SPP:
+                # SPP has no bluez node; connected reflects ffmpeg listen state.
+                continue
             node = match_device_node(
                 mac=device.mac,
                 hci=device.hci,
@@ -253,6 +262,26 @@ class PipeWireBackend(AudioBackend):
         for device in self._devices.values():
             if not device.enabled:
                 plan.skipped.append(f"{device.id} disabled")
+                continue
+
+            # SPP TCP network sink — long-lived ffmpeg listen (managed separately).
+            if device.kind == DeviceKind.NETWORK_SPP:
+                plan.notes.extend(spp_plan_notes(device, feeder=self._feeder))
+                if not self._tools.get("ffmpeg"):
+                    plan.notes.append(
+                        f"{device.id}: ffmpeg missing — install ffmpeg for SPP TCP listen"
+                    )
+                plan.links.append(
+                    GraphLink(
+                        device_id=device.id,
+                        source=f"{self._feeder}.monitor",
+                        target=spp_tcp_url(device),
+                        delay_ms=device.delay_ms,
+                        volume=device.volume,
+                        mute=device.mute,
+                        commands=[],  # started via _sync_spp_listeners (not one-shot)
+                    )
+                )
                 continue
 
             node_id = self._pw_node_ids.get(device.id, "")
@@ -333,6 +362,9 @@ class PipeWireBackend(AudioBackend):
             self._exec_soft([pactl, "unload-module", found])
 
     def _apply_volume(self, device: Device) -> None:
+        if device.kind == DeviceKind.NETWORK_SPP:
+            self._restart_spp_listener(device)
+            return
         node = self._pw_node_ids.get(device.id)
         wpctl = self._tools["wpctl"]
         if not node or not wpctl or self._env_dry_run():
@@ -347,6 +379,9 @@ class PipeWireBackend(AudioBackend):
         self._exec_soft([wpctl, "set-volume", node, f"{device.volume:.3f}"])
 
     def _apply_mute(self, device: Device) -> None:
+        if device.kind == DeviceKind.NETWORK_SPP:
+            self._restart_spp_listener(device)
+            return
         node = self._pw_node_ids.get(device.id)
         wpctl = self._tools["wpctl"]
         if not node or not wpctl or self._env_dry_run():
@@ -355,11 +390,79 @@ class PipeWireBackend(AudioBackend):
         self._exec_soft([wpctl, "set-mute", node, "1" if device.mute else "0"])
 
     def _apply_delay(self, device: Device) -> None:
-        """Re-wire this sink's loopback with updated latency_msec."""
+        """Re-wire this sink's loopback (BT) or restart SPP ffmpeg with adelay."""
         if not device.enabled:
+            if device.kind == DeviceKind.NETWORK_SPP:
+                self._stop_spp_listener(device.id)
             return
-        # Rebuild just this sink by running ensure_graph for all — keeps feeder shared.
+        if device.kind == DeviceKind.NETWORK_SPP:
+            self._restart_spp_listener(device)
+            return
+        # Rebuild just this sink by running ensure_graph — keeps feeder shared.
         self._ensure_graph(only_device=device.id)
+
+    def _stop_spp_listener(self, device_id: str) -> None:
+        proc = self._spp_procs.pop(device_id, None)
+        if proc is None:
+            return
+        if proc.poll() is None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=2.0)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+
+    def _restart_spp_listener(self, device: Device) -> None:
+        """Keep TCP listen up while enabled so the phone can connect anytime."""
+        self._stop_spp_listener(device.id)
+        if device.kind != DeviceKind.NETWORK_SPP or not device.enabled:
+            device.connected = False
+            return
+
+        if self._env_dry_run():
+            log.info(
+                "Dry-run SPP: %s",
+                " ".join(build_spp_ffmpeg_from_pulse(device, feeder=self._feeder)),
+            )
+            device.connected = True
+            return
+
+        ff = self._tools.get("ffmpeg")
+        if not ff:
+            log.warning("ffmpeg missing — cannot start SPP listener for %s", device.id)
+            device.connected = False
+            return
+
+        cmd = build_spp_ffmpeg_from_pulse(device, feeder=self._feeder, ffmpeg_bin=ff)
+        try:
+            self._spp_procs[device.id] = subprocess.Popen(
+                cmd,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                text=True,
+            )
+            device.connected = True
+            log.info(
+                "SPP listening %s → %s (pid %s)",
+                device.id,
+                spp_tcp_url(device),
+                self._spp_procs[device.id].pid,
+            )
+        except OSError as exc:
+            log.warning("Failed to start SPP listener %s: %s", device.id, exc)
+            device.connected = False
+
+    def _sync_spp_listeners(self, only_device: str | None = None) -> None:
+        for device in self._devices.values():
+            if device.kind != DeviceKind.NETWORK_SPP:
+                continue
+            if only_device and device.id != only_device:
+                continue
+            if device.enabled:
+                self._restart_spp_listener(device)
+            else:
+                self._stop_spp_listener(device.id)
+                device.connected = False
 
     def _ensure_graph(self, only_device: str | None = None) -> GraphPlan:
         """Ensure feeder → delay/volume → enabled sinks.
@@ -382,6 +485,8 @@ class PipeWireBackend(AudioBackend):
                 len(plan.links),
                 len(plan.skipped),
             )
+            # Still "arm" SPP in dry-run so UI shows connected when enabled.
+            self._sync_spp_listeners(only_device=only_device)
             return plan
 
         # Live path — create feeder (idempotent soft-fail if exists).
@@ -391,6 +496,9 @@ class PipeWireBackend(AudioBackend):
         for link in plan.links:
             if only_device and link.device_id != only_device:
                 continue
+            device = self._devices.get(link.device_id)
+            if device and device.kind == DeviceKind.NETWORK_SPP:
+                continue  # SPP ffmpeg is long-lived; see _sync_spp_listeners
             self._unload_loopback(link.device_id)
             for cmd in link.commands:
                 proc = self._exec_soft(cmd)
@@ -410,9 +518,13 @@ class PipeWireBackend(AudioBackend):
         for device in self._devices.values():
             if only_device and device.id != only_device:
                 continue
+            if device.kind == DeviceKind.NETWORK_SPP:
+                continue
             if not device.enabled:
                 self._unload_loopback(device.id)
 
+        # SPP TCP listeners share the feeder; independent of bluez loopbacks.
+        self._sync_spp_listeners(only_device=only_device)
         return plan
 
     def _stop_player_process(self) -> None:
@@ -503,17 +615,32 @@ class PipeWireBackend(AudioBackend):
                 updates["volume"] = clamp_volume(updates["volume"])
             data.update(updates)
             updated = Device.model_validate(data)
+            trial = [updated if d.id == device_id else d for d in self._devices.values()]
+            validate_devices(trial)
             self._devices[device_id] = updated
-            if updated.pw_node:
+            if updated.kind == DeviceKind.BLUETOOTH and updated.pw_node:
                 self._pw_node_ids[device_id] = updated.pw_node
             self._persist()
 
-            if "volume" in updates:
-                self._apply_volume(updated)
-            if "mute" in updates:
-                self._apply_mute(updated)
-            if "delay_ms" in updates or "enabled" in updates or "pw_node" in updates:
-                self._ensure_graph(only_device=device_id)
+            spp_fields = {
+                "listen_host",
+                "listen_port",
+                "sample_rate",
+                "channels",
+                "delay_ms",
+                "volume",
+                "mute",
+                "enabled",
+            }
+            if updated.kind == DeviceKind.NETWORK_SPP and spp_fields & set(updates):
+                self._restart_spp_listener(updated)
+            else:
+                if "volume" in updates:
+                    self._apply_volume(updated)
+                if "mute" in updates:
+                    self._apply_mute(updated)
+                if "delay_ms" in updates or "enabled" in updates or "pw_node" in updates:
+                    self._ensure_graph(only_device=device_id)
 
             return updated.model_copy(deep=True)
 

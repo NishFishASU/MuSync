@@ -106,7 +106,7 @@
 	}
 
 	/**
-	 * @param {Partial<Pick<import('$lib/api.js').Device, 'delay_ms' | 'volume' | 'mute' | 'enabled'>>} partial
+	 * @param {Partial<Pick<import('$lib/api.js').Device, 'delay_ms' | 'volume' | 'mute' | 'enabled' | 'listen_host' | 'listen_port' | 'sample_rate' | 'channels'>>} partial
 	 */
 	function queueDevicePatch(partial) {
 		const id = selectedId;
@@ -412,7 +412,7 @@
 		<section class="panel devices-panel" aria-labelledby="devices-heading">
 			<div class="panel-head">
 				<h2 id="devices-heading">Devices</h2>
-				<p class="hint">Up to 6 BT sinks · tap a row for delay &amp; volume</p>
+				<p class="hint">BT sinks + SPP TCP · tap a row for delay &amp; volume</p>
 			</div>
 			<ul class="device-list">
 				{#each devices as d (d.id)}
@@ -427,13 +427,28 @@
 							}}
 						>
 							<span>
-								<span class="device-title">{d.name}</span>
+								<span class="device-title">
+									{d.name}
+									{#if d.kind === 'network_spp'}
+										<span class="type-chip">SPP</span>
+									{/if}
+								</span>
 								<span class="device-sub">
-									{d.hci || '—'} · {d.mac || 'no MAC'} · delay {d.delay_ms} ms · vol {Math.round(d.volume * 100)}%
+									{#if d.kind === 'network_spp'}
+										tcp://{d.listen_host || '0.0.0.0'}:{d.listen_port || 1234} · {d.sample_rate || 48000} Hz · {d.channels || 1} ch · delay {d.delay_ms} ms · vol {Math.round(d.volume * 100)}%
+									{:else}
+										{d.hci || '—'} · {d.mac || 'no MAC'} · delay {d.delay_ms} ms · vol {Math.round(d.volume * 100)}%
+									{/if}
 								</span>
 							</span>
 							<span class="status-pill {d.connected ? 'linked' : 'missing'}">
-								{d.connected ? 'linked' : 'missing'}{d.enabled ? '' : ' · off'}
+								{d.kind === 'network_spp'
+									? d.enabled
+										? 'listen'
+										: 'off'
+									: d.connected
+										? 'linked'
+										: 'missing'}{d.enabled || d.kind === 'network_spp' ? '' : ' · off'}
 							</span>
 						</button>
 					</li>
@@ -457,8 +472,57 @@
 				</div>
 				<p class="detail-name">{selected.name}</p>
 				<p class="detail-meta">
-					{selected.hci || 'hci?'} · {selected.mac || 'MAC unset'} · {selected.connected ? 'linked' : 'missing'}
+					{#if selected.kind === 'network_spp'}
+						SPP TCP · {selected.listen_host}:{selected.listen_port} · {selected.sample_rate} Hz / {selected.channels} ch · {selected.connected ? 'listening' : 'idle'}
+					{:else}
+						{selected.hci || 'hci?'} · {selected.mac || 'MAC unset'} · {selected.connected ? 'linked' : 'missing'}
+					{/if}
 				</p>
+
+				{#if selected.kind === 'network_spp'}
+					<label class="field">
+						<span>Listen port</span>
+						<input
+							type="number"
+							min="1"
+							max="65535"
+							value={selected.listen_port || 1234}
+							oninput={(e) => {
+								queueDevicePatch({
+									listen_port: Number(/** @type {HTMLInputElement} */ (e.currentTarget).value)
+								});
+							}}
+						/>
+					</label>
+					<label class="field">
+						<span>Sample rate</span>
+						<select
+							value={selected.sample_rate || 48000}
+							onchange={(e) => {
+								queueDevicePatch({
+									sample_rate: Number(/** @type {HTMLSelectElement} */ (e.currentTarget).value)
+								});
+							}}
+						>
+							<option value="44100">44100</option>
+							<option value="48000">48000</option>
+						</select>
+					</label>
+					<label class="field">
+						<span>Channels</span>
+						<select
+							value={selected.channels || 1}
+							onchange={(e) => {
+								queueDevicePatch({
+									channels: Number(/** @type {HTMLSelectElement} */ (e.currentTarget).value)
+								});
+							}}
+						>
+							<option value="1">Mono (1)</option>
+							<option value="2">Stereo (2)</option>
+						</select>
+					</label>
+				{/if}
 
 				<label class="field">
 					<span>Delay <em>{selected.delay_ms} ms</em></span>

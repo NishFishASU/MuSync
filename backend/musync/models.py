@@ -14,11 +14,23 @@ class TransportState(str, Enum):
     PAUSED = "paused"
 
 
+class DeviceKind(str, Enum):
+    """Output sink kinds. Bluetooth A2DP (≤6) or SPP TCP network listen."""
+
+    BLUETOOTH = "bluetooth"
+    NETWORK_SPP = "network_spp"
+
+
+MAX_BT_SINKS = 6
+MAX_SPP_SINKS = 4
+
+
 class Device(BaseModel):
-    """One Bluetooth A2DP sink (one BT600 adapter → one speaker)."""
+    """One output sink: BT A2DP speaker or SPP TCP network listen."""
 
     id: str
     name: str
+    kind: DeviceKind = DeviceKind.BLUETOOTH
     mac: str = ""
     hci: str = ""
     connected: bool = False
@@ -28,6 +40,11 @@ class Device(BaseModel):
     enabled: bool = True
     # Optional WirePlumber/PipeWire node id or node.name override after connect.
     pw_node: str = ""
+    # Simple Protocol Player TCP listen (kind=network_spp).
+    listen_host: str = "0.0.0.0"
+    listen_port: int = Field(default=1234, ge=1, le=65535)
+    sample_rate: int = Field(default=48000, ge=8000, le=192000)
+    channels: int = Field(default=1, ge=1, le=2)
 
     @field_validator("volume")
     @classmethod
@@ -43,6 +60,11 @@ class DevicePatch(BaseModel):
     name: Optional[str] = None
     pw_node: Optional[str] = None
     connected: Optional[bool] = None
+    kind: Optional[DeviceKind] = None
+    listen_host: Optional[str] = None
+    listen_port: Optional[int] = Field(default=None, ge=1, le=65535)
+    sample_rate: Optional[int] = Field(default=None, ge=8000, le=192000)
+    channels: Optional[int] = Field(default=None, ge=1, le=2)
 
     @field_validator("volume")
     @classmethod

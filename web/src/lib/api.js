@@ -9,10 +9,13 @@
 /** @typedef {'bt_a2dp' | 'usb' | 'network'} CapturePath */
 /** @typedef {'phone' | 'pc' | 'other'} HostKind */
 
+/** @typedef {'bluetooth' | 'network_spp'} DeviceKind */
+
 /**
  * @typedef {Object} Device
  * @property {string} id
  * @property {string} name
+ * @property {DeviceKind} [kind]
  * @property {string} [mac]
  * @property {string} [hci]
  * @property {boolean} connected
@@ -20,6 +23,10 @@
  * @property {number} volume
  * @property {boolean} mute
  * @property {boolean} enabled
+ * @property {string} [listen_host]
+ * @property {number} [listen_port]
+ * @property {number} [sample_rate]
+ * @property {number} [channels]
  */
 
 /**
@@ -127,7 +134,7 @@ export function listDevices() {
 
 /**
  * @param {string} id
- * @param {Partial<Pick<Device, 'delay_ms' | 'volume' | 'mute' | 'enabled' | 'name'>>} patch
+ * @param {Partial<Pick<Device, 'delay_ms' | 'volume' | 'mute' | 'enabled' | 'name' | 'listen_host' | 'listen_port' | 'sample_rate' | 'channels'>>} patch
  * @returns {Promise<Device>}
  */
 export function patchDevice(id, patch) {

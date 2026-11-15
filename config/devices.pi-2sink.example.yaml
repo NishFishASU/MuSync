@@ -1,10 +1,12 @@
-# Minimal Pi demo profile — start with TWO BT600 ↔ speaker pairs.
+# Minimal Pi demo — TWO BT600 ↔ speaker pairs + optional SPP phone sink.
 # Copy to devices.yaml and replace MACs after pairing:
 #   cp config/devices.pi-2sink.example.yaml config/devices.yaml
 #
-# Scale later by appending sink-3..sink-6 (max 6). Keep ids/mac/hci unique.
+# Scale later by appending sink-3..sink-6 (max 6 BT). Keep ids/mac/hci unique.
+# See docs/spp-network-sink.md for Simple Protocol Player TCP setup.
 version: 1
 max_sinks: 6
+max_spp_sinks: 4
 devices:
   - id: sink-1
     name: Speaker A
@@ -26,3 +28,15 @@ devices:
     mute: false
     enabled: true
     pw_node: ""
+  - id: spp-1
+    name: Phone SPP
+    kind: network_spp
+    connected: true
+    delay_ms: 0
+    volume: 0.9
+    mute: false
+    enabled: true
+    listen_host: "0.0.0.0"
+    listen_port: 1234
+    sample_rate: 48000
+    channels: 1
