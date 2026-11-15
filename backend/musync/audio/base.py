@@ -152,6 +152,20 @@ class AudioBackend(ABC):
         """Unified title/artist/album/cover for the active cue (override in backends)."""
         raise NotImplementedError
 
+    def get_avrcp_status(self):
+        """BT Absolute Volume + transport relay status (soft-fail when unsupported)."""
+        from ..models import AvrcpStatus
+
+        return AvrcpStatus(detail="AVRCP not available on this backend")
+
+    def relay_avrcp_command(self, action: str):
+        """Relay headset play/pause/skip to the active source (soft-fail)."""
+        raise NotImplementedError("AVRCP transport relay not available")
+
+    def inject_avrcp_volume(self, device_id: str, volume: float):
+        """Simulate Absolute Volume → slider sync (mock/tests)."""
+        raise NotImplementedError("AVRCP volume inject not available")
+
     @abstractmethod
     def health(self) -> Health:
         ...

@@ -438,6 +438,35 @@ class ActiveQueuePut(BaseModel):
     id: str
 
 
+class AvrcpStatus(BaseModel):
+    """Best-effort Absolute Volume + headset transport relay status (soft-fail)."""
+
+    supported: bool = False
+    watching: bool = False
+    detail: str = ""
+    last_volume_sync: dict[str, float] = Field(default_factory=dict)
+    last_action: Optional[str] = None
+    last_error: str = ""
+
+
+class AvrcpCommandPut(BaseModel):
+    """Relay a headset (or test) AVRCP transport action to the active source."""
+
+    action: Literal["play", "pause", "stop", "toggle", "next", "previous"]
+
+
+class AvrcpVolumePut(BaseModel):
+    """Simulate Absolute Volume from a headset (mock / tests / unsupported soft path)."""
+
+    device_id: str
+    volume: float = Field(ge=0.0, le=1.0)
+
+    @field_validator("volume")
+    @classmethod
+    def round_volume(cls, v: float) -> float:
+        return round(float(v), 3)
+
+
 class Health(BaseModel):
     ok: bool
     backend: Literal["mock", "pipewire"]
@@ -454,6 +483,7 @@ class Health(BaseModel):
     spotify_ready: bool = False
     apple_ready: bool = False
     youtube_ready: bool = False
+    avrcp_supported: bool = False
 
 
 class StreamingProviderStatus(BaseModel):

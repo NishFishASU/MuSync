@@ -92,6 +92,9 @@ USB/PC capture needs a **USB-A sound card** — Pi 5 USB-C PD is power-only: [do
 | `POST` | `/api/bluetooth/discover/clear` | Clear discovery list except connected remotes |
 | `POST` | `/api/bluetooth/connect` | `{ mac, name?, enable_as_output? }` — pair/connect (+ enable output) |
 | `GET`/`PUT` | `/api/transport` | `{ state, position_ms, source_id?, queue_item_id?, title/artist/album/cover_url? }` |
+| `GET` | `/api/avrcp` | BT Absolute Volume + headset transport relay status (soft-fail if unsupported) |
+| `POST` | `/api/avrcp/command` | Relay `{ action: play\|pause\|stop\|toggle\|next\|previous }` to active source |
+| `POST` | `/api/avrcp/volume` | Simulate Absolute Volume → slider (`{ device_id, volume }`; Pi uses BlueZ poll) |
 | `GET` | `/api/now-playing` | Unified now-playing (title, artist, album, cover) |
 | `GET` | `/api/now-playing/cover` | Embedded local cover bytes |
 | `GET` | `/api/sources` | Catalog: `local` + Spotify/AirPlay hub rows + input hosts |

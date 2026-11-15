@@ -17,6 +17,8 @@ Live phone input (priority): phone pairs as A2DP **source** → ``bluez_input.*`
 → ``module-loopback`` into ``musync_feeder`` → existing sink fan-out.
 
 Volume/mute: ``wpctl set-volume|set-mute <node-id>``.
+AVRCP: Absolute Volume (BlueZ MediaTransport / wpctl) → MuSync sliders;
+headset play/pause/skip → active source (soft-fail if unsupported).
 Delay: PipeWire pulse-compat ``pactl load-module module-loopback latency_msec=N``.
 
 Without Bluetooth hardware this backend still boots: it plans the graph, can
@@ -108,6 +110,7 @@ from ..models import (
     TransportPut,
     TransportState,
 )
+from .avrcp import AvrcpAction, AvrcpBridge, parse_action, relay_action_to_session
 from .base import AudioBackend
 from .input_registry import CAPTURE_NOTES, STUB_CAPTURE_NOTES, InputRegistry
 from .pw_tools import (
@@ -237,6 +240,12 @@ class PipeWireBackend(AudioBackend):
             on_feeder_stop=self._stop_player_process,
             on_feeder_start=self._start_player_process,
         )
+        # BT AVRCP Absolute Volume → sliders; headset buttons → active source.
+        # Soft-fail when BlueZ/busctl/Absolute Volume unavailable (API stays up).
+        self._avrcp = AvrcpBridge(
+            on_volume=self._on_avrcp_volume,
+            on_action=self._on_avrcp_action,
+        )
 
         # Refresh map / plan once at startup (no-op / dry-run without hardware).
         # Purge orphan MuSync_Feeder null-sinks from prior soft-load restarts.
@@ -255,6 +264,13 @@ class PipeWireBackend(AudioBackend):
             self._refresh_input_host_links()
         except Exception as exc:  # noqa: BLE001 — never block API boot
             log.warning("Startup graph plan failed: %s", exc)
+
+        try:
+            self._sync_avrcp_targets()
+            if not self._env_dry_run():
+                self._avrcp.start_watcher()
+        except Exception as exc:  # noqa: BLE001
+            log.debug("AVRCP watcher soft-fail at boot: %s", exc)
 
     def _persist(self) -> None:
         try:
@@ -711,7 +727,90 @@ class PipeWireBackend(AudioBackend):
                 self._env_dry_run(),
             )
             return
+        # Guard Absolute Volume echo so headset→slider sync does not fight UI.
+        try:
+            self._avrcp.note_ui_volume(device.id, device.volume)
+        except Exception as exc:  # noqa: BLE001
+            log.debug("AVRCP echo guard: %s", exc)
         self._exec_soft([wpctl, "set-volume", node, f"{device.volume:.3f}"])
+
+    def _sync_avrcp_targets(self) -> None:
+        """Point the AVRCP bridge at connected BT sinks (MAC + PipeWire node)."""
+        macs: dict[str, str] = {}
+        nodes: dict[str, str] = {}
+        for d in self._devices.values():
+            if d.kind != DeviceKind.BLUETOOTH:
+                continue
+            if not d.mac or d.mac.upper().startswith("AA:BB:CC:DD:EE:"):
+                continue
+            if "REPLACE" in d.mac.upper():
+                continue
+            macs[d.id] = d.mac
+            node = self._pw_node_ids.get(d.id) or d.pw_node
+            if node:
+                nodes[d.id] = node
+        self._avrcp.update_targets(mac_by_device=macs, node_by_device=nodes)
+
+    def _on_avrcp_volume(self, device_id: str, volume: float) -> None:
+        """Headset Absolute Volume → MuSync slider (do not re-apply wpctl)."""
+        with self._lock:
+            device = self._devices.get(device_id)
+            if device is None or device.kind != DeviceKind.BLUETOOTH:
+                return
+            vol = clamp_volume(volume)
+            if abs(device.volume - vol) < 0.001:
+                return
+            updated = device.model_copy(update={"volume": vol})
+            self._devices[device_id] = updated
+            try:
+                self._persist()
+            except Exception as exc:  # noqa: BLE001
+                log.debug("AVRCP volume persist: %s", exc)
+            log.info("AVRCP Absolute Volume → %s slider %.0f%%", device_id, vol * 100)
+
+    def _on_avrcp_action(self, action: AvrcpAction) -> None:
+        """Headset play/pause/skip → active hub source (Spotify/YouTube/local/…)."""
+        try:
+            relay_action_to_session(self._session, action)
+            log.info("AVRCP %s → active source", action.value)
+        except ValueError as exc:
+            # Soft-fail: unavailable cue / empty queue — do not crash watcher.
+            log.info("AVRCP %s soft-fail: %s", action.value, exc)
+        except Exception as exc:  # noqa: BLE001
+            log.debug("AVRCP action %s: %s", action, exc)
+
+    def _poll_avrcp_volumes(self) -> None:
+        try:
+            self._sync_avrcp_targets()
+            self._avrcp.poll_volumes()
+        except Exception as exc:  # noqa: BLE001
+            log.debug("AVRCP volume poll soft-fail: %s", exc)
+
+    def get_avrcp_status(self):
+        from ..models import AvrcpStatus
+
+        snap = self._avrcp.status
+        return AvrcpStatus(
+            supported=snap.supported,
+            watching=snap.watching,
+            detail=snap.detail,
+            last_volume_sync=dict(snap.last_volume_sync),
+            last_action=snap.last_action,
+            last_error=snap.last_error,
+        )
+
+    def relay_avrcp_command(self, action: str):
+        parsed = parse_action(action)
+        # Status only — apply once below (toggle/next must not fire twice).
+        self._avrcp.inject_action(parsed, deliver=False)
+        return relay_action_to_session(self._session, parsed)
+
+    def inject_avrcp_volume(self, device_id: str, volume: float):
+        with self._lock:
+            if device_id not in self._devices:
+                raise KeyError(f"Unknown device: {device_id}")
+        self._avrcp.inject_volume(device_id, clamp_volume(volume))
+        return self.get_device(device_id)
 
     def _apply_mute(self, device: Device) -> None:
         """Apply per-sink mute on this BT/PipeWire output (not global)."""
@@ -1901,6 +2000,11 @@ class PipeWireBackend(AudioBackend):
                 self._refresh_live_sink_state(reconnect=True)
             except Exception as exc:  # noqa: BLE001 — never fail listing
                 log.debug("live sink refresh: %s", exc)
+            # Headset Absolute Volume → sliders (throttled; soft-fail).
+            try:
+                self._poll_avrcp_volumes()
+            except Exception as exc:  # noqa: BLE001
+                log.debug("AVRCP list_devices poll: %s", exc)
             return [d.model_copy(deep=True) for d in self._devices.values()]
 
     def get_device(self, device_id: str) -> Device:
@@ -2520,6 +2624,11 @@ class PipeWireBackend(AudioBackend):
                 hint += f"; {soft_warn}"
             if self._bt_adapters_detail:
                 hint += f"; {self._bt_adapters_detail}"
+            avrcp = self._avrcp.status
+            if avrcp.supported:
+                hint += f"; AVRCP={avrcp.detail or 'ok'}"
+            elif avrcp.detail:
+                hint += f"; AVRCP soft-fail ({avrcp.detail[:80]})"
             return Health(
                 ok=up or dry or all_ready,
                 backend="pipewire",
@@ -2535,6 +2644,7 @@ class PipeWireBackend(AudioBackend):
                 spotify_ready=stream.spotify.authenticated,
                 apple_ready=stream.airplay.configured,
                 youtube_ready=stream.youtube.configured,
+                avrcp_supported=bool(avrcp.supported),
                 detail=(
                     f"{detail}; mapped={mapped}/{len(devices)}; "
                     f"planned_links={links}; dry_run={dry}; "
